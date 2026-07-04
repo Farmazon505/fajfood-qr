@@ -1,5 +1,16 @@
 export type CallStatus = "new" | "accepted" | "done" | "cancelled";
 
+export type TableTentConfig = {
+  callToAction: string;
+  footerText: string;
+  bgImage: string;
+  bgOpacity: number;
+  textColor: string;
+  qrColor: string;
+  qrBgColor: string;
+  qrScale: number;
+};
+
 export type VenueSettings = {
   name: string;
   tagline: string;
@@ -17,6 +28,7 @@ export type VenueSettings = {
   accentColor: string;
   secondaryColor: string;
   backgroundColor: string;
+  tableTentConfig?: TableTentConfig;
 };
 
 export type Offer = {

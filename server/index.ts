@@ -265,6 +265,21 @@ app.post("/api/admin/logo", logoUploadParser, async (request, response) => {
   response.json(settings);
 });
 
+app.post("/api/admin/upload", logoUploadParser, async (request, response) => {
+  const contentType = String(request.headers["content-type"] || "").split(";")[0].toLowerCase();
+  const extension = logoContentTypes[contentType];
+  if (!extension || !Buffer.isBuffer(request.body) || request.body.length < 100) {
+    response.status(400).json({ error: "Загрузите PNG, JPG или WEBP файл до 10 МБ" });
+    return;
+  }
+
+  await mkdir(uploadsDir, { recursive: true });
+  const filename = `file-${Date.now()}-${randomUUID()}.${extension}`;
+  await writeFile(path.join(uploadsDir, filename), request.body);
+
+  response.json({ url: `/uploads/${filename}` });
+});
+
 app.get("/api/admin/overview", (_request, response) => {
   const data = store.snapshot();
   response.json({

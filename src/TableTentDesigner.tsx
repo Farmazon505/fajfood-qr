@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import QRCodeStyling from 'qr-code-styling';
 import { Printer, Upload, Image as ImageIcon, SlidersHorizontal, Type, LayoutTemplate } from 'lucide-react';
-import type { Table, VenueSettings } from '../server/types';
+import type { DiningTable as Table, VenueSettings, TableTentConfig } from '../server/types';
 
 interface Props {
   tables: Table[];
@@ -70,62 +70,85 @@ function FancyQRCode({ url, logoUrl, qrColor, qrBgColor }: { url: string, logoUr
 
 export function TableTentDesigner({ tables, settings, publicUrl }: Props) {
   const [selectedTable, setSelectedTable] = useState<Table | null>(tables[0] || null);
-  const [callToAction, setCallToAction] = useState('Отсканируй, чтобы сделать заказ или вызвать официанта');
-  const [footerText, setFooterText] = useState('Для меню, вызова официанта и чаевых');
-  const [bgImage, setBgImage] = useState<string>('');
-  const [bgOpacity, setBgOpacity] = useState(1);
-  const [textColor, setTextColor] = useState('#ffffff');
-  const [qrColor, setQrColor] = useState('#000000');
-  const [qrBgColor, setQrBgColor] = useState('#ffffff');
-  const [qrScale, setQrScale] = useState(1);
+  
+  const initialConfig: Partial<TableTentConfig> = settings.tableTentConfig || {};
+  const [callToAction, setCallToAction] = useState(initialConfig.callToAction || 'Отсканируй, чтобы сделать заказ или вызвать официанта');
+  const [footerText, setFooterText] = useState(initialConfig.footerText || 'Для меню, вызова официанта и чаевых');
+  const [bgImage, setBgImage] = useState<string>(initialConfig.bgImage || '');
+  const [bgOpacity, setBgOpacity] = useState(initialConfig.bgOpacity ?? 1);
+  const [textColor, setTextColor] = useState(initialConfig.textColor || '#ffffff');
+  const [qrColor, setQrColor] = useState(initialConfig.qrColor || '#000000');
+  const [qrBgColor, setQrBgColor] = useState(initialConfig.qrBgColor || '#ffffff');
+  const [qrScale, setQrScale] = useState(initialConfig.qrScale ?? 1);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load saved preset from localStorage if available
-  useEffect(() => {
-    const saved = localStorage.getItem('tableTentPreset');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (parsed.callToAction) setCallToAction(parsed.callToAction);
-        if (parsed.footerText) setFooterText(parsed.footerText);
-        if (parsed.bgOpacity !== undefined) setBgOpacity(parsed.bgOpacity);
-        if (parsed.textColor) setTextColor(parsed.textColor);
-        if (parsed.qrColor) setQrColor(parsed.qrColor);
-        if (parsed.qrBgColor) setQrBgColor(parsed.qrBgColor);
-        if (parsed.qrScale !== undefined) setQrScale(parsed.qrScale);
-      } catch (e) {
-        console.error('Failed to parse preset', e);
-      }
-    }
-  }, []);
-
-  // Save preset to localStorage
-  useEffect(() => {
-    try {
-      localStorage.setItem('tableTentPreset', JSON.stringify({
-        callToAction,
-        footerText,
-        bgOpacity,
-        textColor,
-        qrColor,
-        qrBgColor,
-        qrScale
-      }));
-    } catch (e) {
-      console.error('Failed to save preset', e);
-    }
-  }, [callToAction, bgOpacity, textColor]);
-
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const objectUrl = URL.createObjectURL(file);
-      setBgImage(objectUrl);
+    if (!file) return;
+
+    setIsUploading(true);
+    try {
+      const response = await fetch("/api/admin/upload", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${localStorage.getItem("admin_token")}`,
+          "Content-Type": file.type
+        },
+        body: file
+      });
+      
+      if (!response.ok) {
+        throw new Error("Failed to upload image");
+      }
+      
+      const data = await response.json();
+      setBgImage(data.url);
+    } catch (error) {
+      alert("Ошибка при загрузке изображения");
+      console.error(error);
+    } finally {
+      setIsUploading(false);
+      if (e.target) e.target.value = '';
     }
-    // Clear the input so the same file can be uploaded again if needed
-    if (e.target) {
-      e.target.value = '';
+  };
+
+  const handleSaveTemplate = async () => {
+    setIsSaving(true);
+    try {
+      const updatedSettings = {
+        ...settings,
+        tableTentConfig: {
+          callToAction,
+          footerText,
+          bgImage,
+          bgOpacity,
+          textColor,
+          qrColor,
+          qrBgColor,
+          qrScale
+        }
+      };
+
+      const response = await fetch("/api/admin/settings", {
+        method: "PUT",
+        headers: {
+          "Authorization": `Bearer ${localStorage.getItem("admin_token")}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(updatedSettings)
+      });
+      
+      if (!response.ok) throw new Error("Failed to save settings");
+      
+      alert("Шаблон успешно сохранен!");
+    } catch (error) {
+      alert("Ошибка при сохранении шаблона");
+      console.error(error);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -303,13 +326,24 @@ export function TableTentDesigner({ tables, settings, publicUrl }: Props) {
               </div>
             </div>
 
-            <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
-              <button className="primary-button" onClick={handlePrintAll} style={{ flex: 1 }}>
-                <Printer size={20} /> Скачать для ВСЕХ столов (PDF)
+            <div style={{ display: 'flex', gap: '10px', marginTop: '10px', flexDirection: 'column' }}>
+              <button 
+                className="primary-button" 
+                onClick={handleSaveTemplate}
+                disabled={isSaving || isUploading}
+                style={{ backgroundColor: 'var(--brand-accent)' }}
+              >
+                {isSaving ? "Сохранение..." : isUploading ? "Загрузка изображения..." : "💾 Сохранить шаблон (Фон и настройки)"}
               </button>
-              <button className="secondary-button" onClick={handlePrint} style={{ flex: 1 }}>
-                <Printer size={20} /> Печать одного
-              </button>
+              
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button className="primary-button" onClick={handlePrintAll} style={{ flex: 1 }}>
+                  <Printer size={20} /> Скачать для ВСЕХ столов (PDF)
+                </button>
+                <button className="secondary-button" onClick={handlePrint} style={{ flex: 1 }}>
+                  <Printer size={20} /> Печать одного
+                </button>
+              </div>
             </div>
             <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px' }}>
               Для скачивания нажмите кнопку, в появившемся окне выберите принтер <strong>"Сохранить как PDF"</strong>, формат <strong>A5</strong> (масштаб 100%), без колонтитулов.

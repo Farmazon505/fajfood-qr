@@ -303,7 +303,7 @@ function GuestPage() {
   }
 
   const { settings, offers, actions, table } = data;
-  const heroBackground = settings.logoUrl || settings.heroImage;
+  const heroBackground = settings.heroImage;
 
   return (
     <main className="guest-shell" style={brandStyle(settings)}>
@@ -917,7 +917,7 @@ function AdminPage() {
           <TableTentDesigner
             tables={data.tables}
             settings={data.settings}
-            publicUrl={publicUrl}
+            publicUrl={data.publicBaseUrl || window.location.origin}
           />
         )}
 
@@ -1603,7 +1603,8 @@ function Field({
   onChange,
   textarea,
   full,
-  short
+  short,
+  placeholder
 }: {
   label: string;
   value: string;
@@ -1611,14 +1612,15 @@ function Field({
   textarea?: boolean;
   full?: boolean;
   short?: boolean;
+  placeholder?: string;
 }) {
   return (
     <label className={`field ${full ? "field-full" : ""} ${short ? "field-short" : ""}`}>
       <span>{label}</span>
       {textarea ? (
-        <textarea rows={4} value={value} onChange={(event) => onChange(event.target.value)} />
+        <textarea rows={4} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
       ) : (
-        <input value={value} onChange={(event) => onChange(event.target.value)} />
+        <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
       )}
     </label>
   );
