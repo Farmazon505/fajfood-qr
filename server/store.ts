@@ -35,7 +35,7 @@ const defaultSettings: VenueSettings = {
     "https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=1600&q=80",
   reviewUrl: "",
   loyaltyTitle: "Карта гостя",
-  loyaltyText: "Оставьте телефон, чтобы получать персональные предложения и бонусы.",
+  loyaltyText: "Зарегистрируйтесь один раз, чтобы копить и списывать бонусы в приложении и на кассе.",
   primaryColor: "#8b163f",
   accentColor: "#d6a45c",
   secondaryColor: "#f2c2c4",
@@ -87,8 +87,8 @@ const defaultOffers: Offer[] = [
   },
   {
     id: "offer-loyalty",
-    title: "5% за регистрацию",
-    description: "Заполните короткую анкету и получите стартовую скидку гостя.",
+    title: "500 ₽ за регистрацию",
+    description: "Оформите карту гостя и получите приветственные бонусы на счет.",
     badge: "Бонус",
     active: true
   }
@@ -270,6 +270,33 @@ export class Store {
       ...call,
       acceptedByWaiterId: call.acceptedByWaiterId ?? null
     }));
+    this.data.loyaltyLeads = (this.data.loyaltyLeads ?? []).map((lead) => {
+      const legacyLead = lead as LoyaltyLead & { consent?: boolean };
+      return {
+        ...lead,
+        personalDataConsent: lead.personalDataConsent ?? legacyLead.consent ?? false,
+        personalDataConsentVersion: lead.personalDataConsentVersion ?? "legacy",
+        personalDataConsentHash: lead.personalDataConsentHash ?? "",
+        personalDataConsentAcceptedAt: lead.personalDataConsentAcceptedAt ?? lead.createdAt,
+        marketingConsent: lead.marketingConsent ?? legacyLead.consent ?? false,
+        consentIpAddress: lead.consentIpAddress ?? "",
+        consentUserAgent: lead.consentUserAgent ?? "",
+        accessTokenHash: lead.accessTokenHash ?? "",
+        verificationId: lead.verificationId ?? null,
+        verificationExpiresAt: lead.verificationExpiresAt ?? null,
+        phoneVerificationChannel: lead.phoneVerificationChannel ?? null,
+        phoneVerifiedAt: lead.phoneVerifiedAt ?? null,
+        crmUserId: lead.crmUserId ?? null,
+        iikoCustomerId: lead.iikoCustomerId ?? null,
+        cardNumber: lead.cardNumber ?? null,
+        bonusBalance: Number.isFinite(lead.bonusBalance) ? lead.bonusBalance : 0,
+        balanceUpdatedAt: lead.balanceUpdatedAt ?? null,
+        welcomeBonusAmount: Number.isFinite(lead.welcomeBonusAmount) ? lead.welcomeBonusAmount : 0,
+        welcomeBonusStatus: lead.welcomeBonusStatus ?? "LEGACY",
+        syncError: lead.syncError ?? "",
+        updatedAt: lead.updatedAt ?? lead.createdAt
+      };
+    });
   }
 
   async replaceOffers(offers: Offer[]) {
@@ -368,13 +395,35 @@ export class Store {
     return structuredClone(call);
   }
 
-  async addLoyaltyLead(input: Omit<LoyaltyLead, "id" | "createdAt">) {
+  findLoyaltyLeadByPhone(phone: string) {
+    return this.data.loyaltyLeads.find((lead) => lead.phone === phone) ?? null;
+  }
+
+  findLoyaltyLeadByTokenHash(accessTokenHash: string) {
+    return this.data.loyaltyLeads.find((lead) => lead.accessTokenHash === accessTokenHash) ?? null;
+  }
+
+  findLoyaltyLeadByVerificationId(verificationId: string) {
+    return this.data.loyaltyLeads.find((lead) => lead.verificationId === verificationId) ?? null;
+  }
+
+  async addLoyaltyLead(input: Omit<LoyaltyLead, "id" | "createdAt" | "updatedAt">) {
+    const timestamp = now();
     const lead: LoyaltyLead = {
       id: randomUUID(),
-      createdAt: now(),
+      createdAt: timestamp,
+      updatedAt: timestamp,
       ...input
     };
     this.data.loyaltyLeads.unshift(lead);
+    await this.persist();
+    return structuredClone(lead);
+  }
+
+  async updateLoyaltyLead(id: string, patch: Partial<Omit<LoyaltyLead, "id" | "createdAt">>) {
+    const lead = this.data.loyaltyLeads.find((item) => item.id === id);
+    if (!lead) return null;
+    Object.assign(lead, patch, { updatedAt: now() });
     await this.persist();
     return structuredClone(lead);
   }

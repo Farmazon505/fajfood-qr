@@ -3,7 +3,7 @@ import compression from "compression";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,17 @@ import { config, publicBaseUrl } from "./config";
 import { Store } from "./store";
 import { TelegramService } from "./telegram";
 import type { CallStatus } from "./types";
+import { crmLoyalty } from "./crm-loyalty";
+import {
+  MARKETING_CONSENT_PATH,
+  MARKETING_CONSENT_TEXT,
+  PERSONAL_DATA_CONSENT_HASH,
+  PERSONAL_DATA_CONSENT_PATH,
+  PERSONAL_DATA_CONSENT_TEXT,
+  PERSONAL_DATA_CONSENT_VERSION,
+  PRIVACY_POLICY_URL,
+  renderLegalDocument,
+} from "./legal";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const uploadsDir = path.resolve(config.APP_DATA_DIR, "uploads");
@@ -56,6 +67,13 @@ const adminLoginLimiter = rateLimit({
   legacyHeaders: false
 });
 
+const loyaltyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
 const publicCallSchema = z.object({
   tableSlug: z.string().min(1),
   actionId: z.string().min(1),
@@ -65,11 +83,53 @@ const publicCallSchema = z.object({
 
 const loyaltySchema = z.object({
   tableSlug: z.string().optional().default(""),
-  name: z.string().min(2).max(80),
-  phone: z.string().min(5).max(40),
-  birthday: z.string().max(20).optional().default(""),
-  consent: z.literal(true)
+  name: z.string().trim().min(2).max(80),
+  phone: z.string().trim().min(10).max(30),
+  birthday: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().or(z.literal("")).default(""),
+  personalDataConsent: z.literal(true),
+  marketingConsent: z.boolean().default(false)
 });
+
+const normalizePhone = (value: string) => {
+  const digits = value.replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("8")) return `+7${digits.slice(1)}`;
+  if (digits.length === 11 && digits.startsWith("7")) return `+${digits}`;
+  if (digits.length === 10) return `+7${digits}`;
+  return null;
+};
+
+const tokenHash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+
+const loyaltyRegistrationAllowed = (phone: string) => {
+  const allowedPhones = config.LOYALTY_REGISTRATION_ALLOWLIST
+    .split(",")
+    .map((item) => normalizePhone(item.trim()))
+    .filter((item): item is string => Boolean(item));
+  return allowedPhones.length === 0 || allowedPhones.includes(phone);
+};
+
+const bearerToken = (request: express.Request) => {
+  const header = request.headers.authorization || "";
+  return header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+};
+
+const cachedLoyaltyProfile = (lead: ReturnType<Store["findLoyaltyLeadByTokenHash"]>) =>
+  lead
+    ? {
+        userId: lead.crmUserId || "",
+        name: lead.name,
+        phoneMasked: `${lead.phone.slice(0, 2)} *** ***-${lead.phone.slice(-4, -2)}-${lead.phone.slice(-2)}`,
+        iikoCustomerId: lead.iikoCustomerId,
+        cardNumber: lead.cardNumber,
+        bonusBalance: lead.bonusBalance,
+        balanceUpdatedAt: lead.balanceUpdatedAt,
+        welcomeBonus: {
+          amount: lead.welcomeBonusAmount,
+          status: lead.welcomeBonusStatus,
+          granted: lead.welcomeBonusStatus === "GRANTED",
+        },
+      }
+    : null;
 
 const feedbackSchema = z.object({
   tableSlug: z.string().optional().default(""),
@@ -116,7 +176,13 @@ app.get("/api/public/bootstrap", (request, response) => {
     offers: snapshot.offers,
     actions: snapshot.actions,
     table,
-    publicBaseUrl: publicBaseUrl()
+    publicBaseUrl: publicBaseUrl(),
+    legal: {
+      personalDataConsentVersion: PERSONAL_DATA_CONSENT_VERSION,
+      personalDataConsentUrl: `${publicBaseUrl()}${PERSONAL_DATA_CONSENT_PATH}`,
+      marketingConsentUrl: `${publicBaseUrl()}${MARKETING_CONSENT_PATH}`,
+      privacyPolicyUrl: PRIVACY_POLICY_URL,
+    }
   });
 });
 
@@ -178,23 +244,201 @@ app.get("/api/public/tips", publicLimiter, (request, response) => {
   });
 });
 
-app.post("/api/public/loyalty", publicLimiter, async (request, response) => {
+app.post("/api/public/loyalty", publicLimiter, loyaltyLimiter, async (request, response) => {
   const parsed = loyaltySchema.safeParse(request.body);
   if (!parsed.success) {
-    response.status(400).json({ error: "Проверьте имя и телефон" });
+    response.status(400).json({ error: "Проверьте имя, телефон и согласие на обработку данных" });
+    return;
+  }
+
+  const phone = normalizePhone(parsed.data.phone);
+  if (!phone) {
+    response.status(400).json({ error: "Введите российский номер телефона из 10 или 11 цифр" });
+    return;
+  }
+  if (!loyaltyRegistrationAllowed(phone)) {
+    response.status(403).json({
+      error: "Регистрация карты пока доступна только участникам тестирования. Скоро откроем ее для всех гостей."
+    });
     return;
   }
 
   const table = parsed.data.tableSlug ? store.findTableBySlug(parsed.data.tableSlug) : null;
-  const lead = await store.addLoyaltyLead({
-    name: parsed.data.name,
-    phone: parsed.data.phone,
+  const existingLead = store.findLoyaltyLeadByPhone(phone);
+  if (existingLead?.crmUserId && existingLead.accessTokenHash) {
+    response.status(409).json({
+      error: "Этот номер уже зарегистрирован. Для переноса карты на другой телефон обратитесь к администратору."
+    });
+    return;
+  }
+
+  const acceptedAt = new Date().toISOString();
+  const accessToken = randomBytes(32).toString("base64url");
+  const commonLeadData = {
+    name: parsed.data.name.trim(),
+    phone,
     birthday: parsed.data.birthday,
     tableId: table?.id ?? null,
-    consent: parsed.data.consent
-  });
+    personalDataConsent: true,
+    personalDataConsentVersion: PERSONAL_DATA_CONSENT_VERSION,
+    personalDataConsentHash: PERSONAL_DATA_CONSENT_HASH,
+    personalDataConsentAcceptedAt: acceptedAt,
+    marketingConsent: parsed.data.marketingConsent,
+    consentIpAddress: request.ip || "",
+    consentUserAgent: String(request.headers["user-agent"] || "").slice(0, 1000),
+    accessTokenHash: tokenHash(accessToken),
+    verificationId: null,
+    verificationExpiresAt: null,
+    phoneVerificationChannel: null,
+    phoneVerifiedAt: null,
+    crmUserId: null,
+    iikoCustomerId: null,
+    cardNumber: null,
+    bonusBalance: 0,
+    balanceUpdatedAt: null,
+    welcomeBonusAmount: 500,
+    welcomeBonusStatus: "PENDING",
+    syncError: ""
+  };
 
-  response.status(201).json({ ok: true, leadId: lead.id });
+  const lead = existingLead
+    ? await store.updateLoyaltyLead(existingLead.id, commonLeadData)
+    : await store.addLoyaltyLead(commonLeadData);
+  if (!lead) {
+    response.status(500).json({ error: "Не удалось сохранить регистрацию" });
+    return;
+  }
+
+  try {
+    const verification = await crmLoyalty.startVerification(phone);
+
+    await store.updateLoyaltyLead(lead.id, {
+      verificationId: verification.verificationId,
+      verificationExpiresAt: verification.expiresAt,
+      syncError: ""
+    });
+    response.status(202).json({
+      ok: true,
+      verification: {
+        id: verification.verificationId,
+        accessToken,
+        expiresAt: verification.expiresAt,
+        channels: verification.channels,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "CRM временно недоступна";
+    await store.updateLoyaltyLead(lead.id, { syncError: message, welcomeBonusStatus: "PENDING" });
+    response.status(502).json({ error: message });
+  }
+});
+
+app.get("/api/public/loyalty/verification/:verificationId", publicLimiter, async (request, response) => {
+  const accessToken = bearerToken(request);
+  const verificationId = Array.isArray(request.params.verificationId)
+    ? request.params.verificationId[0]
+    : request.params.verificationId;
+  const lead = store.findLoyaltyLeadByVerificationId(verificationId);
+  if (!lead || !accessToken || lead.accessTokenHash !== tokenHash(accessToken)) {
+    response.status(401).json({ error: "Проверка номера не найдена" });
+    return;
+  }
+
+  try {
+    const verification = await crmLoyalty.getVerification(verificationId);
+    if (["PENDING", "CONTACT_REQUESTED", "CONSUMING"].includes(verification.status)) {
+      response.status(202).json({ ok: true, verification });
+      return;
+    }
+    if (["EXPIRED", "SUPERSEDED"].includes(verification.status)) {
+      response.status(410).json({ error: "Время подтверждения истекло. Заполните анкету еще раз." });
+      return;
+    }
+    if (!["VERIFIED", "CONSUMED"].includes(verification.status)) {
+      response.status(409).json({ error: "Номер еще не подтвержден" });
+      return;
+    }
+
+    const table = lead.tableId ? store.findTableById(lead.tableId) : null;
+    const profile = await crmLoyalty.register({
+      sourceRegistrationId: lead.id,
+      verificationId: verification.id,
+      name: lead.name,
+      phone: lead.phone,
+      birthday: lead.birthday || undefined,
+      tableSlug: table?.slug,
+      personalDataConsent: {
+        accepted: true,
+        acceptedAt: lead.personalDataConsentAcceptedAt,
+        documentVersion: lead.personalDataConsentVersion,
+        documentUrl: `${publicBaseUrl()}${PERSONAL_DATA_CONSENT_PATH}`,
+        documentHash: lead.personalDataConsentHash,
+      },
+      marketingConsent: lead.marketingConsent,
+      ipAddress: lead.consentIpAddress,
+      userAgent: lead.consentUserAgent,
+    });
+
+    await store.updateLoyaltyLead(lead.id, {
+      crmUserId: profile.userId,
+      iikoCustomerId: profile.iikoCustomerId,
+      cardNumber: profile.cardNumber,
+      bonusBalance: profile.bonusBalance,
+      balanceUpdatedAt: profile.balanceUpdatedAt,
+      welcomeBonusAmount: profile.welcomeBonus.amount,
+      welcomeBonusStatus: profile.welcomeBonus.status,
+      phoneVerificationChannel: verification.channel,
+      phoneVerifiedAt: verification.verifiedAt,
+      syncError: "",
+    });
+    response.status(201).json({ ok: true, accessToken, profile });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "CRM временно недоступна";
+    await store.updateLoyaltyLead(lead.id, { syncError: message });
+    response.status(502).json({ error: message });
+  }
+});
+
+app.get("/api/public/loyalty/profile", publicLimiter, async (request, response) => {
+  const token = bearerToken(request);
+  const lead = token ? store.findLoyaltyLeadByTokenHash(tokenHash(token)) : null;
+  if (!lead) {
+    response.status(401).json({ error: "Карта гостя не найдена на этом устройстве" });
+    return;
+  }
+  if (!lead.crmUserId) {
+    response.status(409).json({ error: lead.syncError || "Регистрация еще синхронизируется с CRM" });
+    return;
+  }
+
+  try {
+    const profile = await crmLoyalty.getProfile(lead.crmUserId);
+    await store.updateLoyaltyLead(lead.id, {
+      iikoCustomerId: profile.iikoCustomerId,
+      cardNumber: profile.cardNumber,
+      bonusBalance: profile.bonusBalance,
+      balanceUpdatedAt: profile.balanceUpdatedAt,
+      welcomeBonusAmount: profile.welcomeBonus.amount,
+      welcomeBonusStatus: profile.welcomeBonus.status,
+      syncError: ""
+    });
+    response.json({ ok: true, profile, stale: false });
+  } catch (error) {
+    response.json({
+      ok: true,
+      profile: cachedLoyaltyProfile(lead),
+      stale: true,
+      warning: error instanceof Error ? error.message : "Не удалось обновить баланс"
+    });
+  }
+});
+
+app.get(PERSONAL_DATA_CONSENT_PATH, (_request, response) => {
+  response.type("html").send(renderLegalDocument("Согласие на обработку персональных данных", PERSONAL_DATA_CONSENT_TEXT));
+});
+
+app.get(MARKETING_CONSENT_PATH, (_request, response) => {
+  response.type("html").send(renderLegalDocument("Согласие на получение сообщений", MARKETING_CONSENT_TEXT));
 });
 
 app.post("/api/public/feedback", publicLimiter, async (request, response) => {

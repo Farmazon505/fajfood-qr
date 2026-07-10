@@ -21,8 +21,10 @@ import {
   Printer,
   QrCode,
   ReceiptText,
+  RefreshCw,
   Save,
   Settings,
+  ShieldCheck,
   Utensils,
   Star,
   AlertTriangle,
@@ -54,7 +56,40 @@ type Bootstrap = {
   actions: CallAction[];
   table: DiningTable | null;
   publicBaseUrl: string;
+  legal: {
+    personalDataConsentVersion: string;
+    personalDataConsentUrl: string;
+    marketingConsentUrl: string;
+    privacyPolicyUrl: string;
+  };
 };
+
+type LoyaltyProfile = {
+  userId: string;
+  name: string;
+  phoneMasked: string;
+  iikoCustomerId: string | null;
+  cardNumber: string | null;
+  bonusBalance: number;
+  balanceUpdatedAt: string | null;
+  welcomeBonus: {
+    amount: number;
+    status: string;
+    granted: boolean;
+  };
+};
+
+type LoyaltyVerification = {
+  id: string;
+  accessToken: string;
+  expiresAt: string;
+  channels: {
+    telegram: { url: string } | null;
+    max: { url: string } | null;
+  };
+};
+
+const LOYALTY_TOKEN_KEY = "qrnastol.loyaltyToken";
 
 type TipTarget = {
   enabled: boolean;
@@ -140,8 +175,18 @@ function GuestPage() {
   const [tipNotice, setTipNotice] = useState("");
   const [sentAction, setSentAction] = useState<SentAction>(null);
   const [view, setView] = useState<GuestView>(() => guestViewFromPath(window.location.pathname));
-  const [loyalty, setLoyalty] = useState({ name: "", phone: "", birthday: "", consent: true });
-  const [loyaltyDone, setLoyaltyDone] = useState(false);
+  const [loyalty, setLoyalty] = useState({
+    name: "",
+    phone: "",
+    birthday: "",
+    personalDataConsent: false,
+    marketingConsent: false
+  });
+  const [loyaltyProfile, setLoyaltyProfile] = useState<LoyaltyProfile | null>(null);
+  const [loyaltyVerification, setLoyaltyVerification] = useState<LoyaltyVerification | null>(null);
+  const [loyaltyBusy, setLoyaltyBusy] = useState(false);
+  const [loyaltyError, setLoyaltyError] = useState("");
+  const [loyaltyStale, setLoyaltyStale] = useState(false);
 
   const [feedbackRating, setFeedbackRating] = useState(0);
   const [hoverRating, setHoverRating] = useState(0);
@@ -176,6 +221,82 @@ function GuestPage() {
     const timeout = window.setTimeout(() => setTipNotice(""), 6000);
     return () => window.clearTimeout(timeout);
   }, [tipNotice]);
+
+  const loadLoyaltyProfile = useCallback(async () => {
+    const token = localStorage.getItem(LOYALTY_TOKEN_KEY);
+    if (!token) return;
+    setLoyaltyBusy(true);
+    setLoyaltyError("");
+    try {
+      const result = await api<{ profile: LoyaltyProfile; stale?: boolean }>("/api/public/loyalty/profile", {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      setLoyaltyProfile(result.profile);
+      setLoyaltyStale(Boolean(result.stale));
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : "Не удалось загрузить карту гостя";
+      setLoyaltyError(message);
+      if (/не найдена на этом устройстве/i.test(message)) localStorage.removeItem(LOYALTY_TOKEN_KEY);
+    } finally {
+      setLoyaltyBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadLoyaltyProfile();
+  }, [loadLoyaltyProfile]);
+
+  useEffect(() => {
+    if (!loyaltyVerification) return undefined;
+
+    let stopped = false;
+    let timeoutId = 0;
+    const schedule = () => {
+      if (!stopped) timeoutId = window.setTimeout(poll, 2500);
+    };
+    const poll = async () => {
+      if (Date.now() >= new Date(loyaltyVerification.expiresAt).getTime()) {
+        setLoyaltyError("Время подтверждения истекло. Заполните анкету еще раз.");
+        setLoyaltyVerification(null);
+        return;
+      }
+
+      try {
+        const response = await fetch(
+          `/api/public/loyalty/verification/${encodeURIComponent(loyaltyVerification.id)}`,
+          { headers: { authorization: `Bearer ${loyaltyVerification.accessToken}` } },
+        );
+        const result = await response.json().catch(() => ({}));
+        if (response.status === 202) {
+          schedule();
+          return;
+        }
+        if (!response.ok) throw new Error(result.error || "Не удалось проверить номер");
+
+        localStorage.setItem(LOYALTY_TOKEN_KEY, loyaltyVerification.accessToken);
+        setLoyaltyProfile(result.profile as LoyaltyProfile);
+        setLoyaltyStale(false);
+        setLoyaltyVerification(null);
+        setLoyaltyError("");
+        setLoyalty({
+          name: "",
+          phone: "",
+          birthday: "",
+          personalDataConsent: false,
+          marketingConsent: false,
+        });
+      } catch (requestError) {
+        setLoyaltyError(requestError instanceof Error ? requestError.message : "Не удалось проверить номер");
+        schedule();
+      }
+    };
+
+    timeoutId = window.setTimeout(poll, 1200);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [loyaltyVerification]);
 
   const navigateGuest = (nextView: GuestView) => {
     const suffix = nextView === "call" ? "" : `/${nextView}`;
@@ -234,15 +355,18 @@ function GuestPage() {
     event.preventDefault();
     if (!data?.table) return;
 
+    setLoyaltyBusy(true);
+    setLoyaltyError("");
     try {
-      await api("/api/public/loyalty", {
+      const result = await api<{ verification: LoyaltyVerification }>("/api/public/loyalty", {
         method: "POST",
         body: JSON.stringify({ ...loyalty, tableSlug: data.table.slug })
       });
-      setLoyaltyDone(true);
-      setLoyalty({ name: "", phone: "", birthday: "", consent: true });
+      setLoyaltyVerification(result.verification);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Не удалось отправить анкету");
+      setLoyaltyError(requestError instanceof Error ? requestError.message : "Не удалось зарегистрировать карту");
+    } finally {
+      setLoyaltyBusy(false);
     }
   };
 
@@ -303,7 +427,7 @@ function GuestPage() {
   }
 
   const { settings, offers, actions, table } = data;
-  const heroBackground = settings.heroImage;
+  const heroBackground = settings.logoUrl || settings.heroImage;
 
   return (
     <main className="guest-shell" style={brandStyle(settings)}>
@@ -497,44 +621,146 @@ function GuestPage() {
             </div>
             <CreditCard size={24} />
           </div>
-          <p>{settings.loyaltyText}</p>
-          <form className="loyalty-form" onSubmit={submitLoyalty}>
-            <input
-              required
-              value={loyalty.name}
-              onChange={(event) => setLoyalty({ ...loyalty, name: event.target.value })}
-              placeholder="Имя"
-            />
-            <input
-              required
-              value={loyalty.phone}
-              onChange={(event) => setLoyalty({ ...loyalty, phone: event.target.value })}
-              placeholder="Телефон"
-            />
-            <input
-              value={loyalty.birthday}
-              onChange={(event) => setLoyalty({ ...loyalty, birthday: event.target.value })}
-              placeholder="День рождения"
-            />
-            <label className="check-row">
-              <input
-                type="checkbox"
-                checked={loyalty.consent}
-                onChange={(event) => setLoyalty({ ...loyalty, consent: event.target.checked })}
-              />
-              Согласен получать сообщения по программе лояльности
-            </label>
-            <button type="submit" className="primary-button">
-              Зарегистрироваться
-            </button>
-          </form>
-          {loyaltyDone && (
-            <div className="success-line">
-              <CheckCircle2 size={18} />
-              Анкета сохранена. Администратор увидит заявку в панели.
+          {loyaltyProfile ? (
+            <div className="digital-loyalty-card">
+              <div className="loyalty-card__topline">
+                <div>
+                  <span>Карта гостя</span>
+                  <strong>{loyaltyProfile.name}</strong>
+                </div>
+                <ShieldCheck size={24} />
+              </div>
+              <div className="loyalty-balance">
+                <span>Бонусный баланс</span>
+                <strong>{Math.round(loyaltyProfile.bonusBalance)} ₽</strong>
+              </div>
+              {loyaltyProfile.cardNumber ? (
+                <div className="loyalty-qr">
+                  <QRCodeSVG
+                    value={loyaltyProfile.cardNumber}
+                    size={196}
+                    level="M"
+                    bgColor="#ffffff"
+                    fgColor="#17131b"
+                  />
+                  <span>Покажите QR-код кассиру</span>
+                  <code>{loyaltyProfile.cardNumber}</code>
+                </div>
+              ) : (
+                <div className="error-line">Карта выпускается. Обновите баланс через несколько секунд.</div>
+              )}
+              <div className={`bonus-status status-${loyaltyProfile.welcomeBonus.status.toLowerCase()}`}>
+                {loyaltyProfile.welcomeBonus.status === "GRANTED" && (
+                  <><CheckCircle2 size={17} /> Приветственные {Math.round(loyaltyProfile.welcomeBonus.amount)} ₽ начислены</>
+                )}
+                {loyaltyProfile.welcomeBonus.status === "SKIPPED_EXISTING_MEMBER" && (
+                  <>Карта подключена к существующему участнику программы</>
+                )}
+                {!["GRANTED", "SKIPPED_EXISTING_MEMBER"].includes(loyaltyProfile.welcomeBonus.status) && (
+                  <>Начисление бонусов обрабатывается</>
+                )}
+              </div>
+              <button className="ghost-button loyalty-refresh" disabled={loyaltyBusy} onClick={() => void loadLoyaltyProfile()}>
+                <RefreshCw size={17} className={loyaltyBusy ? "spin" : ""} />
+                {loyaltyBusy ? "Обновляем" : "Обновить баланс"}
+              </button>
+              {loyaltyStale && <p className="loyalty-stale">Показан последний сохраненный баланс.</p>}
             </div>
+          ) : (
+            <>
+              <p>{settings.loyaltyText}</p>
+              <div className="welcome-bonus-note">
+                <Gift size={20} />
+                <span><strong>500 ₽</strong> после первой регистрации в программе</span>
+              </div>
+              {loyaltyVerification ? (
+                <div className="phone-verification">
+                  <div className="phone-verification__heading">
+                    <ShieldCheck size={22} />
+                    <div>
+                      <strong>Подтвердите свой номер</strong>
+                      <span>Выберите удобный бесплатный способ. Карта появится здесь автоматически.</span>
+                    </div>
+                  </div>
+                  <div className="verification-channel-grid">
+                    {loyaltyVerification.channels.telegram && (
+                      <a className="verification-channel-button" href={loyaltyVerification.channels.telegram.url}>
+                        <MessageSquare size={19} />
+                        Telegram
+                      </a>
+                    )}
+                    {loyaltyVerification.channels.max && (
+                      <a className="verification-channel-button" href={loyaltyVerification.channels.max.url}>
+                        <MessageSquare size={19} />
+                        MAX
+                      </a>
+                    )}
+                  </div>
+                  <div className="verification-waiting">
+                    <RefreshCw size={16} className="spin" />
+                    Ожидаем подтверждение до {new Date(loyaltyVerification.expiresAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
+                  </div>
+                  <button type="button" className="ghost-button" onClick={() => setLoyaltyVerification(null)}>
+                    <ChevronLeft size={17} />
+                    Изменить номер
+                  </button>
+                </div>
+              ) : (
+              <form className="loyalty-form" onSubmit={submitLoyalty}>
+                <input
+                  required
+                  autoComplete="name"
+                  value={loyalty.name}
+                  onChange={(event) => setLoyalty({ ...loyalty, name: event.target.value })}
+                  placeholder="Имя"
+                />
+                <input
+                  required
+                  type="tel"
+                  inputMode="tel"
+                  autoComplete="tel"
+                  value={loyalty.phone}
+                  onChange={(event) => setLoyalty({ ...loyalty, phone: event.target.value })}
+                  placeholder="Телефон: +7 999 000-00-00"
+                />
+                <label className="date-field">
+                  <span>День рождения, необязательно</span>
+                  <input
+                    type="date"
+                    value={loyalty.birthday}
+                    onChange={(event) => setLoyalty({ ...loyalty, birthday: event.target.value })}
+                  />
+                </label>
+                <label className="check-row consent-row">
+                  <input
+                    required
+                    type="checkbox"
+                    checked={loyalty.personalDataConsent}
+                    onChange={(event) => setLoyalty({ ...loyalty, personalDataConsent: event.target.checked })}
+                  />
+                  <span>
+                    Я даю <a href={data.legal.personalDataConsentUrl} target="_blank" rel="noreferrer">согласие на обработку персональных данных</a>
+                    {" "}и ознакомлен с <a href={data.legal.privacyPolicyUrl} target="_blank" rel="noreferrer">политикой конфиденциальности</a>
+                  </span>
+                </label>
+                <label className="check-row consent-row consent-row--optional">
+                  <input
+                    type="checkbox"
+                    checked={loyalty.marketingConsent}
+                    onChange={(event) => setLoyalty({ ...loyalty, marketingConsent: event.target.checked })}
+                  />
+                  <span>
+                    Хочу получать сообщения об акциях. <a href={data.legal.marketingConsentUrl} target="_blank" rel="noreferrer">Условия</a>
+                  </span>
+                </label>
+                <button type="submit" className="primary-button" disabled={loyaltyBusy || !loyalty.personalDataConsent}>
+                  {loyaltyBusy ? "Создаем карту" : "Получить карту и 500 ₽"}
+                </button>
+              </form>
+              )}
+            </>
           )}
-          {error && <div className="error-line">{error}</div>}
+          {loyaltyError && <div className="error-line">{loyaltyError}</div>}
         </section>
       )}
 
@@ -917,7 +1143,7 @@ function AdminPage() {
           <TableTentDesigner
             tables={data.tables}
             settings={data.settings}
-            publicUrl={data.publicBaseUrl || window.location.origin}
+            publicUrl={publicUrl}
           />
         )}
 
@@ -1493,6 +1719,9 @@ function LoyaltyList({ leads, tables }: { leads: LoyaltyLead[]; tables: DiningTa
             <span>{lead.phone}</span>
             <span>{lead.birthday || "День рождения не указан"}</span>
             <span>{tableName(lead.tableId)}</span>
+            <span>{lead.cardNumber ? `Карта ${lead.cardNumber}` : "Карта не выпущена"}</span>
+            <span>{Math.round(lead.bonusBalance)} ₽, {lead.welcomeBonusStatus}</span>
+            <span>{lead.marketingConsent ? "Рассылка: да" : "Рассылка: нет"}</span>
             <span>{formatDate(lead.createdAt)}</span>
           </article>
         ))}

@@ -475,6 +475,218 @@ select:focus {
   color: rgba(255, 253, 250, 0.46);
 }
 
+.welcome-bonus-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid rgba(200, 154, 88, 0.28);
+  border-radius: 8px;
+  color: #fffdfa;
+  background: rgba(200, 154, 88, 0.09);
+}
+
+.welcome-bonus-note strong {
+  color: var(--brand-accent);
+  font-size: 18px;
+}
+
+.phone-verification {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid rgba(200, 154, 88, 0.3);
+  border-radius: 8px;
+  background: rgba(255, 253, 250, 0.045);
+}
+
+.phone-verification__heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.phone-verification__heading svg {
+  flex: 0 0 22px;
+  color: var(--brand-accent);
+}
+
+.phone-verification__heading div {
+  display: grid;
+  gap: 4px;
+}
+
+.phone-verification__heading strong,
+.phone-verification__heading span {
+  display: block;
+}
+
+.phone-verification__heading span {
+  color: rgba(255, 253, 250, 0.62);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.verification-channel-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.verification-channel-button {
+  min-width: 0;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  color: #17131b;
+  background: var(--brand-accent);
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.verification-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(255, 253, 250, 0.64);
+  font-size: 12px;
+}
+
+.phone-verification .ghost-button {
+  width: 100%;
+}
+
+.date-field {
+  display: grid;
+  gap: 6px;
+  color: rgba(255, 253, 250, 0.62);
+  font-size: 12px;
+}
+
+.consent-row {
+  align-items: flex-start;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.consent-row a {
+  color: var(--brand-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.consent-row--optional {
+  color: rgba(255, 253, 250, 0.58) !important;
+}
+
+.digital-loyalty-card {
+  display: grid;
+  gap: 16px;
+  margin-top: 14px;
+  padding: 18px;
+  border: 1px solid rgba(200, 154, 88, 0.35);
+  border-radius: 8px;
+  background: #18131c;
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.22);
+}
+
+.loyalty-card__topline,
+.loyalty-balance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.loyalty-card__topline div {
+  display: grid;
+  gap: 3px;
+}
+
+.loyalty-card__topline span,
+.loyalty-balance span {
+  color: rgba(255, 253, 250, 0.5);
+  font-size: 12px;
+}
+
+.loyalty-card__topline strong {
+  font-size: 19px;
+}
+
+.loyalty-balance {
+  padding: 13px 0;
+  border-top: 1px solid rgba(255, 253, 250, 0.08);
+  border-bottom: 1px solid rgba(255, 253, 250, 0.08);
+}
+
+.loyalty-balance strong {
+  color: var(--brand-accent);
+  font-size: 30px;
+  line-height: 1;
+}
+
+.loyalty-qr {
+  display: grid;
+  justify-items: center;
+  gap: 9px;
+}
+
+.loyalty-qr svg {
+  width: min(196px, 100%);
+  height: auto;
+  padding: 10px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.loyalty-qr span {
+  color: rgba(255, 253, 250, 0.72);
+  font-size: 13px;
+}
+
+.loyalty-qr code {
+  color: rgba(255, 253, 250, 0.5);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.bonus-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 10px 11px;
+  border-radius: 8px;
+  color: #dff2df;
+  background: rgba(42, 112, 72, 0.3);
+  font-size: 13px;
+}
+
+.loyalty-refresh {
+  width: 100%;
+  color: #17131b;
+  background: var(--brand-accent);
+}
+
+.loyalty-stale {
+  color: rgba(255, 253, 250, 0.5) !important;
+  font-size: 12px;
+  text-align: center;
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 .success-line,
 .error-line {
   display: flex;
@@ -1382,8 +1594,8 @@ fieldset.field {
   font-weight: 700;
   padding-top: 20px;
 }
-   
- 
+
+
 @keyframes slideUp {
   from { transform: translateY(100%); }
   to { transform: translateY(0); }

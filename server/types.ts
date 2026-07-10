@@ -93,8 +93,28 @@ export type LoyaltyLead = {
   phone: string;
   birthday: string;
   tableId: string | null;
-  consent: boolean;
+  personalDataConsent: boolean;
+  personalDataConsentVersion: string;
+  personalDataConsentHash: string;
+  personalDataConsentAcceptedAt: string;
+  marketingConsent: boolean;
+  consentIpAddress: string;
+  consentUserAgent: string;
+  accessTokenHash: string;
+  verificationId: string | null;
+  verificationExpiresAt: string | null;
+  phoneVerificationChannel: string | null;
+  phoneVerifiedAt: string | null;
+  crmUserId: string | null;
+  iikoCustomerId: string | null;
+  cardNumber: string | null;
+  bonusBalance: number;
+  balanceUpdatedAt: string | null;
+  welcomeBonusAmount: number;
+  welcomeBonusStatus: string;
+  syncError: string;
   createdAt: string;
+  updatedAt: string;
 };
 
 export type GuestFeedback = {

@@ -12,7 +12,10 @@ const envSchema = z.object({
   APP_DATA_DIR: z.string().default(path.resolve(process.cwd(), "data")),
   TELEGRAM_BOT_TOKEN: z.string().optional().default(""),
   TELEGRAM_ENABLE_POLLING: z.enum(["true", "false"]).default("false"),
-  TRUST_PROXY: z.enum(["true", "false"]).default("false")
+  TRUST_PROXY: z.enum(["true", "false"]).default("false"),
+  CRM_BASE_URL: z.string().url().optional().or(z.literal("")).default(""),
+  CRM_LOYALTY_SERVICE_SECRET: z.string().optional().default(""),
+  LOYALTY_REGISTRATION_ALLOWLIST: z.string().optional().default("")
 });
 
 export const config = envSchema.parse(process.env);
