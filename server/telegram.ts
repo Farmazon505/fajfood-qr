@@ -45,6 +45,17 @@ const formatTime = (value: string) =>
 const venueDateKey = (value = new Date()) =>
   new Intl.DateTimeFormat("en-CA", { timeZone: config.VENUE_TIME_ZONE }).format(value);
 
+const callReasonIcon = (label: string) => {
+  const normalized = label.toLocaleLowerCase("ru-RU");
+  if (normalized.includes("карт")) return "💳";
+  if (normalized.includes("налич")) return "💵";
+  if (normalized.includes("заказ") || normalized.includes("блюд")) return "🍽️";
+  if (normalized.includes("официант") || normalized.includes("помощ")) return "🙋";
+  return "🔔";
+};
+
+const REPEAT_ALERT_LIFETIME_MS = 8_000;
+
 const menuKeyboard = {
   keyboard: [[{ text: "Начать смену" }, { text: "Закончить смену" }], [{ text: "Моя смена" }]],
   resize_keyboard: true,
@@ -59,7 +70,11 @@ export class TelegramService {
   private escalationRunning = false;
   private callQueues = new Map<string, Promise<TelegramMessageRef[]>>();
 
-  constructor(private store: Store, token = config.TELEGRAM_BOT_TOKEN) {
+  constructor(
+    private store: Store,
+    token = config.TELEGRAM_BOT_TOKEN,
+    private repeatAlertLifetimeMs = REPEAT_ALERT_LIFETIME_MS
+  ) {
     this.token = token;
   }
 
@@ -77,13 +92,20 @@ export class TelegramService {
     waiters: Waiter[];
     settings: VenueSettings;
   }) {
+    const notificationEvent = options.call;
     const previous = this.callQueues.get(options.call.id) ?? Promise.resolve([]);
     const task = previous
       .catch(() => [])
       .then(async () => {
         const call = this.store.findCallById(options.call.id) ?? options.call;
         const table = this.store.findTableById(call.tableId) ?? options.table;
-        return this.syncCallMessages(call, table, this.recipientsForCall(call, table), options.settings);
+        return this.syncCallMessages(
+          call,
+          table,
+          this.recipientsForCall(call, table),
+          options.settings,
+          notificationEvent
+        );
       });
 
     this.callQueues.set(options.call.id, task);
@@ -545,11 +567,27 @@ export class TelegramService {
   }
 
   private callText(call: ServiceCall, table: DiningTable, settings: VenueSettings) {
-    const reasons = call.reasonCounts.map((reason) => `• ${reason.label} — ${reason.count}`).join("\n");
+    const latestLabel = call.actionLabel || "Вызов официанта";
+    const latestReason = `${callReasonIcon(latestLabel)} ${latestLabel}`;
+    const reasons = call.reasonCounts
+      .map((reason) => `${reason.actionId === call.actionId ? "➡️" : "•"} ${reason.label} — ${reason.count}`)
+      .join("\n");
     const acceptedBy = call.lastAcceptedByStaffId
       ? this.store.snapshot().waiters.find((waiter) => waiter.id === call.lastAcceptedByStaffId)?.name
       : "";
-    const status = call.status === "accepted" ? `Принял: ${acceptedBy || "сотрудник"}` : "Ожидает принятия";
+    const status =
+      call.status === "new"
+        ? "🔴 ОЖИДАЕТ ПРИНЯТИЯ"
+        : call.status === "accepted"
+          ? `🟢 Принял: ${acceptedBy || "сотрудник"}`
+          : "⚪ Завершен";
+    const callHeading =
+      call.status === "new"
+        ? [
+            "🟥🟥🟥 НОВЫЙ ВЫЗОВ 🟥🟥🟥",
+            `🚨 ПОСЛЕДНИЙ ЗАПРОС: ${latestReason.toLocaleUpperCase("ru-RU")}`
+          ]
+        : ["✅ ВЫЗОВ ПРИНЯТ", `Последний запрос: ${latestReason}`];
     const routingTitle =
       call.routingStage === "owner"
         ? "🚨 Эскалация владельцу"
@@ -557,6 +595,8 @@ export class TelegramService {
           ? "⚠️ Вызов перенаправлен администратору"
           : `🔔 ${settings.name}`;
     return [
+      ...callHeading,
+      "",
       routingTitle,
       "",
       `Стол: ${table.name}${table.zone ? `, ${table.zone}` : ""}`,
@@ -590,7 +630,8 @@ export class TelegramService {
     call: ServiceCall,
     table: DiningTable,
     recipients: Array<{ member: Waiter; recipientRole: "waiter" | "admin" | "owner" }>,
-    settings: VenueSettings
+    settings: VenueSettings,
+    notificationEvent: ServiceCall
   ) {
     const text = this.callText(call, table, settings);
     if (!this.enabled()) {
@@ -633,6 +674,9 @@ export class TelegramService {
         });
         if (edited) {
           refs.push(existing);
+          if (call.status === "new" && notificationEvent.status === "new") {
+            await this.sendAudibleCallAlert(chatId, existing.messageId, table, notificationEvent);
+          }
           continue;
         }
       }
@@ -640,6 +684,7 @@ export class TelegramService {
       const sent = await this.request<TelegramMessage>("sendMessage", {
         chat_id: chatId,
         text,
+        disable_notification: false,
         reply_markup: this.callKeyboard(call)
       });
       if (sent?.message_id) {
@@ -654,6 +699,40 @@ export class TelegramService {
 
     await this.store.replaceTelegramMessages(call.id, [...warningRefs, ...refs]);
     return refs;
+  }
+
+  private async sendAudibleCallAlert(
+    chatId: string,
+    primaryMessageId: number,
+    table: DiningTable,
+    notificationEvent: ServiceCall
+  ) {
+    const latestLabel = notificationEvent.actionLabel || "Вызов официанта";
+    const alertTitle = notificationEvent.pressCount > 1 ? "ПОВТОРНЫЙ ВЫЗОВ" : "НОВЫЙ ВЫЗОВ";
+    const sent = await this.request<TelegramMessage>("sendMessage", {
+      chat_id: chatId,
+      text: [
+        `🚨🚨 ${alertTitle} 🚨🚨`,
+        `🟥 ${table.name}${table.zone ? `, ${table.zone}` : ""}`,
+        `Последний запрос: ${callReasonIcon(latestLabel)} ${latestLabel.toLocaleUpperCase("ru-RU")}`,
+        `Нажатие № ${notificationEvent.pressCount} в текущем вызове`
+      ].join("\n"),
+      disable_notification: false,
+      reply_parameters: {
+        message_id: primaryMessageId,
+        allow_sending_without_reply: true
+      }
+    });
+
+    if (!sent?.message_id || this.repeatAlertLifetimeMs <= 0) return;
+    const alertChatId = String(sent.chat.id);
+    const timer = setTimeout(() => {
+      void this.request("deleteMessage", {
+        chat_id: alertChatId,
+        message_id: sent.message_id
+      }).catch((error) => console.error("[telegram] repeat alert cleanup:", error));
+    }, this.repeatAlertLifetimeMs);
+    timer.unref();
   }
 
   private async deleteCallMessages(call: ServiceCall) {

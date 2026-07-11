@@ -36,7 +36,7 @@ test("Telegram manages a shift and keeps one live message per table", async () =
     const admin = { id: "admin-1", name: "Администратор", roleId: "admin", telegramChatId: "20001", tipUrl: "", active: true };
     const owner = { id: "owner-1", name: "Владелец", roleId: "owner", telegramChatId: "30001", tipUrl: "", active: true };
     await store.replaceWaiters([{ ...waiter, telegramChatId: "10001" }, admin, owner]);
-    const telegram = new TelegramService(store, "test-token");
+    const telegram = new TelegramService(store, "test-token", 10);
 
     const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Astrakhan" }).format(new Date());
     const personalTask = await store.addShiftTask({
@@ -86,17 +86,34 @@ test("Telegram manages a shift and keeps one live message per table", async () =
 
     const table = store.snapshot().tables.find((item) => item.zone === startedShift.zones[0]);
     const action = store.snapshot().actions[0];
+    const cardAction = store.snapshot().actions.find((item) => item.label === "Счет картой");
     assert.ok(table);
+    assert.ok(cardAction);
     const sendsBeforeCalls = requests.filter((request) => request.method === "sendMessage").length;
 
     const first = await store.upsertCall({ table, action, comment: "", guestName: "", assignedWaiterId: waiter.id, routingStage: "waiter", routingReason: "" });
     await telegram.notifyCall({ call: first, table, waiters: [waiter], settings: store.snapshot().settings });
-    const second = await store.upsertCall({ table, action, comment: "", guestName: "", assignedWaiterId: waiter.id, routingStage: "waiter", routingReason: "" });
+    const second = await store.upsertCall({ table, action: cardAction, comment: "", guestName: "", assignedWaiterId: waiter.id, routingStage: "waiter", routingReason: "" });
     await telegram.notifyCall({ call: second, table, waiters: [waiter], settings: store.snapshot().settings });
 
-    assert.equal(requests.filter((request) => request.method === "sendMessage").length, sendsBeforeCalls + 1);
+    const callSends = requests.filter((request) => request.method === "sendMessage").slice(sendsBeforeCalls);
+    assert.equal(callSends.length, 2);
+    assert.equal(callSends[0]?.payload.disable_notification, false);
+    assert.match(String(callSends[1]?.payload.text), /ПОВТОРНЫЙ ВЫЗОВ/);
+    assert.match(String(callSends[1]?.payload.text), /💳 СЧЕТ КАРТОЙ/);
+    assert.equal(callSends[1]?.payload.disable_notification, false);
     const repeatedEdit = requests.filter((request) => request.method === "editMessageText").at(-1);
+    assert.match(String(repeatedEdit?.payload.text), /🟥🟥🟥 НОВЫЙ ВЫЗОВ/);
+    assert.match(String(repeatedEdit?.payload.text), /ПОСЛЕДНИЙ ЗАПРОС: 💳 СЧЕТ КАРТОЙ/);
+    assert.match(String(repeatedEdit?.payload.text), /➡️ Счет картой — 1/);
     assert.match(String(repeatedEdit?.payload.text), /Количество вызовов: 2/);
+    const audibleMessageId = messageId;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.ok(
+      requests.some(
+        (request) => request.method === "deleteMessage" && request.payload.message_id === audibleMessageId
+      )
+    );
 
     const ref = store.findCallById(first.id)?.telegramMessages[0];
     assert.ok(ref);
@@ -109,10 +126,15 @@ test("Telegram manages a shift and keeps one live message per table", async () =
       }
     });
     assert.equal(store.findCallById(first.id)?.status, "accepted");
+    const acceptedEdit = requests.filter((request) => request.method === "editMessageText").at(-1);
+    assert.match(String(acceptedEdit?.payload.text), /✅ ВЫЗОВ ПРИНЯТ/);
+    assert.doesNotMatch(String(acceptedEdit?.payload.text), /🟥🟥🟥 НОВЫЙ ВЫЗОВ/);
 
     const nextCycle = await store.upsertCall({ table, action, comment: "", guestName: "", assignedWaiterId: waiter.id, routingStage: "waiter", routingReason: "" });
     await telegram.notifyCall({ call: nextCycle, table, waiters: [waiter], settings: store.snapshot().settings });
     const resetEdit = requests.filter((request) => request.method === "editMessageText").at(-1);
+    assert.match(String(resetEdit?.payload.text), /🟥🟥🟥 НОВЫЙ ВЫЗОВ/);
+    assert.match(String(resetEdit?.payload.text), /ПОСЛЕДНИЙ ЗАПРОС: 🙋 ПОЗВАТЬ ОФИЦИАНТА/);
     assert.match(String(resetEdit?.payload.text), /Количество вызовов: 1/);
 
     await telegram.handleUpdate({
@@ -134,7 +156,8 @@ test("Telegram manages a shift and keeps one live message per table", async () =
 
     assert.equal(store.findCallById(first.id)?.status, "done");
     assert.deepEqual(store.findCallById(first.id)?.telegramMessages, []);
-    assert.equal(requests.filter((request) => request.method === "deleteMessage").length, 1);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(requests.filter((request) => request.method === "deleteMessage").length, 3);
 
     await telegram.handleUpdate({
       update_id: 23,
