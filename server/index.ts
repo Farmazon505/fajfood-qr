@@ -12,9 +12,12 @@ import {
   assertProductionSecrets,
   authenticateAdmin,
   createAdminToken,
+  getAdminAccountSummary,
   getAdminAuth,
+  initializeAdminCredentials,
   requireAdmin,
-  requireOwner
+  requireOwner,
+  updateAdminAccount
 } from "./auth";
 import { config, publicBaseUrl } from "./config";
 import { Store } from "./store";
@@ -36,6 +39,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const uploadsDir = path.resolve(config.APP_DATA_DIR, "uploads");
 assertProductionSecrets();
+await initializeAdminCredentials();
 const store = new Store();
 await store.init();
 const telegram = new TelegramService(store);
@@ -506,8 +510,14 @@ app.post("/api/telegram/webhook", async (request, response) => {
   response.json({ ok: true });
 });
 
+const adminLoginSchema = z.object({
+  username: z.string().max(64),
+  password: z.string().max(128)
+});
+
 app.post("/api/admin/login", adminLoginLimiter, (request, response) => {
-  const auth = authenticateAdmin(String(request.body?.username || ""), String(request.body?.password || ""));
+  const parsed = adminLoginSchema.safeParse(request.body);
+  const auth = parsed.success ? authenticateAdmin(parsed.data.username, parsed.data.password) : null;
   if (!auth) {
     response.status(401).json({ error: "Неверный логин или пароль" });
     return;
@@ -517,6 +527,26 @@ app.post("/api/admin/login", adminLoginLimiter, (request, response) => {
 });
 
 app.use("/api/admin", requireAdmin);
+
+const adminAccountUpdateSchema = z.object({
+  username: z.string().trim().min(3).max(64).regex(/^[A-Za-z0-9._-]+$/),
+  password: z.string().min(8).max(128)
+});
+
+app.put("/api/admin/admin-account", requireOwner, async (request, response) => {
+  const parsed = adminAccountUpdateSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({
+      error: "Логин: от 3 до 64 латинских символов, цифр, точки, дефиса или подчёркивания. Пароль: минимум 8 символов"
+    });
+    return;
+  }
+  try {
+    response.json(await updateAdminAccount(parsed.data.username, parsed.data.password));
+  } catch (error) {
+    response.status(400).json({ error: error instanceof Error ? error.message : "Не удалось обновить доступ администратора" });
+  }
+});
 
 app.post("/api/admin/logo", logoUploadParser, async (request, response) => {
   const contentType = String(request.headers["content-type"] || "").split(";")[0].toLowerCase();
@@ -586,6 +616,7 @@ app.get("/api/admin/overview", (request, response) => {
     performanceAiEnabled: isPerformanceAiConfigured(),
     accessRole: auth?.role || "admin",
     username: auth?.username || "",
+    adminAccount: isOwner ? getAdminAccountSummary() : null,
     publicBaseUrl: publicBaseUrl(),
     telegramEnabled: telegram.enabled(),
     telegramBotUrl: `https://t.me/${config.TELEGRAM_BOT_USERNAME.replace(/^@/, "")}`
@@ -839,6 +870,6 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
 
 app.listen(config.PORT, config.HOST, () => {
   console.log(`API started on http://${config.HOST}:${config.PORT}`);
-  console.log(`Admin accounts: ${config.ADMIN_USERNAME}, ${config.OWNER_USERNAME}`);
+  console.log(`Admin accounts: ${getAdminAccountSummary().username}, ${config.OWNER_USERNAME}`);
   telegram.startPolling();
 });

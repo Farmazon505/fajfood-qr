@@ -1072,6 +1072,64 @@ select:focus {
   padding: 18px;
 }
 
+.owner-profile-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.7fr) minmax(320px, 1.3fr);
+  gap: 24px;
+  margin-top: 20px;
+}
+
+.owner-access-meta {
+  border-right: 1px solid #ded6c8;
+  padding-right: 24px;
+}
+
+.owner-access-meta dl {
+  display: grid;
+  gap: 18px;
+  margin: 0;
+}
+
+.owner-access-meta dt {
+  margin-bottom: 4px;
+  color: #657066;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.owner-access-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #241722;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.owner-account-form {
+  display: grid;
+  gap: 14px;
+  max-width: 680px;
+}
+
+.owner-account-form h3 {
+  margin: 0 0 2px;
+  font-size: 17px;
+}
+
+.password-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  gap: 8px;
+}
+
+.owner-account-actions {
+  justify-content: flex-start;
+}
+
+.owner-account-status {
+  margin: 0;
+}
+
 .span-2 {
   grid-column: 1 / -1;
 }
@@ -2030,6 +2088,17 @@ button:disabled {
 
   .admin-content {
     padding: 16px;
+  }
+
+  .owner-profile-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .owner-access-meta {
+    border-right: 0;
+    border-bottom: 1px solid #ded6c8;
+    padding-right: 0;
+    padding-bottom: 18px;
   }
 
   .admin-sidebar nav {

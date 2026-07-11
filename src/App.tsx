@@ -18,6 +18,9 @@ import {
   HeartHandshake,
   ImageIcon,
   ExternalLink,
+  Eye,
+  EyeOff,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   MapPin,
@@ -51,6 +54,7 @@ import {
 import { QRCodeSVG } from "qrcode.react";
 import type {
   AppData,
+  AdminAccountSummary,
   AdminAccessRole,
   CallAction,
   CallStatus,
@@ -129,6 +133,7 @@ type AdminData = AppData & {
   performanceAiEnabled: boolean;
   accessRole: AdminAccessRole;
   username: string;
+  adminAccount: AdminAccountSummary | null;
   popups: PopupNotification[];
 };
 
@@ -1137,7 +1142,10 @@ function AdminPage() {
     { id: "shifts", label: "Смены и рейтинг", icon: <Trophy size={18} /> },
     { id: "checklist", label: "Чек-листы", icon: <ClipboardCheck size={18} /> },
     ...(data.accessRole === "owner"
-      ? [{ id: "owner-efficiency", label: "Эффективность админов", icon: <Briefcase size={18} /> }]
+      ? [
+          { id: "owner-profile", label: "Профиль владельца", icon: <KeyRound size={18} /> },
+          { id: "owner-efficiency", label: "Эффективность админов", icon: <Briefcase size={18} /> }
+        ]
       : []),
     { id: "actions", label: "Кнопки", icon: <BellRing size={18} /> },
     { id: "offers", label: "Акции", icon: <Tags size={18} /> },
@@ -1276,6 +1284,15 @@ function AdminPage() {
           />
         )}
 
+        {activeTab === "owner-profile" && data.accessRole === "owner" && data.adminAccount && (
+          <OwnerProfile
+            ownerUsername={data.username}
+            adminAccount={data.adminAccount}
+            authHeaders={authHeaders}
+            onRefresh={loadAdmin}
+          />
+        )}
+
         {activeTab === "owner-efficiency" && data.accessRole === "owner" && (
           <ShiftsAndRatings
             ratings={data.ratings.filter((rating) => rating.roleKind === "admin")}
@@ -1317,6 +1334,170 @@ function AdminPage() {
         {activeTab === "feedbacks" && <FeedbacksList feedbacks={data.feedbacks} tables={data.tables} waiters={data.waiters} />}
       </section>
     </main>
+  );
+}
+
+function OwnerProfile({
+  ownerUsername,
+  adminAccount,
+  authHeaders,
+  onRefresh
+}: {
+  ownerUsername: string;
+  adminAccount: AdminAccountSummary;
+  authHeaders: { authorization: string };
+  onRefresh: () => Promise<void>;
+}) {
+  const [adminUsername, setAdminUsername] = useState(adminAccount.username);
+  const [adminPassword, setAdminPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [formError, setFormError] = useState("");
+
+  useEffect(() => {
+    setAdminUsername(adminAccount.username);
+  }, [adminAccount.username]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setMessage("");
+    setFormError("");
+    const normalizedUsername = adminUsername.trim();
+    if (!/^[A-Za-z0-9._-]{3,64}$/.test(normalizedUsername)) {
+      setFormError("Проверьте логин администратора");
+      return;
+    }
+    if (adminPassword.length < 8) {
+      setFormError("Пароль должен содержать не менее 8 символов");
+      return;
+    }
+    if (adminPassword !== passwordConfirmation) {
+      setFormError("Пароли не совпадают");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const updated = await api<AdminAccountSummary>("/api/admin/admin-account", {
+        method: "PUT",
+        headers: authHeaders,
+        body: JSON.stringify({ username: normalizedUsername, password: adminPassword })
+      });
+      setAdminUsername(updated.username);
+      setAdminPassword("");
+      setPasswordConfirmation("");
+      setMessage("Доступ администратора обновлён");
+      await onRefresh();
+    } catch (requestError) {
+      setFormError(requestError instanceof Error ? requestError.message : "Не удалось обновить доступ администратора");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="admin-panel owner-profile-panel">
+      <div className="panel-heading">
+        <h2>Профиль владельца</h2>
+        <KeyRound size={20} />
+      </div>
+
+      <div className="owner-profile-grid">
+        <div className="owner-access-meta">
+          <dl>
+            <div>
+              <dt>Логин владельца</dt>
+              <dd>{ownerUsername}</dd>
+            </div>
+            <div>
+              <dt>Логин администратора</dt>
+              <dd>{adminAccount.username}</dd>
+            </div>
+            <div>
+              <dt>Доступ обновлён</dt>
+              <dd>{formatDate(adminAccount.updatedAt)}</dd>
+            </div>
+          </dl>
+        </div>
+
+        <form className="owner-account-form" onSubmit={submit}>
+          <h3>Доступ администратора</h3>
+          <label className="field">
+            <span>Новый логин</span>
+            <input
+              value={adminUsername}
+              onChange={(event) => {
+                setAdminUsername(event.target.value);
+                setMessage("");
+                setFormError("");
+              }}
+              autoComplete="username"
+              minLength={3}
+              maxLength={64}
+              pattern="[A-Za-z0-9._-]+"
+              required
+            />
+          </label>
+
+          <label className="field">
+            <span>Новый пароль</span>
+            <div className="password-control">
+              <input
+                type={showPassword ? "text" : "password"}
+                value={adminPassword}
+                onChange={(event) => {
+                  setAdminPassword(event.target.value);
+                  setMessage("");
+                  setFormError("");
+                }}
+                autoComplete="new-password"
+                minLength={8}
+                maxLength={128}
+                required
+              />
+              <button
+                className="icon-button"
+                type="button"
+                onClick={() => setShowPassword((current) => !current)}
+                aria-label={showPassword ? "Скрыть пароль" : "Показать пароль"}
+                title={showPassword ? "Скрыть пароль" : "Показать пароль"}
+              >
+                {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+              </button>
+            </div>
+          </label>
+
+          <label className="field">
+            <span>Повторите пароль</span>
+            <input
+              type={showPassword ? "text" : "password"}
+              value={passwordConfirmation}
+              onChange={(event) => {
+                setPasswordConfirmation(event.target.value);
+                setMessage("");
+                setFormError("");
+              }}
+              autoComplete="new-password"
+              minLength={8}
+              maxLength={128}
+              required
+            />
+          </label>
+
+          {message && <div className="success-line owner-account-status">{message}</div>}
+          {formError && <div className="error-line owner-account-status">{formError}</div>}
+
+          <div className="button-row owner-account-actions">
+            <button className="primary-button" type="submit" disabled={busy}>
+              <Save size={18} />
+              {busy ? "Сохраняем" : "Сохранить доступ"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
   );
 }
 

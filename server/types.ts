@@ -1,6 +1,10 @@
 export type CallStatus = "new" | "accepted" | "done" | "cancelled";
 export type ShiftStatus = "checklist" | "active" | "ended";
 export type AdminAccessRole = "admin" | "owner";
+export type AdminAccountSummary = {
+  username: string;
+  updatedAt: string;
+};
 export type StaffRoleKind = "owner" | "admin" | "waiter" | "staff";
 export type CallRoutingStage = "waiter" | "admin" | "owner";
 
