@@ -1,5 +1,7 @@
 import { z } from "zod";
+import fetch from "node-fetch";
 import { config } from "./config";
+import { createAiProxyAgent } from "./ai-proxy";
 import type { PerformanceAnalytics, PerformanceInsightReport } from "./types";
 
 const aiResponseSchema = z.object({
@@ -7,6 +9,8 @@ const aiResponseSchema = z.object({
   recommendations: z.array(z.unknown()).max(8),
   employeeAdvice: z.array(z.unknown()).max(50)
 });
+
+const aiProxyAgent = createAiProxyAgent(config.AI_PROXY_URL);
 
 const objectText = (value: unknown, preferredKeys: string[]) => {
   if (typeof value === "string") return value.trim();
@@ -63,6 +67,7 @@ export const generatePerformanceInsights = async (
     const response = await fetch(`${config.AI_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       signal: controller.signal,
+      ...(aiProxyAgent ? { agent: aiProxyAgent } : {}),
       headers: {
         authorization: `Bearer ${config.OPENROUTER_API_KEY}`,
         "content-type": "application/json",

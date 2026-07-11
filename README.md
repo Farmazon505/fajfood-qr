@@ -52,6 +52,7 @@ OpenRouter анализирует массовые и индивидуальны
 
 ```env
 AI_BASE_URL=https://openrouter.ai/api/v1
+AI_PROXY_URL=
 OPENROUTER_API_KEY=replace-with-openrouter-key
 AI_MODEL=openai/gpt-4o-mini
 AI_REQUEST_TIMEOUT_MS=12000
