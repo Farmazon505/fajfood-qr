@@ -212,7 +212,7 @@ function GuestPage() {
 
   useEffect(() => {
     if (!sentAction) return undefined;
-    const timeout = window.setTimeout(() => setSentAction(null), 6000);
+    const timeout = window.setTimeout(() => setSentAction(null), 10000);
     return () => window.clearTimeout(timeout);
   }, [sentAction]);
 
@@ -486,6 +486,12 @@ function GuestPage() {
           </details>
 
           <div className="action-grid action-grid--home">
+            {sentAction && (
+              <div className="call-feedback" role="status" aria-live="polite">
+                <CheckCircle2 size={18} />
+                <span>Вызов "{sentAction.label}" отправлен. Официант уже видит стол и причину.</span>
+              </div>
+            )}
             {actions.map((action) => {
               const isSent = sentAction?.id === action.id;
 
@@ -508,12 +514,6 @@ function GuestPage() {
                       <small>{action.description}</small>
                     </span>
                   </button>
-                  {isSent && (
-                    <div className="call-feedback" role="status">
-                      <CheckCircle2 size={16} />
-                      <span>Вызов "{sentAction.label}" отправлен. Официант уже видит стол и причину.</span>
-                    </div>
-                  )}
                 </div>
               );
             })}
