@@ -3,14 +3,21 @@ import type { CSSProperties, FormEvent, ReactNode } from "react";
 import { TableTentDesigner } from "./TableTentDesigner";
 import {
   BellRing,
+  ArrowDown,
+  ArrowUp,
+  Briefcase,
+  CalendarDays,
   ChevronLeft,
   Check,
   CheckCircle2,
+  CircleHelp,
+  ClipboardCheck,
   Clock,
   CreditCard,
   Gift,
   HeartHandshake,
   ImageIcon,
+  ExternalLink,
   LayoutDashboard,
   LogOut,
   MapPin,
@@ -25,29 +32,43 @@ import {
   Save,
   Settings,
   ShieldCheck,
+  Sparkles,
   Utensils,
   Star,
   AlertTriangle,
   Table2,
   Tags,
   Trash2,
+  Trophy,
   Upload,
   UserRound,
   Users,
-  Wifi
+  Wifi,
+  Megaphone,
+  ChevronRight,
+  X
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import type {
   AppData,
+  AdminAccessRole,
   CallAction,
   CallStatus,
+  ChecklistItem,
   DiningTable,
   GuestFeedback,
   LoyaltyLead,
   Offer,
+  PerformanceAnalytics,
+  PerformanceInsightReport,
   ServiceCall,
+  ShiftTask,
+  StaffRoleDefinition,
   VenueSettings,
-  Waiter
+  Waiter,
+  WaiterRating,
+  WaiterShift,
+  PopupNotification
 } from "../server/types";
 
 type Bootstrap = {
@@ -55,6 +76,7 @@ type Bootstrap = {
   offers: Offer[];
   actions: CallAction[];
   table: DiningTable | null;
+  popups: PopupNotification[];
   publicBaseUrl: string;
   legal: {
     personalDataConsentVersion: string;
@@ -101,6 +123,13 @@ type TipTarget = {
 type AdminData = AppData & {
   publicBaseUrl: string;
   telegramEnabled: boolean;
+  telegramBotUrl: string;
+  ratings: WaiterRating[];
+  performance: PerformanceAnalytics;
+  performanceAiEnabled: boolean;
+  accessRole: AdminAccessRole;
+  username: string;
+  popups: PopupNotification[];
 };
 
 const api = async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
@@ -166,6 +195,7 @@ export default function App() {
 function GuestPage() {
   const tableSlug = decodeURIComponent(window.location.pathname.replace(/^\/t\/?/, "").split("/")[0] || "");
   const [data, setData] = useState<Bootstrap | null>(null);
+  const [showPopups, setShowPopups] = useState(false);
   const [error, setError] = useState("");
   const [comment, setComment] = useState("");
   const [guestName, setGuestName] = useState("");
@@ -209,6 +239,33 @@ function GuestPage() {
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
+
+  useEffect(() => {
+    if (!data || !data.popups || data.popups.length === 0) return;
+    const popupKey = `qrnastol.popupsSeen:${data.popups.map((popup) => popup.id).join(",")}`;
+    const seen = sessionStorage.getItem(popupKey) === "true";
+    if (!seen) {
+      const timer = setTimeout(() => setShowPopups(true), 600);
+      return () => clearTimeout(timer);
+    }
+  }, [data]);
+
+  const closePopups = () => {
+    if (data?.popups.length) {
+      sessionStorage.setItem(`qrnastol.popupsSeen:${data.popups.map((popup) => popup.id).join(",")}`, "true");
+    }
+    setShowPopups(false);
+  };
+
+  const handlePopupAction = (url: string) => {
+    closePopups();
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+      window.open(url, "_blank", "noopener,noreferrer");
+    } else {
+      const targetView = guestViewFromPath(url);
+      if (targetView) navigateGuest(targetView);
+    }
+  };
 
   useEffect(() => {
     if (!sentAction) return undefined;
@@ -898,6 +955,14 @@ function GuestPage() {
           Инфо
         </button>
       </nav>
+
+      {showPopups && data?.popups && data.popups.length > 0 && (
+        <GuestPopupGallery
+          popups={data.popups}
+          onClose={closePopups}
+          onAction={handlePopupAction}
+        />
+      )}
     </main>
   );
 }
@@ -929,6 +994,7 @@ function LogoMark({ settings, className = "" }: { settings: VenueSettings; class
 
 function AdminPage() {
   const [token, setToken] = useState(() => localStorage.getItem("adminToken") || "");
+  const [username, setUsername] = useState(() => localStorage.getItem("adminUsername") || "admin");
   const [password, setPassword] = useState("");
   const [data, setData] = useState<AdminData | null>(null);
   const [activeTab, setActiveTab] = useState("dashboard");
@@ -960,11 +1026,12 @@ function AdminPage() {
     event.preventDefault();
     setError("");
     try {
-      const result = await api<{ token: string }>("/api/admin/login", {
+      const result = await api<{ token: string; username: string }>("/api/admin/login", {
         method: "POST",
-        body: JSON.stringify({ password })
+        body: JSON.stringify({ username, password })
       });
       localStorage.setItem("adminToken", result.token);
+      localStorage.setItem("adminUsername", result.username);
       setToken(result.token);
       setPassword("");
     } catch (requestError) {
@@ -1030,10 +1097,17 @@ function AdminPage() {
           <h1>QR на стол</h1>
           <p>Панель администратора</p>
           <input
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            placeholder="Логин"
+            autoComplete="username"
+          />
+          <input
             type="password"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
-            placeholder="Пароль администратора"
+            placeholder="Пароль"
+            autoComplete="current-password"
           />
           <button className="primary-button" type="submit">
             Войти
@@ -1058,10 +1132,17 @@ function AdminPage() {
     { id: "settings", label: "Заведение", icon: <Settings size={18} /> },
     { id: "tables", label: "Столы и QR", icon: <Table2 size={18} /> },
     { id: "table-tents", label: "Тейбл-тенты", icon: <Printer size={18} /> },
-    { id: "waiters", label: "Официанты", icon: <Users size={18} /> },
+    { id: "staff", label: "Сотрудники", icon: <Users size={18} /> },
+    { id: "management", label: "Telegram", icon: <ShieldCheck size={18} /> },
+    { id: "shifts", label: "Смены и рейтинг", icon: <Trophy size={18} /> },
+    { id: "checklist", label: "Чек-листы", icon: <ClipboardCheck size={18} /> },
+    ...(data.accessRole === "owner"
+      ? [{ id: "owner-efficiency", label: "Эффективность админов", icon: <Briefcase size={18} /> }]
+      : []),
     { id: "actions", label: "Кнопки", icon: <BellRing size={18} /> },
     { id: "offers", label: "Акции", icon: <Tags size={18} /> },
     { id: "loyalty", label: "Лояльность", icon: <UserRound size={18} /> },
+    { id: "popups", label: "Уведомления", icon: <Megaphone size={18} /> },
     { id: "feedbacks", label: "Отзывы", icon: <Star size={18} /> }
   ];
 
@@ -1074,7 +1155,7 @@ function AdminPage() {
           <LogoMark settings={data.settings} className="logo-mark--sidebar" />
           <div>
             <strong>{data.settings.name}</strong>
-            <span>{data.telegramEnabled ? "Telegram подключен" : "Telegram не настроен"}</span>
+            <span>{data.telegramEnabled ? `Telegram подключен · ${data.username}` : `Telegram не настроен · ${data.username}`}</span>
           </div>
         </div>
 
@@ -1095,6 +1176,7 @@ function AdminPage() {
           className="logout-button"
           onClick={() => {
             localStorage.removeItem("adminToken");
+            localStorage.removeItem("adminUsername");
             setToken("");
           }}
         >
@@ -1147,11 +1229,62 @@ function AdminPage() {
           />
         )}
 
-        {activeTab === "waiters" && (
-          <WaitersEditor
+        {activeTab === "staff" && (
+          <StaffEditor
             waiters={data.waiters}
+            roles={data.staffRoles}
+            accessRole={data.accessRole}
+            onWaitersChange={(waiters) => setData({ ...data, waiters })}
+            onRolesChange={(staffRoles) => setData({ ...data, staffRoles })}
+            onSaveWaiters={() => void saveResource("waiters", data.waiters, "Сотрудники сохранены")}
+            onSaveRoles={() => void saveResource("staff-roles", data.staffRoles, "Должности сохранены")}
+          />
+        )}
+
+        {activeTab === "management" && (
+          <ManagementTelegramEditor
+            waiters={data.waiters}
+            roles={data.staffRoles}
+            telegramBotUrl={data.telegramBotUrl}
             onChange={(waiters) => setData({ ...data, waiters })}
-            onSave={() => void saveResource("waiters", data.waiters, "Официанты сохранены")}
+            onSave={() => void saveResource("waiters", data.waiters, "Telegram-аккаунты руководителей сохранены")}
+          />
+        )}
+
+        {activeTab === "shifts" && (
+          <ShiftsAndRatings
+            ratings={data.ratings.filter((rating) => rating.roleKind !== "admin" && rating.roleKind !== "owner")}
+            shifts={data.shifts.filter((shift) => shift.roleKind !== "admin" && shift.roleKind !== "owner")}
+            performance={filterPerformanceAnalytics(data.performance, data.staffRoles.filter((role) => role.kind !== "admin" && role.kind !== "owner").map((role) => role.id))}
+            performanceAiEnabled={data.performanceAiEnabled}
+            authHeaders={authHeaders}
+            onRefresh={loadAdmin}
+            title="Смены сотрудников"
+          />
+        )}
+
+        {activeTab === "checklist" && (
+          <ChecklistEditor
+            items={data.checklistItems}
+            shiftTasks={data.shiftTasks}
+            roles={data.staffRoles}
+            waiters={data.waiters}
+            authHeaders={authHeaders}
+            onChange={(checklistItems) => setData({ ...data, checklistItems })}
+            onSave={() => void saveResource("checklist", data.checklistItems, "Шаблоны чек-листов сохранены")}
+            onRefresh={loadAdmin}
+          />
+        )}
+
+        {activeTab === "owner-efficiency" && data.accessRole === "owner" && (
+          <ShiftsAndRatings
+            ratings={data.ratings.filter((rating) => rating.roleKind === "admin")}
+            shifts={data.shifts.filter((shift) => shift.roleKind === "admin")}
+            performance={filterPerformanceAnalytics(data.performance, data.staffRoles.filter((role) => role.kind === "admin").map((role) => role.id))}
+            performanceAiEnabled={data.performanceAiEnabled}
+            authHeaders={authHeaders}
+            onRefresh={loadAdmin}
+            title="Эффективность администраторов"
           />
         )}
 
@@ -1172,6 +1305,14 @@ function AdminPage() {
         )}
 
         {activeTab === "loyalty" && <LoyaltyList leads={data.loyaltyLeads} tables={data.tables} />}
+
+        {activeTab === "popups" && (
+          <PopupsEditor
+            popups={data.popups || []}
+            authHeaders={authHeaders}
+            onChange={() => void loadAdmin()}
+          />
+        )}
 
         {activeTab === "feedbacks" && <FeedbacksList feedbacks={data.feedbacks} tables={data.tables} waiters={data.waiters} />}
       </section>
@@ -1218,7 +1359,7 @@ function Dashboard({
   );
 }
 
-function Metric({ title, value, icon }: { title: string; value: number; icon: ReactNode }) {
+function Metric({ title, value, icon }: { title: string; value: number | string; icon: ReactNode }) {
   return (
     <article className="metric">
       <span>{icon}</span>
@@ -1531,7 +1672,7 @@ function WaitersEditor({
       <div className="panel-heading">
         <h2>Официанты и Telegram</h2>
         <div className="button-row">
-          <button className="ghost-button" onClick={() => onChange([...waiters, { id: "", name: "Официант", telegramChatId: "", tipUrl: "", active: true }])}>
+          <button className="ghost-button" onClick={() => onChange([...waiters, { id: "", name: "Официант", roleId: "waiter", telegramChatId: "", tipUrl: "", active: true }])}>
             <Plus size={18} />
             Официант
           </button>
@@ -1572,6 +1713,792 @@ function WaitersEditor({
       </div>
       <p className="muted">Официант пишет боту /start, бот возвращает chat_id. Для чаевых вставьте персональную ссылку официанта из Точки или другого сервиса.</p>
     </section>
+  );
+}
+
+function StaffEditor({
+  waiters,
+  roles,
+  accessRole,
+  onWaitersChange,
+  onRolesChange,
+  onSaveWaiters,
+  onSaveRoles
+}: {
+  waiters: Waiter[];
+  roles: StaffRoleDefinition[];
+  accessRole: AdminAccessRole;
+  onWaitersChange: (waiters: Waiter[]) => void;
+  onRolesChange: (roles: StaffRoleDefinition[]) => void;
+  onSaveWaiters: () => void;
+  onSaveRoles: () => void;
+}) {
+  const updateWaiter = (index: number, patch: Partial<Waiter>) => {
+    onWaitersChange(waiters.map((waiter, waiterIndex) => (waiterIndex === index ? { ...waiter, ...patch } : waiter)));
+  };
+  const updateRole = (index: number, patch: Partial<StaffRoleDefinition>) => {
+    onRolesChange(roles.map((role, roleIndex) => (roleIndex === index ? { ...role, ...patch } : role)));
+  };
+  const roleKindLabel = (role: StaffRoleDefinition) => {
+    if (role.kind === "owner") return "Владелец";
+    if (role.kind === "admin") return "Администратор";
+    if (role.kind === "waiter") return "Официант";
+    return "Сотрудник";
+  };
+
+  return (
+    <div className="staff-admin-layout">
+      {accessRole === "owner" && (
+        <section className="admin-panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Должности</h2>
+              <p className="muted checklist-intro">Должность определяет шаблон чек-листа и правила работы сотрудника в Telegram.</p>
+            </div>
+            <div className="button-row">
+              <button
+                className="ghost-button"
+                onClick={() => onRolesChange([...roles, { id: "", name: "Новая должность", kind: "staff", system: false, active: true }])}
+              >
+                <Plus size={18} /> Должность
+              </button>
+              <button className="primary-button compact" onClick={onSaveRoles}>
+                <Save size={18} /> Сохранить
+              </button>
+            </div>
+          </div>
+          <div className="editor-list">
+            {roles.map((role, index) => {
+              const roleInUse = waiters.some((waiter) => waiter.roleId === role.id);
+              return (
+                <article className="editor-row role-editor-row" key={`${role.id}-${index}`}>
+                  <Field label="Название" value={role.name} onChange={(value) => updateRole(index, { name: value })} />
+                  <span className="role-kind-label">{roleKindLabel(role)}</span>
+                  <label className="toggle-row">
+                    <input
+                      type="checkbox"
+                      checked={role.active}
+                      disabled={role.kind === "owner" || role.kind === "admin" || role.kind === "waiter"}
+                      onChange={(event) => updateRole(index, { active: event.target.checked })}
+                    />
+                    Активна
+                  </label>
+                  <button
+                    className="icon-button"
+                    aria-label="Удалить должность"
+                    title={role.system ? "Системную должность удалить нельзя" : roleInUse ? "Сначала смените должность у сотрудников" : "Удалить"}
+                    disabled={role.system || roleInUse}
+                    onClick={() => onRolesChange(roles.filter((_, roleIndex) => roleIndex !== index))}
+                  >
+                    <Trash2 size={18} />
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      <section className="admin-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Сотрудники</h2>
+            <p className="muted checklist-intro">Добавьте сотрудника, выберите должность и вставьте chat_id, который покажет Telegram-бот после команды /start.</p>
+          </div>
+          <div className="button-row">
+            <button
+              className="ghost-button"
+              onClick={() => onWaitersChange([...waiters, { id: "", name: "Новый сотрудник", roleId: "waiter", telegramChatId: "", tipUrl: "", active: true }])}
+            >
+              <Plus size={18} /> Сотрудник
+            </button>
+            <button className="primary-button compact" onClick={onSaveWaiters}>
+              <Save size={18} /> Сохранить
+            </button>
+          </div>
+        </div>
+
+        <div className="editor-list">
+          {waiters.map((waiter, index) => {
+            const role = roles.find((item) => item.id === waiter.roleId);
+            return (
+              <article className="editor-row employee-editor-row" key={`${waiter.id}-${index}`}>
+                <Field label="Имя" value={waiter.name} onChange={(value) => updateWaiter(index, { name: value })} />
+                <label className="field">
+                  <span>Должность</span>
+                  <select value={waiter.roleId} onChange={(event) => updateWaiter(index, { roleId: event.target.value })}>
+                    {roles.map((item) => (
+                      <option key={item.id} value={item.id} disabled={!item.active}>{item.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <Field label="Telegram chat_id" value={waiter.telegramChatId} onChange={(value) => updateWaiter(index, { telegramChatId: value })} />
+                <Field
+                  label={role?.kind === "waiter" ? "Ссылка для чаевых" : "Рабочая ссылка"}
+                  value={waiter.tipUrl}
+                  onChange={(value) => updateWaiter(index, { tipUrl: value })}
+                  placeholder={role?.kind === "waiter" ? "https://..." : "Необязательно"}
+                />
+                <label className="toggle-row">
+                  <input type="checkbox" checked={waiter.active} onChange={(event) => updateWaiter(index, { active: event.target.checked })} />
+                  Активен
+                </label>
+                <button
+                  className="icon-button"
+                  aria-label="Удалить сотрудника"
+                  disabled={role?.kind === "owner"}
+                  title={role?.kind === "owner" ? "Владельца нельзя удалить из этого списка" : "Удалить"}
+                  onClick={() => onWaitersChange(waiters.filter((_, waiterIndex) => waiterIndex !== index))}
+                >
+                  <Trash2 size={18} />
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ManagementTelegramEditor({
+  waiters,
+  roles,
+  telegramBotUrl,
+  onChange,
+  onSave
+}: {
+  waiters: Waiter[];
+  roles: StaffRoleDefinition[];
+  telegramBotUrl: string;
+  onChange: (waiters: Waiter[]) => void;
+  onSave: () => void;
+}) {
+  const managementRoleIds = new Set(roles.filter((role) => role.kind === "admin" || role.kind === "owner").map((role) => role.id));
+  const management = waiters.map((waiter, index) => ({ waiter, index })).filter(({ waiter }) => managementRoleIds.has(waiter.roleId));
+  const adminRole = roles.find((role) => role.kind === "admin");
+  const telegramBotName = telegramBotUrl.split("/").filter(Boolean).at(-1) || "Telegram-бот";
+  const update = (index: number, patch: Partial<Waiter>) => {
+    onChange(waiters.map((waiter, waiterIndex) => (waiterIndex === index ? { ...waiter, ...patch } : waiter)));
+  };
+
+  return (
+    <section className="admin-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Администраторы в Telegram</h2>
+          <p className="muted checklist-intro">Сотрудник пишет боту /start, копирует свой chat_id, который необходимо вставить в соответствующее поле нового сотрудника. После этого он сможет начинать смену и получать резервные вызовы гостей.</p>
+        </div>
+        <div className="button-row">
+          {adminRole && (
+            <button
+              className="ghost-button"
+              onClick={() => onChange([...waiters, { id: "", name: "Новый сотрудник", roleId: adminRole.id, telegramChatId: "", tipUrl: "", active: true }])}
+            >
+              <Plus size={18} /> Добавить
+            </button>
+          )}
+          <button className="primary-button compact" onClick={onSave}>
+            <Save size={18} /> Сохранить
+          </button>
+        </div>
+      </div>
+
+      <div className="telegram-registration-band telegram-bot-band">
+        <div className="telegram-qr">
+          <QRCodeSVG value={telegramBotUrl} size={116} />
+        </div>
+        <div>
+          <strong>Подключение сотрудников к Telegram</strong>
+          <p>Добавьте сотрудника и зарегистрируйте его Telegram chat_id. Один chat_id может принадлежать только одному сотруднику.</p>
+          <a className="ghost-button telegram-bot-link" href={telegramBotUrl} target="_blank" rel="noreferrer">
+            <ExternalLink size={17} /> Открыть @{telegramBotName}
+          </a>
+        </div>
+      </div>
+
+      <div className="editor-list">
+        {management.map(({ waiter, index }) => (
+          <article className="editor-row management-editor-row" key={`${waiter.id}-${index}`}>
+            <Field label="Сотрудник" value={waiter.name} onChange={(value) => update(index, { name: value })} />
+            <label className="field">
+              <span>Должность</span>
+              <select value={waiter.roleId} onChange={(event) => update(index, { roleId: event.target.value })}>
+                {roles.filter((role) => role.kind === "admin" || role.kind === "owner").map((role) => (
+                  <option key={role.id} value={role.id}>{role.name}</option>
+                ))}
+              </select>
+            </label>
+            <Field label="Telegram chat_id" value={waiter.telegramChatId} onChange={(value) => update(index, { telegramChatId: value })} />
+            <label className="toggle-row">
+              <input type="checkbox" checked={waiter.active} onChange={(event) => update(index, { active: event.target.checked })} />
+              Активен
+            </label>
+          </article>
+        ))}
+        {!management.length && <p className="muted">Добавьте сотрудника и зарегистрируйте его Telegram chat_id.</p>}
+      </div>
+    </section>
+  );
+}
+
+function ChecklistEditor({
+  items,
+  shiftTasks,
+  roles,
+  waiters,
+  authHeaders,
+  onChange,
+  onSave,
+  onRefresh
+}: {
+  items: ChecklistItem[];
+  shiftTasks: ShiftTask[];
+  roles: StaffRoleDefinition[];
+  waiters: Waiter[];
+  authHeaders: Record<string, string>;
+  onChange: (items: ChecklistItem[]) => void;
+  onSave: () => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const availableRoles = roles.filter((role) => role.active || items.some((item) => item.roleId === role.id));
+  const preferredRoleId = availableRoles.find((role) => role.kind === "waiter")?.id || availableRoles[0]?.id || "";
+  const [roleId, setRoleId] = useState(preferredRoleId);
+  const [section, setSection] = useState<"template" | "tasks">("template");
+  const [taskDate, setTaskDate] = useState(() => new Intl.DateTimeFormat("en-CA").format(new Date()));
+  const [taskWaiterId, setTaskWaiterId] = useState("");
+  const [taskTitle, setTaskTitle] = useState("");
+  const [taskDescription, setTaskDescription] = useState("");
+  const [taskRequired, setTaskRequired] = useState(false);
+  const [taskCountsForRating, setTaskCountsForRating] = useState(true);
+  const [taskBusy, setTaskBusy] = useState(false);
+  const [taskNotice, setTaskNotice] = useState("");
+
+  useEffect(() => {
+    if (!availableRoles.some((role) => role.id === roleId)) setRoleId(preferredRoleId);
+  }, [availableRoles, preferredRoleId, roleId]);
+
+  useEffect(() => setTaskWaiterId(""), [roleId]);
+
+  const roleEntries = items
+    .map((item, globalIndex) => ({ item, globalIndex }))
+    .filter(({ item }) => item.roleId === roleId)
+    .sort((left, right) => left.item.sort - right.item.sort);
+  const roleTasks = shiftTasks
+    .filter((task) => task.roleId === roleId)
+    .sort((left, right) => left.date.localeCompare(right.date) || right.createdAt.localeCompare(left.createdAt));
+  const roleWaiters = waiters.filter((waiter) => waiter.roleId === roleId && waiter.active);
+
+  const updateItem = (globalIndex: number, patch: Partial<ChecklistItem>) => {
+    onChange(items.map((item, index) => (index === globalIndex ? { ...item, ...patch } : item)));
+  };
+
+  const moveItem = (roleIndex: number, direction: -1 | 1) => {
+    const target = roleIndex + direction;
+    if (target < 0 || target >= roleEntries.length) return;
+    const reordered = [...roleEntries];
+    [reordered[roleIndex], reordered[target]] = [reordered[target], reordered[roleIndex]];
+    const sortByIndex = new Map(reordered.map((entry, index) => [entry.globalIndex, (index + 1) * 10]));
+    onChange(items.map((item, index) => sortByIndex.has(index) ? { ...item, sort: sortByIndex.get(index)! } : item));
+  };
+
+  const createTask = async () => {
+    if (!taskDate || !taskTitle.trim() || !roleId) {
+      setTaskNotice("Укажите дату и название задания");
+      return;
+    }
+    setTaskBusy(true);
+    setTaskNotice("");
+    try {
+      await api<ShiftTask>("/api/admin/shift-tasks", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({
+          roleId,
+          waiterId: taskWaiterId || null,
+          date: taskDate,
+          title: taskTitle.trim(),
+          description: taskDescription.trim(),
+          requiredForCalls: taskRequired,
+          countsForRating: taskCountsForRating
+        })
+      });
+      setTaskTitle("");
+      setTaskDescription("");
+      setTaskRequired(false);
+      setTaskCountsForRating(true);
+      setTaskNotice(taskWaiterId ? "Задание назначено сотруднику" : "Задание назначено всей должности");
+      await onRefresh();
+    } catch (requestError) {
+      setTaskNotice(requestError instanceof Error ? requestError.message : "Не удалось создать задание");
+    } finally {
+      setTaskBusy(false);
+    }
+  };
+
+  const deleteTask = async (task: ShiftTask) => {
+    if (!window.confirm(`Удалить задание «${task.title}»? Уже созданные смены сохранят его в своей истории.`)) return;
+    setTaskBusy(true);
+    setTaskNotice("");
+    try {
+      await api(`/api/admin/shift-tasks/${task.id}`, { method: "DELETE", headers: authHeaders });
+      setTaskNotice("Задание удалено из расписания");
+      await onRefresh();
+    } catch (requestError) {
+      setTaskNotice(requestError instanceof Error ? requestError.message : "Не удалось удалить задание");
+    } finally {
+      setTaskBusy(false);
+    }
+  };
+
+  return (
+    <section className="admin-panel checklist-workspace">
+      <div className="panel-heading">
+        <div>
+          <h2>Чек-листы по должностям</h2>
+          <p className="muted checklist-intro">Шаблон повторяется каждую смену. Задания по датам добавляются к шаблону только в назначенный день.</p>
+        </div>
+      </div>
+
+      <div className="role-tabs" role="tablist" aria-label="Должность">
+        {availableRoles.map((role) => (
+          <button key={role.id} className={roleId === role.id ? "active" : ""} onClick={() => setRoleId(role.id)}>
+            {role.name}
+          </button>
+        ))}
+      </div>
+
+      <div className="checklist-section-tabs" role="tablist" aria-label="Раздел чек-листа">
+        <button className={section === "template" ? "active" : ""} onClick={() => setSection("template")}>
+          <ClipboardCheck size={17} /> Шаблон смены
+        </button>
+        <button className={section === "tasks" ? "active" : ""} onClick={() => setSection("tasks")}>
+          <CalendarDays size={17} /> Задания по датам
+        </button>
+      </div>
+
+      {section === "template" ? (
+        <div className="checklist-section-body">
+          <div className="section-toolbar">
+            <p className="muted">Обязательные пункты блокируют рабочие уведомления официанта до выполнения.</p>
+            <div className="button-row">
+              <button
+                className="ghost-button"
+                onClick={() => onChange([...items, {
+                  id: crypto.randomUUID(),
+                  roleId,
+                  title: "Новый пункт",
+                   description: "",
+                   requiredForCalls: false,
+                   countsForRating: true,
+                   active: true,
+                  sort: (roleEntries.length + 1) * 10
+                }])}
+              >
+                <Plus size={18} /> Пункт
+              </button>
+              <button className="primary-button compact" onClick={onSave}>
+                <Save size={18} /> Сохранить шаблоны
+              </button>
+            </div>
+          </div>
+
+          <div className="editor-list">
+            {roleEntries.map(({ item, globalIndex }, roleIndex) => (
+              <article className="checklist-template-row" key={item.id}>
+                <div className="reorder-buttons" aria-label="Порядок пункта">
+                  <button className="icon-button" disabled={roleIndex === 0} onClick={() => moveItem(roleIndex, -1)} aria-label="Поднять выше"><ArrowUp size={17} /></button>
+                  <button className="icon-button" disabled={roleIndex === roleEntries.length - 1} onClick={() => moveItem(roleIndex, 1)} aria-label="Опустить ниже"><ArrowDown size={17} /></button>
+                </div>
+                <Field label="Задача" value={item.title} onChange={(value) => updateItem(globalIndex, { title: value })} />
+                <Field label="Пояснение" value={item.description} onChange={(value) => updateItem(globalIndex, { description: value })} />
+                <label className="toggle-row">
+                  <input type="checkbox" checked={item.requiredForCalls} onChange={(event) => updateItem(globalIndex, { requiredForCalls: event.target.checked })} />
+                  Обязателен для допуска
+                </label>
+                <label className="toggle-row">
+                  <input type="checkbox" checked={item.countsForRating !== false} onChange={(event) => updateItem(globalIndex, { countsForRating: event.target.checked })} />
+                  Учитывать в рейтинге
+                </label>
+                <label className="toggle-row">
+                  <input type="checkbox" checked={item.active} onChange={(event) => updateItem(globalIndex, { active: event.target.checked })} />
+                  Активен
+                </label>
+                <button className="icon-button" onClick={() => onChange(items.filter((_, index) => index !== globalIndex))} aria-label="Удалить пункт">
+                  <Trash2 size={18} />
+                </button>
+              </article>
+            ))}
+            {!roleEntries.length && <p className="muted">Для этой должности шаблон пока пуст.</p>}
+          </div>
+        </div>
+      ) : (
+        <div className="checklist-section-body">
+          <div className="shift-task-form">
+            <label className="field">
+              <span>Дата выполнения</span>
+              <input type="date" value={taskDate} onChange={(event) => setTaskDate(event.target.value)} />
+            </label>
+            <label className="field">
+              <span>Кому назначить</span>
+              <select
+                value={taskWaiterId}
+                title={taskWaiterId ? roleWaiters.find((waiter) => waiter.id === taskWaiterId)?.name : "Всем сотрудникам должности"}
+                onChange={(event) => setTaskWaiterId(event.target.value)}
+              >
+                <option value="">Всем сотрудникам должности</option>
+                {roleWaiters.map((waiter) => <option key={waiter.id} value={waiter.id}>{waiter.name}</option>)}
+              </select>
+            </label>
+            <Field label="Задание" value={taskTitle} onChange={setTaskTitle} placeholder="Например: проверить летнюю веранду" />
+            <Field label="Пояснение" value={taskDescription} onChange={setTaskDescription} placeholder="Что именно нужно сделать" />
+            <label className="toggle-row shift-task-required">
+              <input type="checkbox" checked={taskRequired} onChange={(event) => setTaskRequired(event.target.checked)} />
+              Обязательно для допуска
+            </label>
+            <label className="toggle-row shift-task-required">
+              <input type="checkbox" checked={taskCountsForRating} onChange={(event) => setTaskCountsForRating(event.target.checked)} />
+              Учитывать в рейтинге
+            </label>
+            <button className="primary-button compact shift-task-submit" disabled={taskBusy} onClick={() => void createTask()}>
+              <Plus size={18} /> Назначить
+            </button>
+          </div>
+          <p className="muted checklist-intro">Персональное задание отправляется в Telegram в назначенную дату даже без открытой смены. Задание всей должности появляется у каждого сотрудника при начале смены.</p>
+          {taskNotice && <div className="task-notice">{taskNotice}</div>}
+
+          <div className="shift-task-list">
+            {roleTasks.map((task) => {
+              const waiter = waiters.find((item) => item.id === task.waiterId);
+              return (
+                <article className="shift-task-row" key={task.id}>
+                  <div className="shift-task-date">
+                    <CalendarDays size={18} />
+                    <strong>{new Intl.DateTimeFormat("ru-RU").format(new Date(`${task.date}T12:00:00`))}</strong>
+                  </div>
+                  <div>
+                    <strong>{task.title}</strong>
+                    <span>{task.description || "Без пояснения"}</span>
+                  </div>
+                  <div>
+                    <strong>{waiter?.name || "Вся должность"}</strong>
+                    <span>{task.waiterId ? (task.notified ? "Telegram отправлен" : "Ожидает даты отправки") : "При начале смены"}</span>
+                  </div>
+                  <div className="task-badges">
+                    {task.requiredForCalls && <span className="required-badge">Обязательное</span>}
+                    {task.countsForRating === false && <span className="rating-excluded-badge">Без рейтинга</span>}
+                  </div>
+                  <button className="icon-button" disabled={taskBusy} onClick={() => void deleteTask(task)} aria-label="Удалить задание">
+                    <Trash2 size={18} />
+                  </button>
+                </article>
+              );
+            })}
+            {!roleTasks.length && <p className="muted">На выбранные даты заданий пока нет.</p>}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function filterPerformanceAnalytics(performance: PerformanceAnalytics, roleIds: string[]): PerformanceAnalytics {
+  const allowed = new Set(roleIds);
+  const roleSummaries = performance.roleSummaries.filter((item) => allowed.has(item.roleId));
+  const taskPatterns = performance.taskPatterns.filter((item) => allowed.has(item.roleId));
+  const employeePatterns = performance.employeePatterns.filter((item) => allowed.has(item.roleId));
+  const recommendations = taskPatterns
+    .filter((item) => item.assignments >= 2 && item.issueRate >= 25)
+    .slice(0, 5)
+    .map((item) => `${item.roleName}: «${item.taskTitle}» дает сбой в ${item.issueRate}% случаев.`);
+  return {
+    generatedAt: performance.generatedAt,
+    analyzedShiftCount: roleSummaries.reduce((sum, item) => sum + item.ratedShiftCount, 0),
+    roleSummaries,
+    taskPatterns,
+    employeePatterns,
+    recommendations: recommendations.length ? recommendations : ["Повторяющихся сбоев для устойчивого вывода пока недостаточно."]
+  };
+}
+
+type ShiftReviewDraft = Record<string, Record<string, { score: number; comment: string }>>;
+
+function StarScore({ value, disabled, onChange }: { value: number; disabled?: boolean; onChange: (value: number) => void }) {
+  return (
+    <div className={`star-score-control${disabled ? " disabled" : ""}`} role="radiogroup" aria-label="Оценка задания">
+      {[1, 2, 3, 4, 5].map((star) => (
+        <button
+          type="button"
+          key={star}
+          disabled={disabled}
+          className={star <= value ? "selected" : ""}
+          onClick={() => onChange(star)}
+          aria-label={`${star} ${star === 1 ? "звезда" : star < 5 ? "звезды" : "звезд"}`}
+        >
+          <Star size={20} fill={star <= value ? "currentColor" : "none"} />
+        </button>
+      ))}
+      <strong>{value || 0}</strong>
+    </div>
+  );
+}
+
+function ShiftsAndRatings({
+  ratings,
+  shifts,
+  performance,
+  performanceAiEnabled,
+  authHeaders,
+  onRefresh,
+  title
+}: {
+  ratings: WaiterRating[];
+  shifts: WaiterShift[];
+  performance: PerformanceAnalytics;
+  performanceAiEnabled: boolean;
+  authHeaders: Record<string, string>;
+  onRefresh: () => Promise<void>;
+  title: string;
+}) {
+  const [drafts, setDrafts] = useState<ShiftReviewDraft>({});
+  const [savingShift, setSavingShift] = useState("");
+  const [notice, setNotice] = useState("");
+  const [selectedRoleId, setSelectedRoleId] = useState("all");
+  const [insight, setInsight] = useState<PerformanceInsightReport | null>(null);
+  const [insightBusy, setInsightBusy] = useState(false);
+  const [journalDate, setJournalDate] = useState("");
+  const ratedEmployees = ratings.filter((item) => item.shiftCount > 0);
+  const average = ratedEmployees.length
+    ? Math.round((ratedEmployees.reduce((sum, item) => sum + item.score, 0) / ratedEmployees.length) * 100) / 100
+    : 0;
+  const visibleRatings = selectedRoleId === "all" ? ratings : ratings.filter((item) => item.roleId === selectedRoleId);
+  const roleTabs = performance.roleSummaries;
+  const journalShifts = shifts
+    .filter((shift) => !journalDate || new Intl.DateTimeFormat("en-CA").format(new Date(shift.startedAt)) === journalDate)
+    .slice(0, 80);
+
+  const draftFor = (shift: WaiterShift, itemId: string) => {
+    const item = shift.checklist.find((entry) => entry.itemId === itemId)!;
+    return drafts[shift.id]?.[itemId] || {
+      score: item.completedAt && item.countsForRating !== false ? (item.adminScore ?? 5) : 0,
+      comment: item.adminComment
+    };
+  };
+
+  const updateDraft = (shift: WaiterShift, itemId: string, patch: Partial<{ score: number; comment: string }>) => {
+    const current = draftFor(shift, itemId);
+    setDrafts((value) => ({
+      ...value,
+      [shift.id]: {
+        ...(value[shift.id] || {}),
+        [itemId]: { ...current, ...patch }
+      }
+    }));
+  };
+
+  const saveReview = async (shift: WaiterShift) => {
+    setSavingShift(shift.id);
+    setNotice("");
+    try {
+      await api(`/api/admin/shifts/${shift.id}/review`, {
+        method: "PUT",
+        headers: authHeaders,
+        body: JSON.stringify({
+          reviews: shift.checklist.map((item) => {
+            const draft = draftFor(shift, item.itemId);
+            return {
+              itemId: item.itemId,
+              score: item.completedAt && item.countsForRating !== false ? Math.max(1, Math.min(5, draft.score)) : null,
+              comment: draft.comment
+            };
+          })
+        })
+      });
+      setNotice("Оценка смены сохранена");
+      await onRefresh();
+    } catch (requestError) {
+      setNotice(requestError instanceof Error ? requestError.message : "Не удалось сохранить оценку");
+    } finally {
+      setSavingShift("");
+    }
+  };
+
+  const statusText = (shift: WaiterShift) => shift.status === "ended" ? "Завершена" : shift.status === "active" ? "На линии" : "Выполняет чек-лист";
+
+  const generateInsight = async () => {
+    setInsightBusy(true);
+    setNotice("");
+    try {
+      const report = await api<PerformanceInsightReport>("/api/admin/performance-insights", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ roleIds: performance.roleSummaries.map((item) => item.roleId) })
+      });
+      setInsight(report);
+    } catch (requestError) {
+      setNotice(requestError instanceof Error ? requestError.message : "Не удалось сформировать анализ");
+    } finally {
+      setInsightBusy(false);
+    }
+  };
+
+  return (
+    <div className="shift-admin-layout">
+      <div className="admin-grid shift-metrics">
+        <Metric title="Сотрудников в рейтинге" value={ratings.length} icon={<Users size={22} />} />
+        <Metric title="Средний рейтинг" value={`${average} ★`} icon={<Star size={22} />} />
+        <Metric title="Активные смены" value={shifts.filter((shift) => shift.status !== "ended").length} icon={<Clock size={22} />} />
+        <Metric title="Ожидают чек-лист" value={shifts.filter((shift) => shift.status === "checklist").length} icon={<ClipboardCheck size={22} />} />
+      </div>
+
+      <section className="admin-panel">
+        <div className="panel-heading"><div><h2>{title}: рейтинг по подразделениям</h2><p className="muted">Место считается отдельно внутри каждой должности.</p></div><Trophy size={20} /></div>
+        {roleTabs.length > 1 && (
+          <div className="role-tabs performance-role-tabs" role="tablist" aria-label="Подразделение">
+            <button className={selectedRoleId === "all" ? "active" : ""} onClick={() => setSelectedRoleId("all")}>Все</button>
+            {roleTabs.map((role) => <button key={role.roleId} className={selectedRoleId === role.roleId ? "active" : ""} onClick={() => setSelectedRoleId(role.roleId)}>{role.roleName}</button>)}
+          </div>
+        )}
+        <div className="ops-table-wrap">
+          <table className="ops-table">
+            <thead><tr><th>Место</th><th>Сотрудник</th><th>Должность</th><th>Рейтинг</th><th>Накоплено</th><th>Выполнение</th><th>Динамика</th><th>Смен</th></tr></thead>
+            <tbody>
+              {visibleRatings.map((rating) => (
+                <tr key={rating.waiterId}>
+                  <td className="ranking-place">#{rating.rank}</td>
+                  <td><strong>{rating.waiterName}</strong></td>
+                  <td>{rating.roleName}</td>
+                  <td><span className="rating-value"><Star size={16} fill="currentColor" /><strong>{rating.shiftCount ? rating.score : "—"}</strong></span></td>
+                  <td>{rating.totalStars} ★</td>
+                  <td>{rating.completionRate}%</td>
+                  <td><span className={rating.trend > 0 ? "trend-up" : rating.trend < 0 ? "trend-down" : "muted"}>{rating.trend > 0 ? "+" : ""}{rating.trend}</span></td>
+                  <td>{rating.shiftCount}</td>
+                </tr>
+              ))}
+              {!visibleRatings.length && <tr><td className="ops-table-empty" colSpan={8}>Завершенных смен для рейтинга пока нет.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="admin-panel">
+        <div className="panel-heading"><div><h2>Сравнение подразделений</h2><p className="muted">Средняя оценка и дисциплина выполнения задач по каждой должности.</p></div><Users size={20} /></div>
+        <div className="ops-table-wrap">
+          <table className="ops-table">
+            <thead><tr><th>Подразделение</th><th>Сотрудников</th><th>Оцененных смен</th><th>Средний рейтинг</th><th>Выполнение задач</th></tr></thead>
+            <tbody>
+              {performance.roleSummaries.map((role) => <tr key={role.roleId}><td><strong>{role.roleName}</strong></td><td>{role.employeeCount}</td><td>{role.ratedShiftCount}</td><td>{role.ratedShiftCount ? `${role.averageStars} ★` : "—"}</td><td>{role.completionRate}%</td></tr>)}
+              {!performance.roleSummaries.length && <tr><td className="ops-table-empty" colSpan={5}>Данных по подразделениям пока нет.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="admin-panel performance-patterns-panel">
+        <div className="panel-heading"><div><h2>Повторяющиеся сбои</h2><p className="muted">Высокая частота у разных сотрудников может указывать на проблему процесса, инструкции или ресурсов.</p></div><AlertTriangle size={20} /></div>
+        <div className="ops-table-wrap">
+          <table className="ops-table">
+            <thead><tr><th>Подразделение</th><th>Задача</th><th>Назначено</th><th>Не выполнено</th><th>Низких оценок</th><th>Средняя оценка</th><th>Сбой</th></tr></thead>
+            <tbody>
+              {performance.taskPatterns.filter((item) => item.issueRate > 0).slice(0, 12).map((item) => (
+                <tr key={item.key}><td>{item.roleName}</td><td><strong>{item.taskTitle}</strong>{!item.countsForRating && <small className="table-note">Без влияния на рейтинг</small>}</td><td>{item.assignments}</td><td>{item.missed}</td><td>{item.lowRatings}</td><td>{item.averageStars === null ? "—" : `${item.averageStars} ★`}</td><td><strong>{item.issueRate}%</strong></td></tr>
+              ))}
+              {!performance.taskPatterns.some((item) => item.issueRate > 0) && <tr><td className="ops-table-empty" colSpan={7}>Повторяющихся сбоев пока не обнаружено.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="admin-panel employee-patterns-panel">
+        <div className="panel-heading"><div><h2>Паттерны конкретных сотрудников</h2><p className="muted">Список строится по повторяющимся пропускам и оценкам ниже 4 звезд.</p></div><UserRound size={20} /></div>
+        <div className="employee-pattern-grid">
+          {performance.employeePatterns.slice(0, 12).map((item) => (
+            <article key={item.key} className="employee-pattern-row">
+              <div><strong>{item.waiterName}</strong><span>{item.roleName}</span></div>
+              <div><strong>{item.taskTitle}</strong><span>{item.missed} пропусков · {item.lowRatings} низких оценок · сбой {item.issueRate}%</span></div>
+              <p>{item.recommendation}</p>
+            </article>
+          ))}
+          {!performance.employeePatterns.length && <p className="muted">Индивидуальных повторяющихся нарушений пока нет.</p>}
+        </div>
+      </section>
+
+      <section className="admin-panel ai-insight-panel">
+        <div className="panel-heading">
+          <div><h2>ИИ-анализ эффективности</h2><p className="muted">{performanceAiEnabled ? "ИИ подключен. Анализ отделяет массовые сбои процесса от индивидуальных повторений." : "ИИ не настроен. Доступен резервный локальный анализ."}</p></div>
+          <button className="primary-button compact" disabled={insightBusy} onClick={() => void generateInsight()}><Sparkles size={18} /> {insightBusy ? "Анализируем" : "Запустить анализ"}</button>
+        </div>
+        {insight && (
+          <div className="ai-insight-result">
+            <div className="ai-insight-meta"><span>{insight.source === "openrouter" ? "OpenRouter" : "Локальный анализ"}</span><span>{insight.model}</span><span>{formatDate(insight.generatedAt)}</span></div>
+            <p className="ai-summary">{insight.summary}</p>
+            {insight.warning && <div className="task-notice">{insight.warning}</div>}
+            <div className="ai-recommendation-grid">
+              {insight.recommendations.map((item, index) => <article key={`${index}-${item}`}><strong>{index + 1}</strong><p>{item}</p></article>)}
+            </div>
+            {insight.employeeAdvice.length > 0 && (
+              <div className="ai-employee-advice">
+                <h3>Персональные рекомендации сотрудникам</h3>
+                {insight.employeeAdvice.map((item) => (
+                  <article key={item.waiterId}>
+                    <strong>{ratings.find((rating) => rating.waiterId === item.waiterId)?.waiterName || "Сотрудник"}</strong>
+                    <p>{item.advice}</p>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="admin-panel">
+        <div className="panel-heading shift-journal-heading">
+          <div><h2>{title}: журнал</h2><p className="muted">Выберите дату, чтобы показать смены только за нужный день.</p></div>
+          <div className="shift-journal-filter">
+            <label className="field">
+              <span><CalendarDays size={16} /> Дата смены</span>
+              <input type="date" value={journalDate} onChange={(event) => setJournalDate(event.target.value)} />
+            </label>
+            {journalDate && <button className="icon-button" onClick={() => setJournalDate("")} aria-label="Показать все даты" title="Показать все даты"><X size={18} /></button>}
+          </div>
+        </div>
+        {notice && <div className="task-notice">{notice}</div>}
+        <div className="shift-review-list">
+          {journalShifts.map((shift) => (
+            <details className="shift-review" key={shift.id}>
+              <summary>
+                <span>
+                  <strong>{shift.waiterName} · {shift.roleName}</strong>
+                  <small>{statusText(shift)} · {formatDate(shift.startedAt)} · {shift.zones.join(", ")}</small>
+                </span>
+                <span className="shift-score">{shift.checklist.some((item) => item.countsForRating !== false) ? `${shift.score} / 5 ★` : "Без оценки"}</span>
+              </summary>
+              <div className="shift-review-items">
+                {shift.checklist.map((item) => {
+                  const draft = draftFor(shift, item.itemId);
+                  return (
+                    <div className="shift-review-row" key={item.itemId}>
+                      <div className="shift-review-task">
+                        {item.completedAt ? <CheckCircle2 size={20} /> : <AlertTriangle size={20} />}
+                        <span><strong>{item.title}</strong><small>{item.completedAt ? `Выполнено ${formatDate(item.completedAt)}` : "Не выполнено · 0 звезд"}{item.countsForRating === false ? " · не влияет на рейтинг" : ""}</small></span>
+                      </div>
+                      <div className="field star-review-field"><span>Оценка</span>{item.countsForRating === false ? <span className="rating-excluded-badge">Не учитывается</span> : <StarScore value={draft.score} disabled={!item.completedAt} onChange={(score) => updateDraft(shift, item.itemId, { score })} />}</div>
+                      <Field label="Комментарий" value={draft.comment} onChange={(value) => updateDraft(shift, item.itemId, { comment: value })} placeholder="Что улучшить или почему снижена оценка" />
+                    </div>
+                  );
+                })}
+                <div className="shift-review-actions">
+                  <button className="primary-button compact" disabled={savingShift === shift.id} onClick={() => void saveReview(shift)}>
+                    <Save size={18} /> {savingShift === shift.id ? "Сохраняем" : "Сохранить оценку"}
+                  </button>
+                </div>
+              </div>
+            </details>
+          ))}
+          {!journalShifts.length && <p className="muted">{journalDate ? "На выбранную дату смен нет." : "Смен по этой группе пока нет."}</p>}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1843,14 +2770,354 @@ function Field({
   short?: boolean;
   placeholder?: string;
 }) {
+  const helpText = placeholder && placeholder.length > 18 ? placeholder : "";
   return (
     <label className={`field ${full ? "field-full" : ""} ${short ? "field-short" : ""}`}>
-      <span>{label}</span>
+      <span className="field-label">
+        {label}
+        {helpText && (
+          <span className="field-help" tabIndex={0} aria-label={`Подсказка: ${helpText}`}>
+            <CircleHelp size={15} />
+            <span className="field-tooltip" role="tooltip">{helpText}</span>
+          </span>
+        )}
+      </span>
       {textarea ? (
-        <textarea rows={4} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+        <textarea rows={4} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} title={value || helpText || undefined} />
       ) : (
-        <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+        <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} title={value || helpText || undefined} />
       )}
     </label>
+  );
+}
+
+function GuestPopupGallery({
+  popups,
+  onClose,
+  onAction
+}: {
+  popups: PopupNotification[];
+  onClose: () => void;
+  onAction: (url: string) => void;
+}) {
+  const [index, setIndex] = useState(0);
+  const [touchStart, setTouchStart] = useState<number | null>(null);
+  const popup = popups[index];
+  if (!popup) return null;
+
+  const finishSwipe = (clientX: number) => {
+    if (touchStart === null) return;
+    const delta = clientX - touchStart;
+    if (delta < -45 && index < popups.length - 1) setIndex(index + 1);
+    if (delta > 45 && index > 0) setIndex(index - 1);
+    setTouchStart(null);
+  };
+
+  return (
+    <div className="popup-overlay" onClick={onClose}>
+      <div
+        className="popup-card"
+        onClick={(e) => e.stopPropagation()}
+        onTouchStart={(event) => setTouchStart(event.touches[0]?.clientX ?? null)}
+        onTouchEnd={(event) => finishSwipe(event.changedTouches[0]?.clientX ?? 0)}
+      >
+        {popup.imageUrl ? (
+          <img className="popup-image" src={popup.imageUrl} alt="" />
+        ) : (
+          <div className="popup-no-image">
+            <Gift size={48} color="rgba(255,253,250,0.8)" />
+          </div>
+        )}
+        <button className="popup-close icon-button" onClick={onClose} aria-label="Закрыть">
+          <X size={20} />
+        </button>
+        <div className="popup-body">
+          <h2 className="popup-title">{popup.title}</h2>
+          <p className="popup-text" style={{ whiteSpace: "pre-wrap" }}>{popup.body}</p>
+
+          {popup.buttonText && (
+            <button
+              className="primary-button"
+              style={{ width: "100%", marginTop: 16 }}
+              onClick={() => onAction(popup.buttonUrl)}
+            >
+              {popup.buttonText}
+            </button>
+          )}
+
+          {popups.length > 1 && (
+            <div className="popup-gallery-controls" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '16px', marginTop: '20px' }}>
+              <button
+                className="icon-button"
+                style={{ background: 'rgba(255,253,250,0.1)', minHeight: '36px', padding: '0 8px' }}
+                disabled={index === 0}
+                onClick={() => setIndex(index - 1)}
+              >
+                <ChevronLeft size={20} />
+              </button>
+              <span style={{ fontSize: '14px', color: 'rgba(255,253,250,0.6)' }}>
+                {index + 1} из {popups.length}
+              </span>
+              <button
+                className="icon-button"
+                style={{ background: 'rgba(255,253,250,0.1)', minHeight: '36px', padding: '0 8px' }}
+                disabled={index === popups.length - 1}
+                onClick={() => setIndex(index + 1)}
+              >
+                <ChevronRight size={20} />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PopupsEditor({
+  popups,
+  authHeaders,
+  onChange
+}: {
+  popups: PopupNotification[];
+  authHeaders: Record<string, string>;
+  onChange: () => void;
+}) {
+  const [editingPopup, setEditingPopup] = useState<Partial<PopupNotification> | null>(null);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [imageFile, setImageFile] = useState<File | null>(null);
+
+  const savePopup = async () => {
+    if (!editingPopup?.title?.trim() || !editingPopup?.body?.trim()) {
+      setError("Заголовок и текст обязательны");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+
+    try {
+      let imageUrl = editingPopup.imageUrl || "";
+
+      if (imageFile) {
+        const uploadResponse = await fetch("/api/admin/upload", {
+          method: "POST",
+          body: imageFile,
+          headers: { ...authHeaders, "content-type": imageFile.type }
+        });
+        const uploadResult = await uploadResponse.json();
+        if (!uploadResponse.ok) throw new Error(uploadResult.error || "Ошибка загрузки картинки");
+        imageUrl = uploadResult.url;
+      }
+
+      const payload = {
+        ...editingPopup,
+        imageUrl,
+        title: editingPopup.title.trim(),
+        body: editingPopup.body.trim(),
+        buttonText: editingPopup.buttonText?.trim() || "",
+        buttonUrl: editingPopup.buttonUrl?.trim() || "",
+        active: editingPopup.active ?? true,
+        sort: editingPopup.sort ?? (popups.length + 1) * 10
+      };
+
+      if (editingPopup.id) {
+        await api(`/api/admin/popups/${editingPopup.id}`, {
+          method: "PUT",
+          headers: authHeaders,
+          body: JSON.stringify(payload)
+        });
+      } else {
+        await api("/api/admin/popups", {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify(payload)
+        });
+      }
+
+      setEditingPopup(null);
+      setImageFile(null);
+      onChange();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Ошибка сохранения");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deletePopup = async (id: string) => {
+    if (!window.confirm("Удалить это уведомление?")) return;
+    try {
+      await api(`/api/admin/popups/${id}`, { method: "DELETE", headers: authHeaders });
+      onChange();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Ошибка удаления");
+    }
+  };
+
+  const toggleActive = async (popup: PopupNotification) => {
+    try {
+      await api(`/api/admin/popups/${popup.id}`, {
+        method: "PUT",
+        headers: authHeaders,
+        body: JSON.stringify({ active: !popup.active })
+      });
+      onChange();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Ошибка");
+    }
+  };
+
+  return (
+    <div className="admin-panel" style={{ padding: "20px" }}>
+      <div className="panel-heading">
+        <h2>Всплывающие уведомления</h2>
+        {!editingPopup && (
+          <button className="primary-button" onClick={() => setEditingPopup({ active: true })}>
+            <Plus size={16} /> Создать уведомление
+          </button>
+        )}
+      </div>
+
+      {editingPopup ? (
+        <div style={{ marginTop: "24px", padding: "20px", border: "1px solid #ded6c8", borderRadius: "8px", background: "#f8f0ef" }}>
+          <h3 style={{ marginTop: 0, marginBottom: "16px" }}>{editingPopup.id ? "Редактировать уведомление" : "Новое уведомление"}</h3>
+
+          <div style={{ display: "grid", gap: "12px" }}>
+            <label>
+              <strong>Заголовок</strong>
+              <input
+                value={editingPopup.title || ""}
+                onChange={(e) => setEditingPopup({ ...editingPopup, title: e.target.value })}
+                placeholder="Например: 500 ₽ за регистрацию!"
+              />
+            </label>
+
+            <label>
+              <strong>Текст уведомления</strong>
+              <textarea
+                value={editingPopup.body || ""}
+                onChange={(e) => setEditingPopup({ ...editingPopup, body: e.target.value })}
+                placeholder="Опишите подробности..."
+                rows={4}
+              />
+            </label>
+
+            <label>
+              <strong>Картинка (необязательно)</strong>
+              <input
+                type="file"
+                accept="image/png, image/jpeg, image/webp"
+                onChange={(e) => {
+                  if (e.target.files && e.target.files[0]) {
+                    setImageFile(e.target.files[0]);
+                  }
+                }}
+                style={{ padding: '8px' }}
+              />
+              {(imageFile || editingPopup.imageUrl) && (
+                <div style={{ marginTop: '8px', fontSize: '13px', color: '#8b163f' }}>Картинка выбрана</div>
+              )}
+            </label>
+
+            <label>
+              <strong>Текст кнопки (необязательно)</strong>
+              <input
+                value={editingPopup.buttonText || ""}
+                onChange={(e) => setEditingPopup({ ...editingPopup, buttonText: e.target.value })}
+                placeholder="Например: Получить карту"
+              />
+            </label>
+
+            <label>
+              <strong>Ссылка для кнопки (необязательно)</strong>
+              <input
+                value={editingPopup.buttonUrl || ""}
+                onChange={(e) => setEditingPopup({ ...editingPopup, buttonUrl: e.target.value })}
+                placeholder="Например: /loyalty или https://..."
+              />
+              <small style={{ display: 'block', marginTop: '4px', color: '#666' }}>Если пусто — кнопка только закроет уведомление.</small>
+            </label>
+
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "8px" }}>
+              <input
+                type="checkbox"
+                checked={editingPopup.active ?? true}
+                onChange={(e) => setEditingPopup({ ...editingPopup, active: e.target.checked })}
+                style={{ width: "auto" }}
+              />
+              <strong>Показывать гостям (Активно)</strong>
+            </label>
+
+            <label>
+              <strong>Порядок показа (чем меньше, тем раньше)</strong>
+              <input
+                type="number"
+                value={editingPopup.sort ?? ""}
+                onChange={(e) => setEditingPopup({ ...editingPopup, sort: parseInt(e.target.value, 10) || 0 })}
+              />
+            </label>
+          </div>
+
+          {error && <div className="error-line" style={{ marginTop: "16px" }}>{error}</div>}
+
+          <div style={{ display: "flex", gap: "10px", marginTop: "24px" }}>
+            <button className="primary-button" onClick={() => void savePopup()} disabled={saving}>
+              {saving ? "Сохранение..." : "Сохранить"}
+            </button>
+            <button className="ghost-button" onClick={() => { setEditingPopup(null); setImageFile(null); }} disabled={saving}>
+              Отмена
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ marginTop: "24px", display: "grid", gap: "12px" }}>
+          {popups.length === 0 ? (
+            <div className="empty-state" style={{ minHeight: "120px" }}>Уведомлений пока нет</div>
+          ) : (
+            popups.map(popup => (
+              <div key={popup.id} style={{ border: "1px solid #ded6c8", borderRadius: "8px", padding: "16px", display: "flex", gap: "16px", background: popup.active ? "#fff" : "#f9f9f9", opacity: popup.active ? 1 : 0.7 }}>
+                {popup.imageUrl ? (
+                  <img src={popup.imageUrl} alt="" style={{ width: "120px", height: "80px", objectFit: "cover", borderRadius: "4px" }} />
+                ) : (
+                  <div style={{ width: "120px", height: "80px", background: "#eee", borderRadius: "4px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <Gift size={24} color="#ccc" />
+                  </div>
+                )}
+
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "6px" }}>
+                    <span style={{ fontSize: "12px", padding: "2px 6px", borderRadius: "4px", background: popup.active ? "#dff2df" : "#123c28", color: popup.active ? "#123c28" : "#fff", fontWeight: "bold" }}>
+                      {popup.active ? "АКТИВНО" : "НЕАКТИВНО"}
+                    </span>
+                    <strong style={{ fontSize: "16px" }}>{popup.title}</strong>
+                  </div>
+                  <div style={{ fontSize: "14px", color: "#666", marginBottom: "8px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {popup.body}
+                  </div>
+                  <div style={{ fontSize: "12px", color: "#888", display: "flex", gap: "16px" }}>
+                    <span>Кнопка: {popup.buttonText || "нет"}</span>
+                    <span>Порядок: {popup.sort}</span>
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px", minWidth: "140px" }}>
+                  <button className="ghost-button" style={{ minHeight: "32px", fontSize: "13px" }} onClick={() => toggleActive(popup)}>
+                    {popup.active ? "Деактивировать" : "Активировать"}
+                  </button>
+                  <button className="ghost-button" style={{ minHeight: "32px", fontSize: "13px" }} onClick={() => setEditingPopup(popup)}>
+                    Редактировать
+                  </button>
+                  <button className="ghost-button" style={{ minHeight: "32px", fontSize: "13px", color: "#7b1e17" }} onClick={() => void deletePopup(popup.id)}>
+                    Удалить
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
   );
 }

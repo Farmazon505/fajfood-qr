@@ -8,10 +8,18 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { assertProductionSecrets, createAdminToken, requireAdmin, adminPassword } from "./auth";
+import {
+  assertProductionSecrets,
+  authenticateAdmin,
+  createAdminToken,
+  getAdminAuth,
+  requireAdmin,
+  requireOwner
+} from "./auth";
 import { config, publicBaseUrl } from "./config";
 import { Store } from "./store";
 import { TelegramService } from "./telegram";
+import { generatePerformanceInsights, isPerformanceAiConfigured } from "./performance-ai";
 import type { CallStatus } from "./types";
 import { crmLoyalty } from "./crm-loyalty";
 import {
@@ -70,6 +78,13 @@ const adminLoginLimiter = rateLimit({
 const loyaltyLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const performanceAiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 6,
   standardHeaders: true,
   legacyHeaders: false
 });
@@ -141,6 +156,16 @@ const feedbackSchema = z.object({
   phone: z.string().max(40).optional().default("")
 });
 
+const shiftReviewSchema = z.object({
+  reviews: z.array(
+    z.object({
+      itemId: z.string().min(1),
+      score: z.number().min(1).max(5).nullable(),
+      comment: z.string().max(500).optional().default("")
+    })
+  )
+});
+
 const logoContentTypes: Record<string, string> = {
   "image/png": "png",
   "image/jpeg": "jpg",
@@ -201,12 +226,15 @@ app.post("/api/public/calls", publicLimiter, async (request, response) => {
   }
 
   const waiters = store.waitersForTable(table);
-  const call = await store.addCall({
+  const routingStage = waiters.length ? "waiter" : "admin";
+  const call = await store.upsertCall({
     table,
     action,
     comment: parsed.data.comment,
     guestName: parsed.data.guestName,
-    assignedWaiterId: waiters.length === 1 ? waiters[0].id : null
+    assignedWaiterId: waiters.length === 1 ? waiters[0].id : null,
+    routingStage,
+    routingReason: routingStage === "admin" ? store.callFallbackReason(table) : ""
   });
 
   const messages = await telegram.notifyCall({
@@ -215,9 +243,8 @@ app.post("/api/public/calls", publicLimiter, async (request, response) => {
     waiters,
     settings: store.snapshot().settings
   });
-  if (messages.length) await store.attachTelegramMessages(call.id, messages);
 
-  response.status(201).json({ ok: true, callId: call.id, notified: messages.length });
+  response.status(201).json({ ok: true, callId: call.id, notified: messages.length, pressCount: call.pressCount });
 });
 
 app.get("/api/public/tips", publicLimiter, (request, response) => {
@@ -480,12 +507,13 @@ app.post("/api/telegram/webhook", async (request, response) => {
 });
 
 app.post("/api/admin/login", adminLoginLimiter, (request, response) => {
-  if (request.body?.password !== adminPassword) {
-    response.status(401).json({ error: "Неверный пароль" });
+  const auth = authenticateAdmin(String(request.body?.username || ""), String(request.body?.password || ""));
+  if (!auth) {
+    response.status(401).json({ error: "Неверный логин или пароль" });
     return;
   }
 
-  response.json({ token: createAdminToken() });
+  response.json({ token: createAdminToken(auth), role: auth.role, username: auth.username });
 });
 
 app.use("/api/admin", requireAdmin);
@@ -524,12 +552,43 @@ app.post("/api/admin/upload", logoUploadParser, async (request, response) => {
   response.json({ url: `/uploads/${filename}` });
 });
 
-app.get("/api/admin/overview", (_request, response) => {
+app.get("/api/admin/overview", (request, response) => {
   const data = store.snapshot();
+  const auth = getAdminAuth(request);
+  const isOwner = auth?.role === "owner";
+  const visibleWaiters = isOwner
+    ? data.waiters
+    : data.waiters.filter((member) => store.findRole(member.roleId)?.kind !== "owner");
+  const visibleShifts = isOwner
+    ? data.shifts
+    : data.shifts.filter((shift) => shift.roleKind !== "admin" && shift.roleKind !== "owner");
+  const visibleRatings = store
+    .waiterRatings()
+    .filter((rating) => isOwner || (rating.roleKind !== "admin" && rating.roleKind !== "owner"));
+  const visibleShiftTasks = store
+    .listShiftTasks()
+    .filter((task) => isOwner || store.findRole(task.roleId)?.kind !== "owner");
+  const visibleRoleIds = data.staffRoles
+    .filter((role) => isOwner || (role.kind !== "admin" && role.kind !== "owner"))
+    .map((role) => role.id);
   response.json({
     ...data,
+    staffRoles: data.staffRoles.filter((role) => isOwner || role.kind !== "owner"),
+    waiters: visibleWaiters,
+    checklistItems: data.checklistItems.filter(
+      (item) => isOwner || store.findRole(item.roleId)?.kind !== "owner"
+    ),
+    shiftTasks: visibleShiftTasks,
+    popups: store.listPopups(),
+    shifts: visibleShifts,
+    ratings: visibleRatings,
+    performance: store.performanceAnalytics(visibleRoleIds),
+    performanceAiEnabled: isPerformanceAiConfigured(),
+    accessRole: auth?.role || "admin",
+    username: auth?.username || "",
     publicBaseUrl: publicBaseUrl(),
-    telegramEnabled: telegram.enabled()
+    telegramEnabled: telegram.enabled(),
+    telegramBotUrl: `https://t.me/${config.TELEGRAM_BOT_USERNAME.replace(/^@/, "")}`
   });
 });
 
@@ -541,8 +600,52 @@ app.put("/api/admin/offers", async (request, response) => {
   response.json(await store.replaceOffers(Array.isArray(request.body) ? request.body : []));
 });
 
+app.get("/api/admin/popups", (_request, response) => {
+  response.json(store.listPopups());
+});
+
+app.post("/api/admin/popups", async (request, response) => {
+  response.status(201).json(await store.addPopup(request.body));
+});
+
+app.put("/api/admin/popups/:id", async (request, response) => {
+  const popup = await store.updatePopup(request.params.id, request.body);
+  if (!popup) {
+    response.status(404).json({ error: "Уведомление не найдено" });
+    return;
+  }
+  response.json(popup);
+});
+
+app.delete("/api/admin/popups/:id", async (request, response) => {
+  const deleted = await store.deletePopup(request.params.id);
+  if (!deleted) {
+    response.status(404).json({ error: "Уведомление не найдено" });
+    return;
+  }
+  response.json({ ok: true });
+});
+
 app.put("/api/admin/actions", async (request, response) => {
   response.json(await store.replaceActions(Array.isArray(request.body) ? request.body : []));
+});
+
+app.put("/api/admin/checklist", async (request, response) => {
+  const submitted = Array.isArray(request.body) ? request.body : [];
+  const auth = getAdminAuth(request);
+  if (auth?.role === "owner") {
+    response.json(await store.replaceChecklistItems(submitted));
+    return;
+  }
+  const ownerItems = store.snapshot().checklistItems.filter(
+    (item) => store.findRole(item.roleId)?.kind === "owner"
+  );
+  const allowed = submitted.filter((item) => store.findRole(String(item.roleId || ""))?.kind !== "owner");
+  response.json(await store.replaceChecklistItems([...ownerItems, ...allowed]));
+});
+
+app.put("/api/admin/staff-roles", requireOwner, async (request, response) => {
+  response.json(await store.replaceStaffRoles(Array.isArray(request.body) ? request.body : []));
 });
 
 app.put("/api/admin/tables", async (request, response) => {
@@ -550,7 +653,143 @@ app.put("/api/admin/tables", async (request, response) => {
 });
 
 app.put("/api/admin/waiters", async (request, response) => {
-  response.json(await store.replaceWaiters(Array.isArray(request.body) ? request.body : []));
+  const submitted = Array.isArray(request.body) ? request.body : [];
+  const chatIds = submitted.map((member) => String(member.telegramChatId || "").trim()).filter(Boolean);
+  if (new Set(chatIds).size !== chatIds.length) {
+    response.status(400).json({ error: "Один Telegram Chat ID нельзя назначить нескольким сотрудникам" });
+    return;
+  }
+  const auth = getAdminAuth(request);
+  if (auth?.role === "owner") {
+    response.json(await store.replaceWaiters(submitted));
+    return;
+  }
+  const owners = store.snapshot().waiters.filter((member) => store.findRole(member.roleId)?.kind === "owner");
+  const allowed = submitted.filter((member) => store.findRole(String(member.roleId || ""))?.kind !== "owner");
+  const merged = [...owners, ...allowed];
+  const mergedChatIds = merged.map((member) => String(member.telegramChatId || "").trim()).filter(Boolean);
+  if (new Set(mergedChatIds).size !== mergedChatIds.length) {
+    response.status(400).json({ error: "Этот Telegram Chat ID уже принадлежит владельцу" });
+    return;
+  }
+  response.json(await store.replaceWaiters(merged));
+});
+
+app.get("/api/admin/shift-tasks", (request, response) => {
+  const auth = getAdminAuth(request);
+  response.json(
+    store.listShiftTasks().filter((task) => auth?.role === "owner" || store.findRole(task.roleId)?.kind !== "owner")
+  );
+});
+
+const shiftTaskSchema = z.object({
+  roleId: z.string().min(1),
+  waiterId: z.string().nullable().default(null),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  title: z.string().trim().min(1).max(200),
+  description: z.string().max(500).optional().default(""),
+  requiredForCalls: z.boolean().default(false),
+  countsForRating: z.boolean().default(true)
+});
+
+app.post("/api/admin/shift-tasks", async (request, response) => {
+  const parsed = shiftTaskSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Проверьте данные задания" });
+    return;
+  }
+  const role = store.findRole(parsed.data.roleId);
+  if (!role) {
+    response.status(400).json({ error: "Должность не найдена" });
+    return;
+  }
+  const auth = getAdminAuth(request);
+  if (role.kind === "owner" && auth?.role !== "owner") {
+    response.status(403).json({ error: "Задания владельца доступны только владельцу" });
+    return;
+  }
+  if (parsed.data.waiterId) {
+    const member = store.findWaiterById(parsed.data.waiterId);
+    if (!member || member.roleId !== role.id) {
+      response.status(400).json({ error: "Сотрудник не относится к выбранной должности" });
+      return;
+    }
+  }
+  const task = await store.addShiftTask({
+    roleId: parsed.data.roleId,
+    waiterId: parsed.data.waiterId,
+    date: parsed.data.date,
+    title: parsed.data.title,
+    description: parsed.data.description,
+    requiredForCalls: parsed.data.requiredForCalls,
+    countsForRating: parsed.data.countsForRating
+  });
+  // Если задание на сегодня и для конкретного сотрудника — отправить уведомление немедленно
+  const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: config.VENUE_TIME_ZONE }).format(new Date());
+  if (task.date === todayKey && task.waiterId) {
+    if (await telegram.notifyShiftTask(task)) {
+      await store.markShiftTaskNotified(task.id);
+    }
+  }
+  response.status(201).json(task);
+});
+
+app.delete("/api/admin/shift-tasks/:id", async (request, response) => {
+  const task = store.findShiftTask(request.params.id);
+  if (task && store.findRole(task.roleId)?.kind === "owner" && getAdminAuth(request)?.role !== "owner") {
+    response.status(403).json({ error: "Задания владельца доступны только владельцу" });
+    return;
+  }
+  const deleted = await store.deleteShiftTask(request.params.id);
+  if (!deleted) {
+    response.status(404).json({ error: "Задание не найдено" });
+    return;
+  }
+  response.json({ ok: true });
+});
+
+app.put("/api/admin/shifts/:id/review", async (request, response) => {
+  const parsed = shiftReviewSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Проверьте оценки чек-листа" });
+    return;
+  }
+
+  const existingShift = store.findShiftById(request.params.id);
+  const auth = getAdminAuth(request);
+  if (existingShift && auth?.role !== "owner" && (existingShift.roleKind === "admin" || existingShift.roleKind === "owner")) {
+    response.status(403).json({ error: "Оценка администраторов доступна только владельцу" });
+    return;
+  }
+  const shift = await store.reviewShiftChecklist(request.params.id, parsed.data.reviews);
+  if (!shift) {
+    response.status(404).json({ error: "Смена не найдена" });
+    return;
+  }
+  response.json(shift);
+});
+
+const performanceInsightSchema = z.object({
+  roleIds: z.array(z.string().min(1)).max(20).optional().default([])
+});
+
+app.post("/api/admin/performance-insights", performanceAiLimiter, async (request, response) => {
+  const parsed = performanceInsightSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Проверьте выбранные подразделения" });
+    return;
+  }
+  const auth = getAdminAuth(request);
+  const allowedRoles = store.snapshot().staffRoles.filter(
+    (role) => auth?.role === "owner" || (role.kind !== "admin" && role.kind !== "owner")
+  );
+  const allowedIds = new Set(allowedRoles.map((role) => role.id));
+  const requestedRoleIds = parsed.data.roleIds.length ? parsed.data.roleIds : Array.from(allowedIds);
+  if (requestedRoleIds.some((roleId) => !allowedIds.has(roleId))) {
+    response.status(403).json({ error: "Нет доступа к аналитике выбранного подразделения" });
+    return;
+  }
+  response.json(await generatePerformanceInsights(store.performanceAnalytics(requestedRoleIds)));
 });
 
 app.patch("/api/admin/calls/:id", async (request, response) => {
@@ -565,6 +804,8 @@ app.patch("/api/admin/calls/:id", async (request, response) => {
     response.status(404).json({ error: "Вызов не найден" });
     return;
   }
+
+  if (status === "done" || status === "cancelled") await telegram.closeCallMessages(call);
 
   response.json(call);
 });
@@ -598,6 +839,6 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
 
 app.listen(config.PORT, config.HOST, () => {
   console.log(`API started on http://${config.HOST}:${config.PORT}`);
-  console.log(`Admin password: ${adminPassword === "admin123" ? "admin123 (change ADMIN_PASSWORD)" : "configured"}`);
+  console.log(`Admin accounts: ${config.ADMIN_USERNAME}, ${config.OWNER_USERNAME}`);
   telegram.startPolling();
 });
