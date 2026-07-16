@@ -13,6 +13,11 @@ export type LoyaltyProfile = {
     status: string;
     granted: boolean;
   };
+  wallet?: {
+    webUrl: string;
+    appleUrl: string | null;
+    googleUrl: string | null;
+  };
 };
 
 type CrmResponse = {

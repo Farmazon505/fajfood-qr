@@ -103,6 +103,11 @@ type LoyaltyProfile = {
     status: string;
     granted: boolean;
   };
+  wallet?: {
+    webUrl: string;
+    appleUrl: string | null;
+    googleUrl: string | null;
+  };
 };
 
 type LoyaltyVerification = {
@@ -686,7 +691,8 @@ function GuestPage() {
           {loyaltyProfile ? (
             <div className="digital-loyalty-card">
               <div className="loyalty-card__topline">
-                <div>
+                <div className="loyalty-brand-mark" aria-hidden="true">F</div>
+                <div className="loyalty-card__identity">
                   <span>Карта гостя</span>
                   <strong>{loyaltyProfile.name}</strong>
                 </div>
@@ -722,6 +728,17 @@ function GuestPage() {
                   <>Начисление бонусов обрабатывается</>
                 )}
               </div>
+              {loyaltyProfile.wallet?.webUrl && (
+                <a
+                  className="loyalty-wallet-link"
+                  href={loyaltyProfile.wallet.webUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLink size={17} />
+                  Установить карту на смартфон
+                </a>
+              )}
               <button className="ghost-button loyalty-refresh" disabled={loyaltyBusy} onClick={() => void loadLoyaltyProfile()}>
                 <RefreshCw size={17} className={loyaltyBusy ? "spin" : ""} />
                 {loyaltyBusy ? "Обновляем" : "Обновить баланс"}
