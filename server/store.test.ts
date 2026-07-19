@@ -3,7 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { Store } from "./store";
+import { CHECKLIST_ITEM_COOLDOWN_MS, Store } from "./store";
+import type { WaiterShift } from "./types";
 
 const withStore = async (run: (store: Store) => Promise<void>) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-store-"));
@@ -14,6 +15,33 @@ const withStore = async (run: (store: Store) => Promise<void>) => {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+};
+
+const completeChecklistItems = async (
+  store: Store,
+  shift: WaiterShift,
+  waiterId: string,
+  indexes = shift.checklist.map((_, index) => index)
+) => {
+  let completionTimestamp = Math.max(
+    new Date(shift.startedAt).getTime(),
+    ...shift.checklist
+      .map((item) => item.completedAt ? new Date(item.completedAt).getTime() : 0)
+      .filter(Number.isFinite)
+  );
+  let current = shift;
+  for (const index of indexes) {
+    completionTimestamp += CHECKLIST_ITEM_COOLDOWN_MS;
+    const result = await store.completeShiftChecklistItem(
+      current.id,
+      waiterId,
+      index,
+      new Date(completionTimestamp)
+    );
+    assert.equal(result.status, "completed");
+    current = result.shift;
+  }
+  return current;
 };
 
 test("waiter receives table calls only after required checklist is complete", async () => {
@@ -32,9 +60,7 @@ test("waiter receives table calls only after required checklist is complete", as
     await store.upsertCall({ table, action, comment: "", guestName: "", assignedWaiterId: waiter.id, routingStage: "waiter", routingReason: "" });
     assert.equal(store.pendingCallsForWaiter(waiter.id).length, 0);
 
-    for (let index = 0; index < result.shift.checklist.length; index += 1) {
-      await store.completeShiftChecklistItem(result.shift.id, waiter.id, index);
-    }
+    await completeChecklistItems(store, result.shift, waiter.id);
 
     assert.equal(store.currentShiftForWaiter(waiter.id)?.status, "active");
     assert.equal(store.waitersForTable(table).length, 1);
@@ -52,6 +78,38 @@ test("waiter receives table calls only after required checklist is complete", as
     const expectedScore = Math.round(((2 + (endedShift.checklist.length - 1) * 5) / endedShift.checklist.length) * 100) / 100;
     assert.equal(reviewed.score, expectedScore);
     assert.equal(store.waiterRatings()[0].score, expectedScore);
+  });
+});
+
+test("checklist items require one minute between distinct completions", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const started = await store.startWaiterShift(waiter.id, [store.listZones()[0]]);
+    assert.ok(started);
+    assert.ok(started.shift.checklist.length >= 2);
+
+    const firstCompletedAt = new Date(new Date(started.shift.startedAt).getTime() + 1_000);
+    const first = await store.completeShiftChecklistItem(started.shift.id, waiter.id, 0, firstCompletedAt);
+    assert.equal(first.status, "completed");
+
+    const blocked = await store.completeShiftChecklistItem(
+      started.shift.id,
+      waiter.id,
+      1,
+      new Date(firstCompletedAt.getTime() + CHECKLIST_ITEM_COOLDOWN_MS - 1)
+    );
+    assert.equal(blocked.status, "cooldown");
+    assert.equal(blocked.retryAfterSeconds, 1);
+    assert.equal(blocked.shift.checklist[1].completedAt, null);
+
+    const allowed = await store.completeShiftChecklistItem(
+      started.shift.id,
+      waiter.id,
+      1,
+      new Date(firstCompletedAt.getTime() + CHECKLIST_ITEM_COOLDOWN_MS)
+    );
+    assert.equal(allowed.status, "completed");
+    assert.ok(allowed.shift.checklist[1].completedAt);
   });
 });
 
@@ -86,9 +144,7 @@ test("a task scheduled for today is appended to an already running shift", async
     const started = await store.startWaiterShift(waiter.id, [zone]);
     assert.ok(started);
 
-    for (let index = 0; index < started.shift.checklist.length; index += 1) {
-      await store.completeShiftChecklistItem(started.shift.id, waiter.id, index);
-    }
+    await completeChecklistItems(store, started.shift, waiter.id);
     assert.equal(store.currentShiftForWaiter(waiter.id)?.status, "active");
 
     const date = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Astrakhan" }).format(new Date());
@@ -108,7 +164,7 @@ test("a task scheduled for today is appended to an already running shift", async
     assert.ok(updated.checklist.some((item) => item.itemId === `task-${task.id}`));
 
     const taskIndex = updated.checklist.findIndex((item) => item.itemId === `task-${task.id}`);
-    await store.completeShiftChecklistItem(updated.id, waiter.id, taskIndex);
+    await completeChecklistItems(store, updated, waiter.id, [taskIndex]);
     assert.equal(store.currentShiftForWaiter(waiter.id)?.status, "active");
   });
 });
@@ -140,10 +196,7 @@ test("shift rating uses five stars and ignores excluded tasks", async () => {
     ]);
     const started = await store.startWaiterShift(waiter.id, [store.listZones()[0]]);
     assert.ok(started);
-    for (let index = 0; index < 7; index += 1) {
-      await store.completeShiftChecklistItem(started.shift.id, waiter.id, index);
-    }
-    await store.completeShiftChecklistItem(started.shift.id, waiter.id, 14);
+    await completeChecklistItems(store, started.shift, waiter.id, [...Array.from({ length: 7 }, (_, index) => index), 14]);
     const ended = await store.endWaiterShift(waiter.id);
     assert.ok(ended);
     assert.equal(ended.score, 2.5);
@@ -172,7 +225,8 @@ test("performance analytics finds repeated task and employee failures", async ()
     const zone = store.listZones()[0];
     const first = await store.startWaiterShift(waiter.id, [zone]);
     assert.ok(first);
-    await store.completeShiftChecklistItem(first.shift.id, waiter.id, 0);
+    const completion = await store.completeShiftChecklistItem(first.shift.id, waiter.id, 0);
+    assert.equal(completion.status, "completed");
     const firstEnded = await store.endWaiterShift(waiter.id);
     assert.ok(firstEnded);
     await store.reviewShiftChecklist(firstEnded.id, [{ itemId: firstEnded.checklist[0].itemId, score: 2, comment: "Низкое качество" }]);

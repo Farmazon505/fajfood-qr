@@ -8,7 +8,8 @@ import type {
   Waiter,
   WaiterShift
 } from "./types";
-import { config } from "./config";
+import { config, publicBaseUrl } from "./config";
+import type { CrmStaffReservation } from "./crm-reservations";
 import { generatePerformanceInsights } from "./performance-ai";
 
 type TelegramResponse<T> = {
@@ -57,7 +58,11 @@ const callReasonIcon = (label: string) => {
 const REPEAT_ALERT_LIFETIME_MS = 8_000;
 
 const menuKeyboard = {
-  keyboard: [[{ text: "Начать смену" }, { text: "Закончить смену" }], [{ text: "Моя смена" }]],
+  keyboard: [
+    [{ text: "Брони столов", web_app: { url: `${publicBaseUrl()}/staff/reservations` } }],
+    [{ text: "Начать смену" }, { text: "Закончить смену" }],
+    [{ text: "Моя смена" }]
+  ],
   resize_keyboard: true,
   is_persistent: true
 };
@@ -241,6 +246,10 @@ export class TelegramService {
       await this.sendShiftStatus(message.chat.id);
       return;
     }
+    if (normalized === "/reservations" || normalized === "брони столов") {
+      await this.sendReservationsButton(message.chat.id);
+      return;
+    }
 
     await this.sendWelcome(message.chat.id);
   }
@@ -269,8 +278,30 @@ export class TelegramService {
       : "Смена сейчас не начата.";
     await this.request("sendMessage", {
       chat_id: chatId,
-      text: `Здравствуйте, ${waiter.name}!\nДолжность: ${role?.name || "Сотрудник"}\n${status}`,
+      text: `Здравствуйте, ${waiter.name}!\nДолжность: ${role?.name || "Сотрудник"}\n${status}\n\nШахматка и ближайшие брони доступны по кнопке «Брони столов».`,
       reply_markup: menuKeyboard
+    });
+  }
+
+  private async sendReservationsButton(chatId: string | number) {
+    const waiter = await this.requireWaiter(chatId);
+    if (!waiter) return;
+    const shift = this.store.currentShiftForWaiter(waiter.id);
+    if (!shift) {
+      await this.sendText(chatId, "Сначала нажмите «Начать смену», затем откройте шахматку.");
+      return;
+    }
+    await this.request("sendMessage", {
+      chat_id: chatId,
+      text: shift.status === "active"
+        ? "Шахматка готова. Здесь можно менять статусы броней, столы и комментарии."
+        : "Шахматка доступна для просмотра. Завершите обязательный чек-лист, чтобы менять брони.",
+      reply_markup: {
+        inline_keyboard: [[{
+          text: "Открыть брони столов",
+          web_app: { url: `${publicBaseUrl()}/staff/reservations` }
+        }]]
+      }
     });
   }
 
@@ -416,6 +447,7 @@ export class TelegramService {
       ...rows,
       "",
       admission,
+      shift.checklist.length > 1 ? "Следующий пункт можно отметить через 1 минуту после предыдущего." : "",
       criticalNote
     ]
       .filter(Boolean)
@@ -441,11 +473,25 @@ export class TelegramService {
 
     const [, shiftId, rawIndex] = data.split(":");
     const before = this.store.findShiftById(shiftId);
-    const shift = await this.store.completeShiftChecklistItem(shiftId, waiter.id, Number(rawIndex));
-    if (!shift) {
+    const result = await this.store.completeShiftChecklistItem(shiftId, waiter.id, Number(rawIndex));
+    if (result.status === "not_found") {
       await this.answerCallback(callbackId, "Пункт или смена не найдены", true);
       return;
     }
+    if (result.status === "already_completed") {
+      await this.answerCallback(callbackId, "Этот пункт уже отмечен", true);
+      return;
+    }
+    if (result.status === "cooldown") {
+      await this.answerCallback(
+        callbackId,
+        `Следующий пункт можно отметить через ${result.retryAfterSeconds} сек.`,
+        true
+      );
+      return;
+    }
+
+    const shift = result.shift;
 
     await this.answerCallback(callbackId, "Отмечено");
     await this.request("editMessageText", {
@@ -764,9 +810,61 @@ export class TelegramService {
       commands: [
         { command: "shift", description: "Начать смену" },
         { command: "status", description: "Моя смена и чек-лист" },
+        { command: "reservations", description: "Брони столов" },
         { command: "end_shift", description: "Закончить смену" }
       ]
     });
+  }
+
+  async notifyReservationEvent(input: {
+    recipients: Waiter[];
+    reservation: CrmStaffReservation;
+    tableNumber: number;
+    hallName: string;
+    event: "new" | "changed" | "reminder";
+  }) {
+    const title = input.event === "new"
+      ? "📌 Новая бронь"
+      : input.event === "reminder"
+        ? "⏰ Бронь через 30 минут"
+        : "🔄 Бронь изменена";
+    const status = input.reservation.status === "PENDING"
+      ? "новая"
+      : input.reservation.status === "CONFIRMED"
+        ? "подтверждена"
+        : input.reservation.status === "SEATED"
+          ? "гости пришли"
+          : input.reservation.status === "COMPLETED"
+            ? "завершена"
+            : input.reservation.status === "CANCELLED"
+              ? "отменена"
+              : input.reservation.status === "NO_SHOW"
+                ? "не пришли"
+                : "лист ожидания";
+    const text = [
+      title,
+      "",
+      `${formatTime(input.reservation.date)} · стол №${input.tableNumber} · ${input.hallName}`,
+      `${input.reservation.guestName} · ${input.reservation.guestsCount} чел.`,
+      `Статус: ${status}`,
+      input.reservation.notes ? `Комментарий: ${input.reservation.notes}` : ""
+    ].filter(Boolean).join("\n");
+    let delivered = 0;
+    for (const recipient of input.recipients) {
+      if (!recipient.telegramChatId.trim()) continue;
+      const sent = await this.request<TelegramMessage>("sendMessage", {
+        chat_id: recipient.telegramChatId,
+        text,
+        reply_markup: {
+          inline_keyboard: [[{
+            text: "Открыть шахматку",
+            web_app: { url: `${publicBaseUrl()}/staff/reservations` }
+          }]]
+        }
+      });
+      if (sent) delivered += 1;
+    }
+    return delivered;
   }
 
   /** Отправить персональное уведомление сотруднику о задании на смену */

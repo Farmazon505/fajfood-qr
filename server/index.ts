@@ -26,6 +26,13 @@ import { generatePerformanceInsights, isPerformanceAiConfigured } from "./perfor
 import type { CallStatus } from "./types";
 import { crmLoyalty } from "./crm-loyalty";
 import {
+  CrmReservationsClient,
+  CrmReservationsError,
+} from "./crm-reservations";
+import { validateTelegramInitData } from "./staff-auth";
+import { filterSnapshotForZones } from "./staff-reservation-access";
+import { ReservationMonitor } from "./reservation-monitor";
+import {
   MARKETING_CONSENT_PATH,
   MARKETING_CONSENT_TEXT,
   PERSONAL_DATA_CONSENT_HASH,
@@ -43,6 +50,8 @@ await initializeAdminCredentials();
 const store = new Store();
 await store.init();
 const telegram = new TelegramService(store);
+const crmReservations = new CrmReservationsClient();
+const reservationMonitor = new ReservationMonitor(store, telegram, crmReservations);
 
 const app = express();
 app.disable("x-powered-by");
@@ -92,6 +101,38 @@ const performanceAiLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false
 });
+
+const staffReservationsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const dateKeySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+const reservationUpdateSchema = z.object({
+  id: z.string().min(1).max(120),
+  date: dateKeySchema,
+  status: z.enum(["PENDING", "CONFIRMED", "SEATED", "COMPLETED", "CANCELLED", "NO_SHOW", "WAITLIST"]).optional(),
+  tableId: z.string().min(1).max(120).optional(),
+  notes: z.string().max(4000).optional(),
+  reason: z.string().max(500).optional()
+});
+
+const staffAccess = (request: express.Request) => {
+  const identity = validateTelegramInitData(
+    String(request.headers["x-telegram-init-data"] || ""),
+    config.TELEGRAM_BOT_TOKEN
+  );
+  if (!identity) return null;
+  const waiter = store.findWaiterByChatId(identity.id);
+  if (!waiter?.active) return null;
+  const shift = store.currentShiftForWaiter(waiter.id);
+  const role = store.roleForWaiter(waiter);
+  if (!shift || !role?.active) return null;
+  return { identity, waiter, shift, role };
+};
 
 const publicCallSchema = z.object({
   tableSlug: z.string().min(1),
@@ -193,6 +234,96 @@ app.get("/api/ready", (_request, response) => {
     telegramEnabled: telegram.enabled(),
     publicBaseUrl: publicBaseUrl()
   });
+});
+
+app.get("/api/staff/reservations", staffReservationsLimiter, async (request, response) => {
+  const access = staffAccess(request);
+  if (!access) {
+    response.status(403).json({ error: "Откройте приложение из бота и сначала выйдите на смену" });
+    return;
+  }
+  const parsedDate = dateKeySchema.safeParse(String(request.query.date || ""));
+  if (!parsedDate.success) {
+    response.status(400).json({ error: "Некорректная дата" });
+    return;
+  }
+
+  try {
+    const snapshot = filterSnapshotForZones(
+      await crmReservations.getSnapshot(parsedDate.data),
+      access.shift.zones
+    );
+    response.json({
+      profile: {
+        id: access.waiter.id,
+        name: access.waiter.name,
+        role: access.role.name,
+        roleKind: access.role.kind,
+        zones: access.shift.zones,
+        shiftStatus: access.shift.status,
+        canEdit: access.shift.status === "active"
+      },
+      ...snapshot
+    });
+  } catch (error) {
+    const status = error instanceof CrmReservationsError ? error.status : 502;
+    response.status(status).json({
+      error: error instanceof Error ? error.message : "CRM временно недоступна"
+    });
+  }
+});
+
+app.patch("/api/staff/reservations/:id", staffReservationsLimiter, async (request, response) => {
+  const access = staffAccess(request);
+  if (!access) {
+    response.status(403).json({ error: "Откройте приложение из бота и сначала выйдите на смену" });
+    return;
+  }
+  if (access.shift.status !== "active") {
+    response.status(403).json({ error: "Сначала завершите обязательный чек-лист смены" });
+    return;
+  }
+  const parsed = reservationUpdateSchema.safeParse({
+    ...request.body,
+    id: request.params.id
+  });
+  if (!parsed.success) {
+    response.status(400).json({ error: "Проверьте выбранное действие" });
+    return;
+  }
+
+  try {
+    const snapshot = filterSnapshotForZones(
+      await crmReservations.getSnapshot(parsed.data.date),
+      access.shift.zones
+    );
+    const existing = snapshot.tables
+      .flatMap((table) => table.reservations.map((reservation) => ({ reservation, table })))
+      .find((item) => item.reservation.id === parsed.data.id);
+    if (!existing) {
+      response.status(404).json({ error: "Бронь не найдена среди столов вашей смены" });
+      return;
+    }
+    if (parsed.data.tableId && !snapshot.tables.some((table) => table.id === parsed.data.tableId)) {
+      response.status(403).json({ error: "Этот стол не относится к вашей зоне" });
+      return;
+    }
+
+    const result = await crmReservations.updateReservation({
+      id: parsed.data.id,
+      actor: `${access.waiter.name} · ${access.role.name}`,
+      ...(parsed.data.status ? { status: parsed.data.status } : {}),
+      ...(parsed.data.tableId ? { tableId: parsed.data.tableId } : {}),
+      ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes } : {}),
+      ...(parsed.data.reason !== undefined ? { reason: parsed.data.reason } : {})
+    });
+    response.json(result);
+  } catch (error) {
+    const status = error instanceof CrmReservationsError ? error.status : 502;
+    response.status(status).json({
+      error: error instanceof Error ? error.message : "Не удалось изменить бронь"
+    });
+  }
 });
 
 app.get("/api/public/bootstrap", (request, response) => {
@@ -872,4 +1003,5 @@ app.listen(config.PORT, config.HOST, () => {
   console.log(`API started on http://${config.HOST}:${config.PORT}`);
   console.log(`Admin accounts: ${getAdminAccountSummary().username}, ${config.OWNER_USERNAME}`);
   telegram.startPolling();
+  reservationMonitor.start();
 });

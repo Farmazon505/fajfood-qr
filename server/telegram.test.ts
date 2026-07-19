@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { Store } from "./store";
+import { CHECKLIST_ITEM_COOLDOWN_MS, Store } from "./store";
 import { TelegramService } from "./telegram";
 
 test("Telegram manages a shift and keeps one live message per table", async () => {
@@ -72,15 +72,40 @@ test("Telegram manages a shift and keeps one live message per table", async () =
     const startedShift = store.currentShiftForWaiter(waiter.id);
     assert.ok(startedShift);
     assert.equal(startedShift.status, "checklist");
-    for (let index = 0; index < startedShift.checklist.length; index += 1) {
-      await telegram.handleUpdate({
-        update_id: 10 + index,
-        callback_query: {
-          id: `check-${index}`,
-          data: `check:${startedShift.id}:${index}`,
-          message: { message_id: 4, chat: { id: "10001" } }
-        }
-      });
+    assert.ok(startedShift.checklist.length >= 2);
+    await telegram.handleUpdate({
+      update_id: 10,
+      callback_query: {
+        id: "check-0",
+        data: `check:${startedShift.id}:0`,
+        message: { message_id: 4, chat: { id: "10001" } }
+      }
+    });
+    await telegram.handleUpdate({
+      update_id: 11,
+      callback_query: {
+        id: "check-1-too-soon",
+        data: `check:${startedShift.id}:1`,
+        message: { message_id: 4, chat: { id: "10001" } }
+      }
+    });
+    const cooldownAnswer = requests.filter((request) => request.method === "answerCallbackQuery").at(-1);
+    assert.match(String(cooldownAnswer?.payload.text), /Следующий пункт можно отметить через \d+ сек\./);
+    assert.equal(cooldownAnswer?.payload.show_alert, true);
+    assert.equal(store.currentShiftForWaiter(waiter.id)?.checklist[1].completedAt, null);
+
+    let completionTimestamp = new Date(
+      store.currentShiftForWaiter(waiter.id)?.checklist[0].completedAt || ""
+    ).getTime();
+    for (let index = 1; index < startedShift.checklist.length; index += 1) {
+      completionTimestamp += CHECKLIST_ITEM_COOLDOWN_MS;
+      const result = await store.completeShiftChecklistItem(
+        startedShift.id,
+        waiter.id,
+        index,
+        new Date(completionTimestamp)
+      );
+      assert.equal(result.status, "completed");
     }
     assert.equal(store.currentShiftForWaiter(waiter.id)?.status, "active");
 

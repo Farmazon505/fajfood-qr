@@ -24,6 +24,14 @@ import type {
 } from "./types";
 
 const now = () => new Date().toISOString();
+export const CHECKLIST_ITEM_COOLDOWN_MS = 60_000;
+
+export type ChecklistCompletionResult =
+  | { status: "completed"; shift: WaiterShift }
+  | { status: "already_completed"; shift: WaiterShift }
+  | { status: "cooldown"; shift: WaiterShift; retryAfterSeconds: number }
+  | { status: "not_found"; shift: null };
+
 const venueDateKey = (value = new Date()) =>
   new Intl.DateTimeFormat("en-CA", { timeZone: config.VENUE_TIME_ZONE }).format(value);
 
@@ -943,22 +951,47 @@ export class Store {
     return { shift: structuredClone(shift), created: true, firstShiftToday };
   }
 
-  async completeShiftChecklistItem(shiftId: string, waiterId: string, itemIndex: number) {
+  async completeShiftChecklistItem(
+    shiftId: string,
+    waiterId: string,
+    itemIndex: number,
+    completedAt = new Date()
+  ): Promise<ChecklistCompletionResult> {
     const shift = this.data.shifts.find(
       (item) => item.id === shiftId && item.waiterId === waiterId && item.status !== "ended"
     );
     const item = shift?.checklist[itemIndex];
-    if (!shift || !item) return null;
+    if (!shift || !item) return { status: "not_found", shift: null };
 
-    if (!item.completedAt) item.completedAt = now();
+    if (item.completedAt) {
+      return { status: "already_completed", shift: structuredClone(shift) };
+    }
+
+    const completionTimestamp = completedAt.getTime();
+    const latestCompletionTimestamp = shift.checklist.reduce((latest, entry) => {
+      if (!entry.completedAt) return latest;
+      const timestamp = new Date(entry.completedAt).getTime();
+      return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest;
+    }, 0);
+    const cooldownRemainingMs = latestCompletionTimestamp + CHECKLIST_ITEM_COOLDOWN_MS - completionTimestamp;
+    if (latestCompletionTimestamp > 0 && cooldownRemainingMs > 0) {
+      return {
+        status: "cooldown",
+        shift: structuredClone(shift),
+        retryAfterSeconds: Math.ceil(cooldownRemainingMs / 1000)
+      };
+    }
+
+    const timestamp = completedAt.toISOString();
+    item.completedAt = timestamp;
     const requiredComplete = shift.checklist.every((entry) => !entry.requiredForCalls || entry.completedAt);
     if (requiredComplete && shift.status === "checklist") {
       shift.status = "active";
-      shift.readyAt = now();
+      shift.readyAt = timestamp;
     }
     shift.score = calculateShiftScore(shift);
     await this.persist();
-    return structuredClone(shift);
+    return { status: "completed", shift: structuredClone(shift) };
   }
 
   async reviewShiftChecklist(
