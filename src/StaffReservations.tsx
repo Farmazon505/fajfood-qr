@@ -159,6 +159,19 @@ const actionLabel: Partial<Record<ReservationStatus, string>> = {
   NO_SHOW: "Не пришли",
 };
 
+const readTelegramInitData = () => {
+  const sdkInitData = window.Telegram?.WebApp?.initData?.trim();
+  if (sdkInitData) return sdkInitData;
+
+  for (const source of [window.location.hash, window.location.search]) {
+    const params = new URLSearchParams(source.replace(/^[#?]/, ""));
+    const initData = params.get("tgWebAppData")?.trim();
+    if (initData) return initData;
+  }
+
+  return "";
+};
+
 export default function StaffReservations() {
   const [date, setDate] = useState(astrakhanDateKey);
   const [data, setData] = useState<StaffData | null>(null);
@@ -171,7 +184,7 @@ export default function StaffReservations() {
   const [notice, setNotice] = useState("");
 
   const telegram = window.Telegram?.WebApp;
-  const initData = telegram?.initData || "";
+  const initData = readTelegramInitData();
 
   useEffect(() => {
     telegram?.ready();
