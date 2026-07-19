@@ -7,7 +7,7 @@ test("keeps the CRM staff secret on the server", async () => {
   let received: RequestInit | undefined;
   const fetcher = (async (_input, init) => {
     received = init;
-    return new Response(JSON.stringify({ date: "2026-07-19", halls: [], tables: [], iikoSync: {} }), {
+    return new Response(JSON.stringify({ date: "2026-07-19", halls: [], decor: [], tables: [], iikoSync: {} }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });

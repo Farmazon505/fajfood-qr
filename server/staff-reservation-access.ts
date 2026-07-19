@@ -24,6 +24,7 @@ export const filterSnapshotForZones = (snapshot: CrmStaffSnapshot, zones: string
   return {
     ...snapshot,
     halls: allowedHalls,
+    decor: snapshot.decor.filter((item) => allowedKeys.has(item.hallKey)),
     tables: snapshot.tables.filter((table) => allowedKeys.has(table.hall))
   };
 };

@@ -48,9 +48,22 @@ export type CrmStaffTable = {
   reservations: CrmStaffReservation[];
 };
 
+export type CrmStaffDecor = {
+  id: string;
+  hallKey: string;
+  type: "window" | "door" | "bar" | "wall" | string;
+  label: string | null;
+  posX: number;
+  posY: number;
+  width: number;
+  height: number;
+  angle: number;
+};
+
 export type CrmStaffSnapshot = {
   date: string;
   halls: Array<{ key: string; name: string; emoji: string; color: string; order: number }>;
+  decor: CrmStaffDecor[];
   tables: CrmStaffTable[];
   iikoSync: { online: boolean; syncedAt: string | null; errors: string[]; occupiedTables: number };
 };

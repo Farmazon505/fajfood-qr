@@ -60,6 +60,18 @@ type StaffTable = {
   reservations: StaffReservation[];
 };
 
+type StaffDecor = {
+  id: string;
+  hallKey: string;
+  type: string;
+  label: string | null;
+  posX: number;
+  posY: number;
+  width: number;
+  height: number;
+  angle: number;
+};
+
 type StaffData = {
   profile: {
     name: string;
@@ -70,6 +82,7 @@ type StaffData = {
   };
   date: string;
   halls: Array<{ key: string; name: string; emoji: string; color: string }>;
+  decor: StaffDecor[];
   tables: StaffTable[];
   iikoSync: { online: boolean; occupiedTables: number; errors: string[] };
 };
@@ -160,6 +173,13 @@ const actionLabel: Partial<Record<ReservationStatus, string>> = {
   NO_SHOW: "Не пришли",
 };
 
+const decorTypes: Record<string, { label: string; icon: string }> = {
+  window: { label: "Окно", icon: "▥" },
+  door: { label: "Дверь", icon: "🚪" },
+  bar: { label: "Барная стойка", icon: "●" },
+  wall: { label: "Стена", icon: "" },
+};
+
 const readTelegramInitData = () => {
   const sdkInitData = window.Telegram?.WebApp?.initData?.trim();
   if (sdkInitData) return sdkInitData;
@@ -242,12 +262,17 @@ export default function StaffReservations() {
     () => (data?.tables || []).filter((table) => table.hall === selectedHall),
     [data, selectedHall]
   );
-  const canvasWidth = Math.max(960, ...hallTables.map((table) => table.posX + table.width + 40));
-  const canvasHeight = Math.max(400, ...hallTables.map((table) => table.posY + table.height + 40));
+  const hallDecor = useMemo(
+    () => (data?.decor || []).filter((item) => item.hallKey === selectedHall),
+    [data, selectedHall]
+  );
+  const hallItems = useMemo(() => [...hallTables, ...hallDecor], [hallTables, hallDecor]);
+  const canvasWidth = Math.max(960, ...hallItems.map((item) => item.posX + item.width + 40));
+  const canvasHeight = Math.max(400, ...hallItems.map((item) => item.posY + item.height + 40));
   const hallOrigin = useMemo(() => ({
-    left: hallTables.length ? Math.max(0, Math.min(...hallTables.map((table) => table.posX)) - 20) : 0,
-    top: hallTables.length ? Math.max(0, Math.min(...hallTables.map((table) => table.posY)) - 20) : 0,
-  }), [hallTables]);
+    left: hallItems.length ? Math.max(0, Math.min(...hallItems.map((item) => item.posX)) - 20) : 0,
+    top: hallItems.length ? Math.max(0, Math.min(...hallItems.map((item) => item.posY)) - 20) : 0,
+  }), [hallItems]);
   const selectedTable = data?.tables.find((table) => table.id === selected?.tableId) || null;
   const reservations = useMemo(
     () => (data?.tables || [])
@@ -363,14 +388,38 @@ export default function StaffReservations() {
       </nav>
 
       <section className="staff-map-card">
-        {hallTables.length ? (
+        {hallTables.length || hallDecor.length ? (
           <>
             <div className="staff-map-toolbar">
               <span><Move size={14} />Двигайте схему пальцем</span>
-              <span>{hallTables.length} столов</span>
+              <span>{hallTables.length} столов · {hallDecor.length} объектов</span>
             </div>
             <div className="staff-map-viewport" ref={mapViewportRef}>
               <div className="staff-map" style={{ width: canvasWidth, height: canvasHeight }}>
+                <div className="staff-decor-layer" aria-hidden="true">
+                  {hallDecor.map((item) => {
+                    const visual = decorTypes[item.type] || decorTypes.wall;
+                    const isTall = item.height > item.width * 1.5;
+                    return (
+                      <div
+                        key={item.id}
+                        className={`staff-decor staff-decor--${item.type}`}
+                        style={{
+                          left: item.posX,
+                          top: item.posY,
+                          width: item.width,
+                          height: item.height,
+                          transform: `rotate(${item.angle || 0}deg)`,
+                        }}
+                      >
+                        <span className={isTall ? "vertical" : ""}>
+                          {visual.icon && <b>{visual.icon}</b>}
+                          <em>{item.label || visual.label}</em>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
                 {hallTables.map((table) => {
                   const reservation = reservationForTable(table);
                   const state = tableState(table, reservation);
