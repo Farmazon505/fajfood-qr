@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarDays,
   Check,
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Move,
   RefreshCw,
   Save,
   Users,
@@ -182,6 +183,7 @@ export default function StaffReservations() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const mapViewportRef = useRef<HTMLDivElement>(null);
 
   const telegram = window.Telegram?.WebApp;
   const initData = readTelegramInitData();
@@ -240,8 +242,12 @@ export default function StaffReservations() {
     () => (data?.tables || []).filter((table) => table.hall === selectedHall),
     [data, selectedHall]
   );
-  const canvasWidth = Math.max(760, ...hallTables.map((table) => table.posX + table.width + 60));
-  const canvasHeight = Math.max(460, ...hallTables.map((table) => table.posY + table.height + 60));
+  const canvasWidth = Math.max(960, ...hallTables.map((table) => table.posX + table.width + 40));
+  const canvasHeight = Math.max(400, ...hallTables.map((table) => table.posY + table.height + 40));
+  const hallOrigin = useMemo(() => ({
+    left: hallTables.length ? Math.max(0, Math.min(...hallTables.map((table) => table.posX)) - 20) : 0,
+    top: hallTables.length ? Math.max(0, Math.min(...hallTables.map((table) => table.posY)) - 20) : 0,
+  }), [hallTables]);
   const selectedTable = data?.tables.find((table) => table.id === selected?.tableId) || null;
   const reservations = useMemo(
     () => (data?.tables || [])
@@ -250,6 +256,10 @@ export default function StaffReservations() {
       .sort((left, right) => new Date(left.reservation.date).getTime() - new Date(right.reservation.date).getTime()),
     [data]
   );
+
+  useEffect(() => {
+    mapViewportRef.current?.scrollTo({ left: hallOrigin.left, top: hallOrigin.top });
+  }, [hallOrigin.left, hallOrigin.top, selectedHall]);
 
   const patchReservation = async (payload: Record<string, unknown>, successText: string) => {
     if (!selected || !data?.profile.canEdit) return;
@@ -354,30 +364,38 @@ export default function StaffReservations() {
 
       <section className="staff-map-card">
         {hallTables.length ? (
-          <div className="staff-map" style={{ aspectRatio: `${canvasWidth} / ${canvasHeight}` }}>
-            {hallTables.map((table) => {
-              const reservation = reservationForTable(table);
-              const state = tableState(table, reservation);
-              return (
-                <button
-                  key={table.id}
-                  className={`staff-table staff-table--${state} ${table.shape === "round" ? "round" : ""}`}
-                  style={{
-                    left: `${(table.posX / canvasWidth) * 100}%`,
-                    top: `${(table.posY / canvasHeight) * 100}%`,
-                    width: `${Math.max(9, (table.width / canvasWidth) * 100)}%`,
-                    height: `${Math.max(15, (table.height / canvasHeight) * 100)}%`,
-                  }}
-                  onClick={() => reservation ? setSelected(reservation) : undefined}
-                >
-                  <strong>№{table.number}</strong>
-                  <span>{table.iikoState.occupied
-                    ? `Заказ ${table.iikoState.activeOrder?.number || "iiko"}`
-                    : reservation ? formatTime(reservation.date) : "Свободен"}</span>
-                </button>
-              );
-            })}
-          </div>
+          <>
+            <div className="staff-map-toolbar">
+              <span><Move size={14} />Двигайте схему пальцем</span>
+              <span>{hallTables.length} столов</span>
+            </div>
+            <div className="staff-map-viewport" ref={mapViewportRef}>
+              <div className="staff-map" style={{ width: canvasWidth, height: canvasHeight }}>
+                {hallTables.map((table) => {
+                  const reservation = reservationForTable(table);
+                  const state = tableState(table, reservation);
+                  return (
+                    <button
+                      key={table.id}
+                      className={`staff-table staff-table--${state} ${table.shape === "round" ? "round" : ""}`}
+                      style={{
+                        left: table.posX,
+                        top: table.posY,
+                        width: table.width,
+                        height: table.height,
+                      }}
+                      onClick={() => reservation ? setSelected(reservation) : undefined}
+                    >
+                      <strong>№{table.number}</strong>
+                      <span>{table.iikoState.occupied
+                        ? `Заказ ${table.iikoState.activeOrder?.number || "iiko"}`
+                        : reservation ? formatTime(reservation.date) : `${table.capacity} мест`}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </>
         ) : <div className="staff-empty">Для выбранной зоны столы не найдены</div>}
       </section>
 
