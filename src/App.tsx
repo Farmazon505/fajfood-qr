@@ -24,6 +24,7 @@ import {
   LayoutDashboard,
   LogOut,
   MapPin,
+  Menu,
   MessageSquare,
   Palette,
   Phone,
@@ -1023,6 +1024,7 @@ function AdminPage() {
   const [password, setPassword] = useState("");
   const [data, setData] = useState<AdminData | null>(null);
   const [activeTab, setActiveTab] = useState("dashboard");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState("");
 
@@ -1054,6 +1056,29 @@ function AdminPage() {
     }, 10_000);
     return () => window.clearInterval(interval);
   }, [loadAdmin, token]);
+
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSidebarOpen(false);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [sidebarOpen]);
+
+  useEffect(() => {
+    const desktop = window.matchMedia("(min-width: 1041px)");
+    const closeOnDesktop = (event: MediaQueryListEvent) => {
+      if (event.matches) setSidebarOpen(false);
+    };
+    desktop.addEventListener("change", closeOnDesktop);
+    return () => desktop.removeEventListener("change", closeOnDesktop);
+  }, []);
 
   const login = async (event: FormEvent) => {
     event.preventDefault();
@@ -1199,16 +1224,38 @@ function AdminPage() {
         acknowledgeCall={(callId) => void acknowledgeCall(callId)}
         updateCall={(callId, status) => void updateCall(callId, status)}
       />
-      <aside className="admin-sidebar">
-        <div className="brand-lockup">
-          <LogoMark settings={data.settings} className="logo-mark--sidebar" />
-          <div>
-            <strong>{data.settings.name}</strong>
-            <span>{[
-              data.telegramEnabled ? "Telegram" : "",
-              data.maxEnabled ? "MAX" : ""
-            ].filter(Boolean).join(" + ") || "Мессенджеры не настроены"} · {data.username}</span>
+      <button
+        className={`admin-sidebar-backdrop ${sidebarOpen ? "is-visible" : ""}`}
+        type="button"
+        aria-label="Закрыть меню"
+        aria-hidden={!sidebarOpen}
+        tabIndex={sidebarOpen ? 0 : -1}
+        onClick={() => setSidebarOpen(false)}
+      />
+      <aside
+        id="admin-navigation"
+        className={`admin-sidebar ${sidebarOpen ? "admin-sidebar--open" : ""}`}
+        aria-label="Разделы панели управления"
+      >
+        <div className="admin-sidebar-head">
+          <div className="brand-lockup">
+            <LogoMark settings={data.settings} className="logo-mark--sidebar" />
+            <div>
+              <strong>{data.settings.name}</strong>
+              <span>{[
+                data.telegramEnabled ? "Telegram" : "",
+                data.maxEnabled ? "MAX" : ""
+              ].filter(Boolean).join(" + ") || "Мессенджеры не настроены"} · {data.username}</span>
+            </div>
           </div>
+          <button
+            className="sidebar-close-button"
+            type="button"
+            aria-label="Закрыть меню"
+            onClick={() => setSidebarOpen(false)}
+          >
+            <X size={22} />
+          </button>
         </div>
 
         <nav>
@@ -1216,7 +1263,11 @@ function AdminPage() {
             <button
               key={tab.id}
               className={activeTab === tab.id ? "active" : ""}
-              onClick={() => { setActiveTab(tab.id); setSaved(""); }}
+              onClick={() => {
+                setActiveTab(tab.id);
+                setSaved("");
+                setSidebarOpen(false);
+              }}
             >
               {tab.icon}
               {tab.label}
@@ -1229,6 +1280,7 @@ function AdminPage() {
           onClick={() => {
             localStorage.removeItem("adminToken");
             localStorage.removeItem("adminUsername");
+            setSidebarOpen(false);
             setToken("");
           }}
         >
@@ -1238,6 +1290,19 @@ function AdminPage() {
       </aside>
 
       <section className="admin-content">
+        <div className="admin-mobile-bar">
+          <button
+            className="mobile-menu-button"
+            type="button"
+            aria-controls="admin-navigation"
+            aria-expanded={sidebarOpen}
+            onClick={() => setSidebarOpen(true)}
+          >
+            <Menu size={21} />
+            <span>Меню</span>
+          </button>
+          <strong>{tabs.find((tab) => tab.id === activeTab)?.label}</strong>
+        </div>
         <header className="admin-header">
           <div>
             <p>Панель управления</p>
