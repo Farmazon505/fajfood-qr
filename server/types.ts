@@ -115,6 +115,10 @@ export type ShiftChecklistEntry = {
   completedAt: string | null;
   adminScore: number | null;
   adminComment: string;
+  adminPhotoUrl: string;
+  reviewedAt: string | null;
+  reviewedByRole: AdminAccessRole | null;
+  reviewedByUsername: string;
 };
 
 export type WaiterShift = {

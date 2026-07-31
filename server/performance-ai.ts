@@ -12,6 +12,14 @@ const aiResponseSchema = z.object({
 
 const aiProxyAgent = createAiProxyAgent(config.AI_PROXY_URL);
 
+type PerformanceInsightContext = {
+  focusEmployee?: {
+    waiterId: string;
+    waiterName: string;
+    roleName: string;
+  };
+};
+
 const objectText = (value: unknown, preferredKeys: string[]) => {
   if (typeof value === "string") return value.trim();
   if (!value || typeof value !== "object" || Array.isArray(value)) return "";
@@ -29,7 +37,11 @@ const normalizeEmployeeAdvice = (value: unknown) => {
   return typeof waiterId === "string" && waiterId && advice ? { waiterId, advice } : null;
 };
 
-const localReport = (analytics: PerformanceAnalytics, warning = ""): PerformanceInsightReport => {
+const localReport = (
+  analytics: PerformanceAnalytics,
+  warning = "",
+  context: PerformanceInsightContext = {}
+): PerformanceInsightReport => {
   const employeeAdvice = Array.from(new Set(analytics.employeePatterns.map((item) => item.waiterId)))
     .map((waiterId) => {
       const pattern = analytics.employeePatterns.find((item) => item.waiterId === waiterId);
@@ -41,8 +53,12 @@ const localReport = (analytics: PerformanceAnalytics, warning = ""): Performance
     source: "rules",
     model: "local-pattern-engine",
     summary: analytics.analyzedShiftCount
-      ? `Проанализировано смен: ${analytics.analyzedShiftCount}. Найдено повторяющихся проблемных сочетаний «сотрудник — задача»: ${analytics.employeePatterns.length}.`
-      : "Завершенных смен пока недостаточно для анализа.",
+      ? context.focusEmployee
+        ? `${context.focusEmployee.waiterName}, ${context.focusEmployee.roleName}: проанализировано смен — ${analytics.analyzedShiftCount}. Повторяющихся проблемных пунктов — ${analytics.employeePatterns.length}.`
+        : `Проанализировано смен: ${analytics.analyzedShiftCount}. Найдено повторяющихся проблемных сочетаний «сотрудник — задача»: ${analytics.employeePatterns.length}.`
+      : context.focusEmployee
+        ? `Для сотрудника ${context.focusEmployee.waiterName} пока недостаточно завершенных смен для устойчивого вывода.`
+        : "Завершенных смен пока недостаточно для анализа.",
     recommendations: analytics.recommendations,
     employeeAdvice,
     warning
@@ -57,9 +73,12 @@ const parseJsonContent = (value: string) => {
 export const isPerformanceAiConfigured = () => Boolean(config.OPENROUTER_API_KEY.trim());
 
 export const generatePerformanceInsights = async (
-  analytics: PerformanceAnalytics
+  analytics: PerformanceAnalytics,
+  context: PerformanceInsightContext = {}
 ): Promise<PerformanceInsightReport> => {
-  if (!isPerformanceAiConfigured()) return localReport(analytics, "OpenRouter не настроен, использован локальный анализ.");
+  if (!isPerformanceAiConfigured()) {
+    return localReport(analytics, "OpenRouter не настроен, использован локальный анализ.", context);
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.AI_REQUEST_TIMEOUT_MS);
@@ -83,6 +102,9 @@ export const generatePerformanceInsights = async (
             role: "system",
             content: [
               "Ты аналитик операционной эффективности ресторана.",
+              context.focusEmployee
+                ? `Сформируй персональное резюме только по сотруднику ${context.focusEmployee.waiterName} (${context.focusEmployee.roleName}).`
+                : "Сформируй резюме по выбранным подразделениям.",
               "Отделяй системные сбои от индивидуальных: массовая низкая оценка одной задачи чаще указывает на неясный стандарт, нехватку ресурсов или неверный процесс.",
               "Не делай медицинских, психологических и юридических выводов. Не предлагай наказания.",
               "Давай короткие проверяемые рекомендации руководителю и уважительные персональные рекомендации сотрудникам.",
@@ -93,6 +115,7 @@ export const generatePerformanceInsights = async (
           {
             role: "user",
             content: JSON.stringify({
+              focusEmployee: context.focusEmployee ?? null,
               analyzedShiftCount: analytics.analyzedShiftCount,
               roleSummaries: analytics.roleSummaries,
               taskPatterns: analytics.taskPatterns.slice(0, 20),
@@ -111,7 +134,10 @@ export const generatePerformanceInsights = async (
     const content = payload.choices?.[0]?.message?.content;
     if (!content) throw new Error("OpenRouter вернул пустой ответ");
     const parsed = aiResponseSchema.parse(parseJsonContent(content));
-    const knownWaiterIds = new Set(analytics.employeePatterns.map((item) => item.waiterId));
+    const knownWaiterIds = new Set([
+      ...analytics.employeePatterns.map((item) => item.waiterId),
+      ...(context.focusEmployee ? [context.focusEmployee.waiterId] : [])
+    ]);
     const recommendations = parsed.recommendations
       .map((item) => objectText(item, ["recommendation", "text", "action", "description"]))
       .filter(Boolean)
@@ -131,7 +157,7 @@ export const generatePerformanceInsights = async (
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "неизвестная ошибка";
-    return localReport(analytics, `ИИ-анализ недоступен: ${message}. Использован локальный анализ.`);
+    return localReport(analytics, `ИИ-анализ недоступен: ${message}. Использован локальный анализ.`, context);
   } finally {
     clearTimeout(timeout);
   }

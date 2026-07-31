@@ -345,7 +345,21 @@ test("performance analytics finds repeated task and employee failures", async ()
     assert.equal(completion.status, "completed");
     const firstEnded = await store.endWaiterShift(waiter.id);
     assert.ok(firstEnded);
-    await store.reviewShiftChecklist(firstEnded.id, [{ itemId: firstEnded.checklist[0].itemId, score: 2, comment: "Низкое качество" }]);
+    const reviewed = await store.reviewShiftChecklist(
+      firstEnded.id,
+      [{
+        itemId: firstEnded.checklist[0].itemId,
+        score: 2,
+        comment: "Низкое качество",
+        photoUrl: "/api/admin/review-media/review-1-00000000-0000-0000-0000-000000000001.jpg"
+      }],
+      "admin",
+      "shift-manager"
+    );
+    assert.equal(reviewed?.checklist[0].adminPhotoUrl, "/api/admin/review-media/review-1-00000000-0000-0000-0000-000000000001.jpg");
+    assert.equal(reviewed?.checklist[0].reviewedByRole, "admin");
+    assert.equal(reviewed?.checklist[0].reviewedByUsername, "shift-manager");
+    assert.ok(reviewed?.checklist[0].reviewedAt);
 
     const second = await store.startWaiterShift(waiter.id, [zone]);
     assert.ok(second);
@@ -361,5 +375,8 @@ test("performance analytics finds repeated task and employee failures", async ()
     assert.equal(analytics.taskPatterns[0].lowRatings, 1);
     assert.equal(analytics.taskPatterns[0].issueRate, 100);
     assert.equal(analytics.employeePatterns[0].waiterId, waiter.id);
+    const employeeOnly = store.performanceAnalytics([waiter.roleId], [waiter.id]);
+    assert.equal(employeeOnly.analyzedShiftCount, 2);
+    assert.equal(employeeOnly.roleSummaries[0].employeeCount, 1);
   });
 });

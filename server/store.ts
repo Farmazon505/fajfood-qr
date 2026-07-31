@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { config } from "./config";
 import type {
   AppData,
+  AdminAccessRole,
   CallAction,
   CallRoutingStage,
   CallStatus,
@@ -447,10 +448,14 @@ export class Store {
     return ranked.sort((left, right) => left.roleName.localeCompare(right.roleName, "ru") || left.rank - right.rank);
   }
 
-  performanceAnalytics(roleIds?: string[]): PerformanceAnalytics {
+  performanceAnalytics(roleIds?: string[], waiterIds?: string[]): PerformanceAnalytics {
     const allowedRoleIds = roleIds ? new Set(roleIds) : null;
+    const allowedWaiterIds = waiterIds ? new Set(waiterIds) : null;
     const shifts = this.data.shifts.filter(
-      (shift) => shift.status === "ended" && (!allowedRoleIds || allowedRoleIds.has(shift.roleId))
+      (shift) =>
+        shift.status === "ended" &&
+        (!allowedRoleIds || allowedRoleIds.has(shift.roleId)) &&
+        (!allowedWaiterIds || allowedWaiterIds.has(shift.waiterId))
     );
     type PatternAccumulator = {
       key: string;
@@ -562,7 +567,11 @@ export class Store {
       .filter((item) => item.assignments >= 2 && (item.missed > 0 || item.lowRatings > 0))
       .sort((left, right) => right.issueRate - left.issueRate || right.assignments - left.assignments);
 
-    const ratings = this.waiterRatings().filter((rating) => !allowedRoleIds || allowedRoleIds.has(rating.roleId));
+    const ratings = this.waiterRatings().filter(
+      (rating) =>
+        (!allowedRoleIds || allowedRoleIds.has(rating.roleId)) &&
+        (!allowedWaiterIds || allowedWaiterIds.has(rating.waiterId))
+    );
     const roleSummaries = Array.from(new Set([
       ...ratings.map((rating) => rating.roleId),
       ...shifts.map((shift) => shift.roleId)
@@ -574,7 +583,12 @@ export class Store {
       return {
         roleId: currentRoleId,
         roleName: role?.name || roleShifts[0]?.roleName || "Должность",
-        employeeCount: this.data.waiters.filter((waiter) => waiter.roleId === currentRoleId && waiter.active).length,
+        employeeCount: this.data.waiters.filter(
+          (waiter) =>
+            waiter.roleId === currentRoleId &&
+            waiter.active &&
+            (!allowedWaiterIds || allowedWaiterIds.has(waiter.id))
+        ).length,
         ratedShiftCount: roleRatings.reduce((sum, rating) => sum + rating.shiftCount, 0),
         averageStars: roleRatings.length
           ? roundStars(roleRatings.reduce((sum, rating) => sum + rating.score, 0) / roleRatings.length)
@@ -787,7 +801,11 @@ export class Store {
           sort: Number.isFinite(item.sort) ? item.sort : (index + 1) * 10,
           completedAt: item.completedAt ?? null,
           adminScore: normalizeStoredStars(item.adminScore, Boolean(item.completedAt)),
-          adminComment: item.adminComment ?? ""
+          adminComment: item.adminComment ?? "",
+          adminPhotoUrl: item.adminPhotoUrl ?? "",
+          reviewedAt: item.reviewedAt ?? null,
+          reviewedByRole: item.reviewedByRole ?? null,
+          reviewedByUsername: item.reviewedByUsername ?? ""
         })),
         readyAt: shift.readyAt ?? null,
         endedAt: shift.endedAt ?? null,
@@ -996,7 +1014,11 @@ export class Store {
         sort: item.sort,
         completedAt: null as string | null,
         adminScore: null as number | null,
-        adminComment: ""
+        adminComment: "",
+        adminPhotoUrl: "",
+        reviewedAt: null as string | null,
+        reviewedByRole: null as AdminAccessRole | null,
+        reviewedByUsername: ""
       }));
     // Добавляем задания на смену для текущей даты
     const todayTasks = this.data.shiftTasks
@@ -1014,7 +1036,11 @@ export class Store {
         sort: 10000 + idx * 10,
         completedAt: null as string | null,
         adminScore: null as number | null,
-        adminComment: ""
+        adminComment: "",
+        adminPhotoUrl: "",
+        reviewedAt: null as string | null,
+        reviewedByRole: null as AdminAccessRole | null,
+        reviewedByUsername: ""
       }));
     const checklist = [...templateItems, ...todayTasks];
     const requiredComplete = checklist.every((item) => !item.requiredForCalls);
@@ -1094,7 +1120,9 @@ export class Store {
 
   async reviewShiftChecklist(
     shiftId: string,
-    reviews: Array<{ itemId: string; score: number | null; comment: string }>
+    reviews: Array<{ itemId: string; score: number | null; comment: string; photoUrl?: string }>,
+    reviewedByRole: AdminAccessRole | null = null,
+    reviewedByUsername = ""
   ) {
     const shift = this.data.shifts.find((item) => item.id === shiftId);
     if (!shift) return null;
@@ -1106,6 +1134,10 @@ export class Store {
         ? null
         : clampStars(review.score);
       item.adminComment = review.comment.trim().slice(0, 500);
+      if (review.photoUrl !== undefined) item.adminPhotoUrl = review.photoUrl.trim().slice(0, 240);
+      item.reviewedAt = now();
+      item.reviewedByRole = reviewedByRole;
+      item.reviewedByUsername = reviewedByUsername.trim().slice(0, 64);
     }
     shift.score = calculateShiftScore(shift);
     await this.persist();
@@ -1619,7 +1651,11 @@ export class Store {
         sort: 10_000 + shift.checklist.filter((item) => item.itemId.startsWith("task-")).length * 10,
         completedAt: null,
         adminScore: null,
-        adminComment: ""
+        adminComment: "",
+        adminPhotoUrl: "",
+        reviewedAt: null,
+        reviewedByRole: null,
+        reviewedByUsername: ""
       });
       if (newTask.requiredForCalls) {
         shift.status = "checklist";

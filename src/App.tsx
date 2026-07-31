@@ -140,6 +140,7 @@ type AdminData = AppData & {
   ratings: WaiterRating[];
   performance: PerformanceAnalytics;
   performanceAiEnabled: boolean;
+  venueTimeZone: string;
   accessRole: AdminAccessRole;
   username: string;
   adminAccount: AdminAccountSummary | null;
@@ -1201,6 +1202,7 @@ function AdminPage() {
     { id: "staff", label: "Сотрудники", icon: <Users size={18} /> },
     { id: "management", label: "Telegram", icon: <ShieldCheck size={18} /> },
     { id: "shifts", label: "Смены и рейтинг", icon: <Trophy size={18} /> },
+    { id: "employee-control", label: "Контроль сотрудников", icon: <Eye size={18} /> },
     { id: "checklist", label: "Чек-листы", icon: <ClipboardCheck size={18} /> },
     ...(data.accessRole === "owner"
       ? [
@@ -1378,6 +1380,20 @@ function AdminPage() {
             authHeaders={authHeaders}
             onRefresh={loadAdmin}
             title="Смены сотрудников"
+          />
+        )}
+
+        {activeTab === "employee-control" && (
+          <EmployeeControl
+            waiters={data.waiters}
+            roles={data.staffRoles}
+            shifts={data.shifts}
+            ratings={data.ratings}
+            accessRole={data.accessRole}
+            venueTimeZone={data.venueTimeZone}
+            performanceAiEnabled={data.performanceAiEnabled}
+            authHeaders={authHeaders}
+            onRefresh={loadAdmin}
           />
         )}
 
@@ -2777,6 +2793,387 @@ function StarScore({ value, disabled, onChange }: { value: number; disabled?: bo
         </button>
       ))}
       <strong>{value || 0}</strong>
+    </div>
+  );
+}
+
+type EmployeeItemReviewDraft = {
+  score: number;
+  comment: string;
+  photoUrl: string;
+  photoFile: File | null;
+};
+
+function ReviewImagePreview({
+  photoUrl,
+  photoFile,
+  authHeaders,
+  alt
+}: {
+  photoUrl: string;
+  photoFile: File | null;
+  authHeaders: Record<string, string>;
+  alt: string;
+}) {
+  const [source, setSource] = useState("");
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+    setSource("");
+    if (photoFile) {
+      const objectUrl = URL.createObjectURL(photoFile);
+      setSource(objectUrl);
+      return () => URL.revokeObjectURL(objectUrl);
+    }
+    if (!photoUrl) {
+      return;
+    }
+    if (!/^\/api\/admin\/review-media\/[A-Za-z0-9._-]+$/.test(photoUrl)) {
+      setFailed(true);
+      return;
+    }
+    const controller = new AbortController();
+    let objectUrl = "";
+    void fetch(photoUrl, { headers: authHeaders, signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error("Фото недоступно");
+        return response.blob();
+      })
+      .then((blob) => {
+        objectUrl = URL.createObjectURL(blob);
+        setSource(objectUrl);
+      })
+      .catch((error) => {
+        if ((error as Error).name !== "AbortError") setFailed(true);
+      });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [authHeaders, photoFile, photoUrl]);
+
+  if (failed) return <div className="review-photo-placeholder">Фото недоступно</div>;
+  if (!source) return <div className="review-photo-placeholder">Загружаем фото…</div>;
+  return <img className="review-photo-preview" src={source} alt={alt} />;
+}
+
+function EmployeeControl({
+  waiters,
+  roles,
+  shifts,
+  ratings,
+  accessRole,
+  venueTimeZone,
+  performanceAiEnabled,
+  authHeaders,
+  onRefresh
+}: {
+  waiters: Waiter[];
+  roles: StaffRoleDefinition[];
+  shifts: WaiterShift[];
+  ratings: WaiterRating[];
+  accessRole: AdminAccessRole;
+  venueTimeZone: string;
+  performanceAiEnabled: boolean;
+  authHeaders: Record<string, string>;
+  onRefresh: () => Promise<void>;
+}) {
+  const todayKey = useMemo(
+    () => new Intl.DateTimeFormat("en-CA", { timeZone: venueTimeZone || "Europe/Astrakhan" }).format(new Date()),
+    [venueTimeZone]
+  );
+  const roleMap = useMemo(() => new Map(roles.map((role) => [role.id, role])), [roles]);
+  const eligibleWaiters = useMemo(
+    () => waiters
+      .filter((waiter) => {
+        const role = roleMap.get(waiter.roleId);
+        if (!role || role.kind === "owner") return false;
+        return accessRole === "owner" || role.kind !== "admin";
+      })
+      .sort((left, right) => left.name.localeCompare(right.name, "ru")),
+    [accessRole, roleMap, waiters]
+  );
+  const [selectedWaiterId, setSelectedWaiterId] = useState(eligibleWaiters[0]?.id || "");
+  const [selectedDate, setSelectedDate] = useState(todayKey);
+  const [search, setSearch] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, EmployeeItemReviewDraft>>({});
+  const [savingItem, setSavingItem] = useState("");
+  const [notice, setNotice] = useState("");
+  const [insight, setInsight] = useState<PerformanceInsightReport | null>(null);
+  const [insightBusy, setInsightBusy] = useState(false);
+
+  useEffect(() => {
+    if (!eligibleWaiters.some((waiter) => waiter.id === selectedWaiterId)) {
+      setSelectedWaiterId(eligibleWaiters[0]?.id || "");
+    }
+  }, [eligibleWaiters, selectedWaiterId]);
+
+  useEffect(() => {
+    setInsight(null);
+    setNotice("");
+  }, [selectedWaiterId]);
+
+  const selectedWaiter = eligibleWaiters.find((waiter) => waiter.id === selectedWaiterId) ?? null;
+  const selectedRole = selectedWaiter ? roleMap.get(selectedWaiter.roleId) ?? null : null;
+  const employeeShifts = selectedWaiter
+    ? shifts
+      .filter((shift) => shift.waiterId === selectedWaiter.id)
+      .sort((left, right) => new Date(right.startedAt).getTime() - new Date(left.startedAt).getTime())
+    : [];
+  const dayShifts = employeeShifts.filter((shift) => shift.morningGreetingDate === selectedDate);
+  const employeeRating = ratings.find((rating) => rating.waiterId === selectedWaiterId) ?? null;
+  const allItems = employeeShifts.flatMap((shift) => shift.checklist);
+  const completedItems = allItems.filter((item) => item.completedAt);
+  const reviewedItems = completedItems.filter((item) => item.adminScore !== null);
+  const explicitAverage = reviewedItems.length
+    ? Math.round((reviewedItems.reduce((sum, item) => sum + (item.adminScore || 0), 0) / reviewedItems.length) * 100) / 100
+    : 0;
+  const completionRate = allItems.length ? Math.round((completedItems.length / allItems.length) * 100) : 0;
+  const filteredWaiters = eligibleWaiters.filter((waiter) => {
+    const query = search.trim().toLocaleLowerCase("ru-RU");
+    if (!query) return true;
+    const role = roleMap.get(waiter.roleId);
+    return `${waiter.name} ${role?.name || ""}`.toLocaleLowerCase("ru-RU").includes(query);
+  });
+
+  const draftKey = (shiftId: string, itemId: string) => `${shiftId}:${itemId}`;
+  const draftFor = (shift: WaiterShift, item: WaiterShift["checklist"][number]) =>
+    drafts[draftKey(shift.id, item.itemId)] || {
+      score: item.adminScore ?? 5,
+      comment: item.adminComment,
+      photoUrl: item.adminPhotoUrl,
+      photoFile: null
+    };
+  const updateDraft = (
+    shift: WaiterShift,
+    item: WaiterShift["checklist"][number],
+    patch: Partial<EmployeeItemReviewDraft>
+  ) => {
+    const key = draftKey(shift.id, item.itemId);
+    setDrafts((current) => ({ ...current, [key]: { ...draftFor(shift, item), ...patch } }));
+  };
+
+  const selectPhoto = (shift: WaiterShift, item: WaiterShift["checklist"][number], file?: File) => {
+    if (!file) return;
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type) || file.size > 8 * 1024 * 1024) {
+      setNotice("Фото должно быть в формате PNG, JPG или WEBP и весить не более 8 МБ");
+      return;
+    }
+    updateDraft(shift, item, { photoFile: file });
+    setNotice("");
+  };
+
+  const saveItemReview = async (shift: WaiterShift, item: WaiterShift["checklist"][number]) => {
+    const key = draftKey(shift.id, item.itemId);
+    const draft = draftFor(shift, item);
+    setSavingItem(key);
+    setNotice("");
+    try {
+      let photoUrl = draft.photoUrl;
+      if (draft.photoFile) {
+        const uploadResponse = await fetch("/api/admin/review-media", {
+          method: "POST",
+          headers: {
+            ...authHeaders,
+            "content-type": draft.photoFile.type
+          },
+          body: draft.photoFile
+        });
+        const uploadResult = await uploadResponse.json().catch(() => ({}));
+        if (!uploadResponse.ok) throw new Error(uploadResult.error || "Не удалось загрузить фото");
+        photoUrl = String(uploadResult.url || "");
+      }
+      await api(`/api/admin/shifts/${shift.id}/review`, {
+        method: "PUT",
+        headers: authHeaders,
+        body: JSON.stringify({
+          reviews: [{
+            itemId: item.itemId,
+            score: Math.max(1, Math.min(5, draft.score)),
+            comment: draft.comment,
+            photoUrl
+          }]
+        })
+      });
+      setDrafts((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      setNotice(`Оценка пункта «${item.title}» сохранена`);
+      await onRefresh();
+    } catch (requestError) {
+      setNotice(requestError instanceof Error ? requestError.message : "Не удалось сохранить оценку");
+    } finally {
+      setSavingItem("");
+    }
+  };
+
+  const generateEmployeeInsight = async () => {
+    if (!selectedWaiter) return;
+    setInsightBusy(true);
+    setNotice("");
+    try {
+      setInsight(await api<PerformanceInsightReport>(`/api/admin/employees/${selectedWaiter.id}/performance-insights`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({})
+      }));
+    } catch (requestError) {
+      setNotice(requestError instanceof Error ? requestError.message : "Не удалось сформировать резюме");
+    } finally {
+      setInsightBusy(false);
+    }
+  };
+
+  if (!eligibleWaiters.length) {
+    return <section className="admin-panel empty-state employee-control-empty">Нет сотрудников, доступных для контроля.</section>;
+  }
+
+  return (
+    <div className="employee-control-layout">
+      <aside className="admin-panel employee-directory">
+        <div className="panel-heading"><div><h2>Сотрудники</h2><p className="muted">Выберите карточку для контроля.</p></div><Users size={20} /></div>
+        <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Найти сотрудника" aria-label="Найти сотрудника" />
+        <div className="employee-directory-list">
+          {filteredWaiters.map((waiter) => {
+            const role = roleMap.get(waiter.roleId);
+            const shift = shifts.find((item) => item.waiterId === waiter.id && item.status !== "ended");
+            return (
+              <button
+                type="button"
+                key={waiter.id}
+                className={selectedWaiterId === waiter.id ? "active" : ""}
+                onClick={() => setSelectedWaiterId(waiter.id)}
+              >
+                <span className="employee-avatar">{waiter.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
+                <span><strong>{waiter.name}</strong><small>{role?.name || "Сотрудник"} · {shift ? "на смене" : waiter.active ? "не на смене" : "неактивен"}</small></span>
+              </button>
+            );
+          })}
+          {!filteredWaiters.length && <p className="muted">Поиск не дал результатов.</p>}
+        </div>
+      </aside>
+
+      {selectedWaiter && (
+        <div className="employee-control-content">
+          <section className="admin-panel employee-profile-card">
+            <div className="employee-profile-heading">
+              <span className="employee-avatar employee-avatar--large">{selectedWaiter.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
+              <div><p>Карточка сотрудника</p><h2>{selectedWaiter.name}</h2><span>{selectedRole?.name || "Сотрудник"} · {selectedWaiter.active ? "активен" : "неактивен"}</span></div>
+            </div>
+            <div className="employee-profile-metrics">
+              <article><strong>{employeeShifts.length}</strong><span>смен за всё время</span></article>
+              <article><strong>{completionRate}%</strong><span>выполнено пунктов</span></article>
+              <article><strong>{reviewedItems.length ? `${explicitAverage} ★` : "—"}</strong><span>средняя оценка проверок</span></article>
+              <article><strong>{employeeRating?.score ? `${employeeRating.score} ★` : "—"}</strong><span>общий рейтинг</span></article>
+            </div>
+          </section>
+
+          <section className="admin-panel employee-ai-card">
+            <div className="panel-heading">
+              <div><h2>ИИ-резюме сотрудника</h2><p className="muted">Анализирует только историю выбранного сотрудника: выполнение, оценки и повторяющиеся слабые места.</p></div>
+              <button className="primary-button compact" disabled={insightBusy} onClick={() => void generateEmployeeInsight()}><Sparkles size={18} /> {insightBusy ? "Анализируем" : "Сформировать резюме"}</button>
+            </div>
+            {insight && (
+              <div className="ai-insight-result">
+                <div className="ai-insight-meta"><span>{insight.source === "openrouter" ? "ИИ-анализ" : "Локальный анализ"}</span><span>{insight.model}</span><span>{formatDate(insight.generatedAt)}</span></div>
+                <p className="ai-summary">{insight.summary}</p>
+                {insight.warning && <div className="task-notice">{insight.warning}</div>}
+                <div className="ai-recommendation-grid">
+                  {insight.recommendations.map((recommendation, index) => <article key={`${index}-${recommendation}`}><strong>{index + 1}</strong><p>{recommendation}</p></article>)}
+                </div>
+                {insight.employeeAdvice.find((item) => item.waiterId === selectedWaiter.id)?.advice && (
+                  <div className="employee-ai-conclusion"><strong>Персональная рекомендация</strong><p>{insight.employeeAdvice.find((item) => item.waiterId === selectedWaiter.id)?.advice}</p></div>
+                )}
+              </div>
+            )}
+            {!insight && <p className="employee-ai-hint">{performanceAiEnabled ? "Нажмите кнопку, чтобы получить актуальное персональное резюме." : "OpenRouter не настроен — будет сформировано локальное резюме по фактическим данным."}</p>}
+          </section>
+
+          <section className="admin-panel employee-day-control">
+            <div className="panel-heading employee-day-heading">
+              <div><h2>Контроль чек-листа по дате</h2><p className="muted">По умолчанию показана сегодняшняя смена.</p></div>
+              <div className="employee-date-control">
+                <label className="field"><span><CalendarDays size={16} /> Дата</span><input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} /></label>
+                {selectedDate !== todayKey && <button className="ghost-button compact" onClick={() => setSelectedDate(todayKey)}>Сегодня</button>}
+              </div>
+            </div>
+            {notice && <div className="task-notice">{notice}</div>}
+            <div className="employee-day-shifts">
+              {dayShifts.map((shift) => {
+                const completed = shift.checklist.filter((item) => item.completedAt).length;
+                const total = shift.checklist.length;
+                const progress = total ? Math.round((completed / total) * 100) : 100;
+                const nextPending = shift.checklist.find((item) => !item.completedAt);
+                const lastCompleted = [...shift.checklist].reverse().find((item) => item.completedAt);
+                return (
+                  <article className="employee-shift-control" key={shift.id}>
+                    <div className="employee-shift-summary">
+                      <div><strong>{shift.roleName} · {shift.status === "ended" ? "смена завершена" : shift.status === "active" ? "на линии" : "выполняет чек-лист"}</strong><span>Начало: {formatDate(shift.startedAt)}{shift.endedAt ? ` · завершение: ${formatDate(shift.endedAt)}` : ""}</span></div>
+                      <strong>{completed} / {total}</strong>
+                    </div>
+                    <div className="employee-progress-track"><span style={{ width: `${progress}%` }} /></div>
+                    <div className={`employee-stage-note ${nextPending ? "is-pending" : "is-complete"}`}>
+                      {nextPending
+                        ? lastCompleted
+                          ? `Последний выполненный пункт: «${lastCompleted.title}». Следующий незавершённый: «${nextPending.title}».`
+                          : `Сотрудник ещё не выполнил первый пункт: «${nextPending.title}».`
+                        : "Все пункты чек-листа выполнены."}
+                    </div>
+                    <div className="employee-checklist-review">
+                      {shift.checklist.map((item, index) => {
+                        const draft = draftFor(shift, item);
+                        const key = draftKey(shift.id, item.itemId);
+                        return (
+                          <article className={`employee-checklist-item ${item.completedAt ? "is-completed" : "is-pending"}`} key={item.itemId}>
+                            <div className="employee-checklist-item-heading">
+                              <span className="employee-checklist-index">{index + 1}</span>
+                              <div><strong>{item.title}</strong><small>{item.completedAt ? `Выполнено ${formatDate(item.completedAt)}` : "Не выполнено"}{item.countsForRating === false ? " · оценка не влияет на общий рейтинг" : ""}</small></div>
+                              {item.completedAt ? <CheckCircle2 size={22} /> : <Clock size={22} />}
+                            </div>
+                            {item.description && <p>{item.description}</p>}
+                            {item.completedAt && (
+                              <div className="employee-item-review-form">
+                                <div className="field star-review-field"><span>Оценка пункта</span><StarScore value={draft.score} onChange={(score) => updateDraft(shift, item, { score })} /></div>
+                                <label className="field employee-review-comment"><span>Комментарий руководителя</span><textarea rows={3} maxLength={500} value={draft.comment} onChange={(event) => updateDraft(shift, item, { comment: event.target.value })} placeholder="Что выполнено хорошо и что нужно улучшить" /></label>
+                                <div className="employee-review-photo">
+                                  <span className="employee-review-photo-label">Фото к комментарию</span>
+                                  {(draft.photoFile || draft.photoUrl) && <ReviewImagePreview photoFile={draft.photoFile} photoUrl={draft.photoUrl} authHeaders={authHeaders} alt={`Фото проверки: ${item.title}`} />}
+                                  <div className="button-row">
+                                    <label className="ghost-button compact review-photo-upload"><ImageIcon size={17} /> {draft.photoFile || draft.photoUrl ? "Заменить фото" : "Добавить фото"}<input type="file" accept="image/png,image/jpeg,image/webp" capture="environment" onChange={(event) => selectPhoto(shift, item, event.target.files?.[0])} /></label>
+                                    {(draft.photoFile || draft.photoUrl) && <button className="ghost-button compact" type="button" onClick={() => updateDraft(shift, item, { photoFile: null, photoUrl: "" })}><X size={17} /> Убрать</button>}
+                                  </div>
+                                </div>
+                                {item.reviewedAt && <small className="employee-review-meta">Последняя проверка: {formatDate(item.reviewedAt)}{item.reviewedByUsername ? ` · ${item.reviewedByUsername}` : ""}</small>}
+                                <button className="primary-button compact employee-review-save" disabled={savingItem === key} onClick={() => void saveItemReview(shift, item)}><Save size={18} /> {savingItem === key ? "Сохраняем" : "Сохранить оценку"}</button>
+                              </div>
+                            )}
+                          </article>
+                        );
+                      })}
+                    </div>
+                  </article>
+                );
+              })}
+              {!dayShifts.length && <div className="employee-no-shift"><CalendarDays size={28} /><strong>На выбранную дату смена не найдена</strong><span>Сотрудник не начинал чек-лист либо смена ещё не создана.</span></div>}
+            </div>
+          </section>
+
+          <section className="admin-panel employee-history-card">
+            <div className="panel-heading"><div><h2>История за всё время</h2><p className="muted">Последние смены, прогресс и количество проверенных пунктов.</p></div><RefreshCw size={20} /></div>
+            <div className="employee-history-list">
+              {employeeShifts.slice(0, 30).map((shift) => {
+                const completed = shift.checklist.filter((item) => item.completedAt).length;
+                const reviewed = shift.checklist.filter((item) => item.adminScore !== null).length;
+                return <article key={shift.id}><div><strong>{shift.morningGreetingDate}</strong><span>{shift.roleName} · {shift.status === "ended" ? "завершена" : "в работе"}</span></div><div><strong>{completed} / {shift.checklist.length}</strong><span>выполнено</span></div><div><strong>{reviewed}</strong><span>оценено</span></div><div><strong>{shift.score ? `${shift.score} ★` : "—"}</strong><span>рейтинг смены</span></div></article>;
+              })}
+              {!employeeShifts.length && <p className="muted">История смен пока отсутствует.</p>}
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

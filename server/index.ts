@@ -47,6 +47,7 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const uploadsDir = path.resolve(config.APP_DATA_DIR, "uploads");
+const reviewMediaDir = path.resolve(config.APP_DATA_DIR, "review-media");
 assertProductionSecrets();
 await initializeAdminCredentials();
 const store = new Store();
@@ -210,7 +211,8 @@ const shiftReviewSchema = z.object({
     z.object({
       itemId: z.string().min(1),
       score: z.number().min(1).max(5).nullable(),
-      comment: z.string().max(500).optional().default("")
+      comment: z.string().max(500).optional().default(""),
+      photoUrl: z.string().trim().max(240).regex(/^$|^\/api\/admin\/review-media\/[A-Za-z0-9._-]+$/).optional()
     })
   )
 });
@@ -225,6 +227,24 @@ const logoUploadParser = express.raw({
   type: Object.keys(logoContentTypes),
   limit: "10mb"
 });
+
+const reviewImageUploadParser = express.raw({
+  type: Object.keys(logoContentTypes),
+  limit: "8mb"
+});
+
+const validImageSignature = (contentType: string, body: Buffer) => {
+  if (contentType === "image/png") {
+    return body.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+  if (contentType === "image/jpeg") {
+    return body.length >= 3 && body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff;
+  }
+  if (contentType === "image/webp") {
+    return body.subarray(0, 4).toString("ascii") === "RIFF" && body.subarray(8, 12).toString("ascii") === "WEBP";
+  }
+  return false;
+};
 
 app.get("/api/health", (_request, response) => {
   response.json({ ok: true });
@@ -768,6 +788,37 @@ app.put("/api/admin/owner-notifications", requireOwner, async (request, response
   response.json(await store.updateOwnerNotifications(parsed.data));
 });
 
+app.post("/api/admin/review-media", reviewImageUploadParser, async (request, response) => {
+  const contentType = String(request.headers["content-type"] || "").split(";")[0].toLowerCase();
+  const extension = logoContentTypes[contentType];
+  if (
+    !extension ||
+    !Buffer.isBuffer(request.body) ||
+    request.body.length < 100 ||
+    !validImageSignature(contentType, request.body)
+  ) {
+    response.status(400).json({ error: "Загрузите настоящее PNG, JPG или WEBP фото до 8 МБ" });
+    return;
+  }
+
+  await mkdir(reviewMediaDir, { recursive: true });
+  const filename = `review-${Date.now()}-${randomUUID()}.${extension}`;
+  await writeFile(path.join(reviewMediaDir, filename), request.body);
+  response.status(201).json({ url: `/api/admin/review-media/${filename}` });
+});
+
+app.get("/api/admin/review-media/:filename", (request, response) => {
+  const filename = String(request.params.filename || "");
+  if (!/^review-\d+-[0-9a-f-]+\.(?:png|jpg|webp)$/.test(filename)) {
+    response.status(404).json({ error: "Фото не найдено" });
+    return;
+  }
+  response.setHeader("Cache-Control", "private, max-age=3600");
+  response.sendFile(filename, { root: reviewMediaDir, dotfiles: "deny" }, (error) => {
+    if (error && !response.headersSent) response.status(404).json({ error: "Фото не найдено" });
+  });
+});
+
 app.post("/api/admin/logo", logoUploadParser, async (request, response) => {
   const contentType = String(request.headers["content-type"] || "").split(";")[0].toLowerCase();
   const extension = logoContentTypes[contentType];
@@ -843,6 +894,7 @@ app.get("/api/admin/overview", (request, response) => {
     ratings: visibleRatings,
     performance: store.performanceAnalytics(visibleRoleIds),
     performanceAiEnabled: isPerformanceAiConfigured(),
+    venueTimeZone: config.VENUE_TIME_ZONE,
     accessRole: auth?.role || "admin",
     username: auth?.username || "",
     adminAccount: isOwner ? getAdminAccountSummary() : null,
@@ -1055,7 +1107,12 @@ app.put("/api/admin/shifts/:id/review", async (request, response) => {
     response.status(403).json({ error: "Оценка администраторов доступна только владельцу" });
     return;
   }
-  const shift = await store.reviewShiftChecklist(request.params.id, parsed.data.reviews);
+  const shift = await store.reviewShiftChecklist(
+    request.params.id,
+    parsed.data.reviews,
+    auth?.role ?? null,
+    auth?.username ?? ""
+  );
   if (!shift) {
     response.status(404).json({ error: "Смена не найдена" });
     return;
@@ -1084,6 +1141,29 @@ app.post("/api/admin/performance-insights", performanceAiLimiter, async (request
     return;
   }
   response.json(await generatePerformanceInsights(store.performanceAnalytics(requestedRoleIds)));
+});
+
+app.post("/api/admin/employees/:id/performance-insights", performanceAiLimiter, async (request, response) => {
+  const auth = getAdminAuth(request);
+  const waiter = store.snapshot().waiters.find((item) => item.id === request.params.id);
+  const role = waiter ? store.findRole(waiter.roleId) : null;
+  if (!waiter || !role) {
+    response.status(404).json({ error: "Сотрудник не найден" });
+    return;
+  }
+  if (role.kind === "owner" || (auth?.role !== "owner" && role.kind === "admin")) {
+    response.status(403).json({ error: "Нет доступа к аналитике этого сотрудника" });
+    return;
+  }
+
+  const analytics = store.performanceAnalytics([role.id], [waiter.id]);
+  response.json(await generatePerformanceInsights(analytics, {
+    focusEmployee: {
+      waiterId: waiter.id,
+      waiterName: waiter.name,
+      roleName: role.name
+    }
+  }));
 });
 
 app.patch("/api/admin/calls/:id", async (request, response) => {
@@ -1138,9 +1218,13 @@ app.get(/.*/, (_request, response) => {
   response.sendFile(path.join(staticDir, "index.html"));
 });
 
-app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+app.use((error: unknown, request: express.Request, response: express.Response, _next: express.NextFunction) => {
   if (typeof error === "object" && error && "type" in error && error.type === "entity.too.large") {
-    response.status(413).json({ error: "Файл слишком большой. Загрузите логотип до 10 МБ" });
+    response.status(413).json({
+      error: request.originalUrl.startsWith("/api/admin/review-media")
+        ? "Фото слишком большое. Загрузите фото до 8 МБ"
+        : "Файл слишком большой. Загрузите логотип до 10 МБ"
+    });
     return;
   }
 
