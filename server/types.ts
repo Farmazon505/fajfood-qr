@@ -5,6 +5,13 @@ export type AdminAccountSummary = {
   username: string;
   updatedAt: string;
 };
+export type OwnerNotificationSettings = {
+  telegramChatId: string;
+  maxUserId: string;
+  telegramEnabled: boolean;
+  maxEnabled: boolean;
+  configured: boolean;
+};
 export type StaffRoleKind = "owner" | "admin" | "waiter" | "staff";
 export type CallRoutingStage = "waiter" | "admin" | "owner";
 
@@ -69,6 +76,7 @@ export type Waiter = {
   name: string;
   roleId: string;
   telegramChatId: string;
+  maxUserId: string;
   tipUrl: string;
   active: boolean;
 };
@@ -223,6 +231,13 @@ export type TelegramMessageRef = {
   kind: "call" | "warning";
 };
 
+export type MaxMessageRef = {
+  userId: string;
+  messageId: string;
+  recipientRole: "waiter" | "admin" | "owner" | "unknown";
+  kind: "call" | "warning";
+};
+
 export type CallReasonCount = {
   actionId: string;
   label: string;
@@ -246,13 +261,16 @@ export type ServiceCall = {
   routingStage: CallRoutingStage;
   routingReason: string;
   adminEscalationStartedAt: string | null;
+  adminAcknowledgedAt: string | null;
   adminWarningSentAt: string | null;
   ownerEscalatedAt: string | null;
+  ownerAcknowledgedAt: string | null;
   pressCount: number;
   reasonCounts: CallReasonCount[];
   cycleStartedAt: string;
   lastRequestedAt: string;
   telegramMessages: TelegramMessageRef[];
+  maxMessages: MaxMessageRef[];
   createdAt: string;
   acceptedAt: string | null;
   doneAt: string | null;
@@ -317,6 +335,7 @@ export type PopupNotification = {
 
 export type AppData = {
   settings: VenueSettings;
+  ownerNotifications: OwnerNotificationSettings;
   offers: Offer[];
   actions: CallAction[];
   staffRoles: StaffRoleDefinition[];

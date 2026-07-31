@@ -63,6 +63,7 @@ import type {
   GuestFeedback,
   LoyaltyLead,
   Offer,
+  OwnerNotificationSettings,
   PerformanceAnalytics,
   PerformanceInsightReport,
   ServiceCall,
@@ -133,6 +134,8 @@ type AdminData = AppData & {
   publicBaseUrl: string;
   telegramEnabled: boolean;
   telegramBotUrl: string;
+  maxEnabled: boolean;
+  maxBotUrl: string;
   ratings: WaiterRating[];
   performance: PerformanceAnalytics;
   performanceAiEnabled: boolean;
@@ -1044,6 +1047,14 @@ function AdminPage() {
     void loadAdmin();
   }, [loadAdmin]);
 
+  useEffect(() => {
+    if (!token) return;
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadAdmin();
+    }, 10_000);
+    return () => window.clearInterval(interval);
+  }, [loadAdmin, token]);
+
   const login = async (event: FormEvent) => {
     event.preventDefault();
     setError("");
@@ -1107,6 +1118,14 @@ function AdminPage() {
       method: "PATCH",
       headers: authHeaders,
       body: JSON.stringify({ status })
+    });
+    await loadAdmin();
+  };
+
+  const acknowledgeCall = async (callId: string) => {
+    await api(`/api/admin/calls/${callId}/acknowledge`, {
+      method: "POST",
+      headers: authHeaders
     });
     await loadAdmin();
   };
@@ -1175,12 +1194,20 @@ function AdminPage() {
 
   return (
     <main className="admin-shell" style={brandStyle(data.settings)}>
+      <EscalationAlerts
+        data={data}
+        acknowledgeCall={(callId) => void acknowledgeCall(callId)}
+        updateCall={(callId, status) => void updateCall(callId, status)}
+      />
       <aside className="admin-sidebar">
         <div className="brand-lockup">
           <LogoMark settings={data.settings} className="logo-mark--sidebar" />
           <div>
             <strong>{data.settings.name}</strong>
-            <span>{data.telegramEnabled ? `Telegram подключен · ${data.username}` : `Telegram не настроен · ${data.username}`}</span>
+            <span>{[
+              data.telegramEnabled ? "Telegram" : "",
+              data.maxEnabled ? "MAX" : ""
+            ].filter(Boolean).join(" + ") || "Мессенджеры не настроены"} · {data.username}</span>
           </div>
         </div>
 
@@ -1271,8 +1298,9 @@ function AdminPage() {
             waiters={data.waiters}
             roles={data.staffRoles}
             telegramBotUrl={data.telegramBotUrl}
+            maxBotUrl={data.maxBotUrl}
             onChange={(waiters) => setData({ ...data, waiters })}
-            onSave={() => void saveResource("waiters", data.waiters, "Telegram-аккаунты руководителей сохранены")}
+            onSave={() => void saveResource("waiters", data.waiters, "Аккаунты руководителей сохранены")}
           />
         )}
 
@@ -1305,6 +1333,9 @@ function AdminPage() {
           <OwnerProfile
             ownerUsername={data.username}
             adminAccount={data.adminAccount}
+            ownerNotifications={data.ownerNotifications}
+            telegramAvailable={data.telegramEnabled}
+            maxAvailable={data.maxEnabled}
             authHeaders={authHeaders}
             onRefresh={loadAdmin}
           />
@@ -1357,11 +1388,17 @@ function AdminPage() {
 function OwnerProfile({
   ownerUsername,
   adminAccount,
+  ownerNotifications,
+  telegramAvailable,
+  maxAvailable,
   authHeaders,
   onRefresh
 }: {
   ownerUsername: string;
   adminAccount: AdminAccountSummary;
+  ownerNotifications: OwnerNotificationSettings;
+  telegramAvailable: boolean;
+  maxAvailable: boolean;
   authHeaders: { authorization: string };
   onRefresh: () => Promise<void>;
 }) {
@@ -1372,6 +1409,10 @@ function OwnerProfile({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [formError, setFormError] = useState("");
+  const [notificationSettings, setNotificationSettings] = useState(ownerNotifications);
+  const [notificationBusy, setNotificationBusy] = useState(false);
+  const [notificationMessage, setNotificationMessage] = useState("");
+  const [notificationError, setNotificationError] = useState("");
 
   useEffect(() => {
     setAdminUsername(adminAccount.username);
@@ -1411,6 +1452,53 @@ function OwnerProfile({
       setFormError(requestError instanceof Error ? requestError.message : "Не удалось обновить доступ администратора");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const submitNotifications = async (event: FormEvent) => {
+    event.preventDefault();
+    setNotificationMessage("");
+    setNotificationError("");
+    const telegramChatId = notificationSettings.telegramChatId.trim();
+    const maxUserId = notificationSettings.maxUserId.trim();
+    if (telegramChatId && !/^-?\d+$/.test(telegramChatId)) {
+      setNotificationError("Telegram ID должен состоять из цифр");
+      return;
+    }
+    if (maxUserId && !/^\d+$/.test(maxUserId)) {
+      setNotificationError("MAX user_id должен состоять из цифр");
+      return;
+    }
+    if (notificationSettings.telegramEnabled && !telegramChatId) {
+      setNotificationError("Укажите Telegram ID или выключите канал Telegram");
+      return;
+    }
+    if (notificationSettings.maxEnabled && !maxUserId) {
+      setNotificationError("Укажите MAX user_id или выключите канал MAX");
+      return;
+    }
+
+    setNotificationBusy(true);
+    try {
+      const updated = await api<OwnerNotificationSettings>("/api/admin/owner-notifications", {
+        method: "PUT",
+        headers: authHeaders,
+        body: JSON.stringify({
+          telegramChatId,
+          maxUserId,
+          telegramEnabled: notificationSettings.telegramEnabled,
+          maxEnabled: notificationSettings.maxEnabled
+        })
+      });
+      setNotificationSettings(updated);
+      setNotificationMessage("Каналы входящих уведомлений сохранены");
+      await onRefresh();
+    } catch (requestError) {
+      setNotificationError(
+        requestError instanceof Error ? requestError.message : "Не удалось сохранить каналы"
+      );
+    } finally {
+      setNotificationBusy(false);
     }
   };
 
@@ -1514,6 +1602,122 @@ function OwnerProfile({
           </div>
         </form>
       </div>
+
+      <form className="owner-notification-settings" onSubmit={submitNotifications}>
+        <div className="owner-notification-heading">
+          <div>
+            <h3>Входящие уведомления владельца</h3>
+            <p>
+              Срочные вызовы всегда сохраняются в CRM. Здесь можно дополнительно получать их
+              мгновенно в Telegram и MAX, даже когда CRM закрыта.
+            </p>
+          </div>
+          <BellRing size={22} />
+        </div>
+
+        <div className="owner-channel-grid">
+          <article className={`owner-channel-card${notificationSettings.telegramEnabled ? " is-enabled" : ""}`}>
+            <div className="owner-channel-title">
+              <div>
+                <strong>Telegram</strong>
+                <span className={telegramAvailable ? "channel-ready" : "channel-unavailable"}>
+                  {telegramAvailable ? "Бот подключён" : "Бот сейчас недоступен"}
+                </span>
+              </div>
+              <button
+                className={`channel-toggle${notificationSettings.telegramEnabled ? " is-enabled" : ""}`}
+                type="button"
+                aria-pressed={notificationSettings.telegramEnabled}
+                onClick={() => {
+                  setNotificationSettings({
+                    ...notificationSettings,
+                    telegramEnabled: !notificationSettings.telegramEnabled
+                  });
+                  setNotificationMessage("");
+                  setNotificationError("");
+                }}
+              >
+                {notificationSettings.telegramEnabled ? "Включён" : "Выключен"}
+              </button>
+            </div>
+            <label className="field">
+              <span>Telegram ID владельца</span>
+              <input
+                inputMode="numeric"
+                value={notificationSettings.telegramChatId}
+                onChange={(event) => {
+                  setNotificationSettings({
+                    ...notificationSettings,
+                    telegramChatId: event.target.value
+                  });
+                  setNotificationMessage("");
+                  setNotificationError("");
+                }}
+                placeholder="Например: 123456789"
+                maxLength={32}
+              />
+            </label>
+          </article>
+
+          <article className={`owner-channel-card${notificationSettings.maxEnabled ? " is-enabled" : ""}`}>
+            <div className="owner-channel-title">
+              <div>
+                <strong>MAX</strong>
+                <span className={maxAvailable ? "channel-ready" : "channel-unavailable"}>
+                  {maxAvailable ? "Бот подключён" : "Бот сейчас недоступен"}
+                </span>
+              </div>
+              <button
+                className={`channel-toggle${notificationSettings.maxEnabled ? " is-enabled" : ""}`}
+                type="button"
+                aria-pressed={notificationSettings.maxEnabled}
+                onClick={() => {
+                  setNotificationSettings({
+                    ...notificationSettings,
+                    maxEnabled: !notificationSettings.maxEnabled
+                  });
+                  setNotificationMessage("");
+                  setNotificationError("");
+                }}
+              >
+                {notificationSettings.maxEnabled ? "Включён" : "Выключен"}
+              </button>
+            </div>
+            <label className="field">
+              <span>MAX user_id владельца</span>
+              <input
+                inputMode="numeric"
+                value={notificationSettings.maxUserId}
+                onChange={(event) => {
+                  setNotificationSettings({
+                    ...notificationSettings,
+                    maxUserId: event.target.value
+                  });
+                  setNotificationMessage("");
+                  setNotificationError("");
+                }}
+                placeholder="Например: 123456789"
+                maxLength={32}
+              />
+            </label>
+          </article>
+        </div>
+
+        <div className="owner-crm-channel">
+          <CheckCircle2 size={18} />
+          <span><strong>CRM включена всегда.</strong> Эскалация останется в профиле до подтверждения.</span>
+        </div>
+
+        {notificationMessage && <div className="success-line owner-account-status">{notificationMessage}</div>}
+        {notificationError && <div className="error-line owner-account-status">{notificationError}</div>}
+
+        <div className="button-row owner-account-actions">
+          <button className="primary-button" type="submit" disabled={notificationBusy}>
+            <Save size={18} />
+            {notificationBusy ? "Сохраняем" : "Сохранить каналы"}
+          </button>
+        </div>
+      </form>
     </section>
   );
 }
@@ -1554,6 +1758,67 @@ function Dashboard({
         </div>
       </section>
     </div>
+  );
+}
+
+function EscalationAlerts({
+  data,
+  acknowledgeCall,
+  updateCall
+}: {
+  data: AdminData;
+  acknowledgeCall: (callId: string) => void;
+  updateCall: (callId: string, status: CallStatus) => void;
+}) {
+  const alerts = data.calls.filter((call) => {
+    if (call.status === "done" || call.status === "cancelled") return false;
+    return data.accessRole === "owner"
+      ? call.routingStage === "owner" && !call.ownerAcknowledgedAt
+      : call.routingStage === "admin" && !call.adminAcknowledgedAt;
+  });
+  if (!alerts.length) return null;
+
+  const tableLabel = (call: ServiceCall) => {
+    const table = data.tables.find((item) => item.id === call.tableId);
+    return table ? `${table.name}${table.zone ? ` · ${table.zone}` : ""}` : "Стол";
+  };
+
+  return (
+    <aside className="escalation-toast-stack" role="alert" aria-live="assertive">
+      {alerts.slice(0, 3).map((call) => (
+        <article className="escalation-toast" key={call.id}>
+          <div className="escalation-toast__heading">
+            <AlertTriangle size={24} />
+            <div>
+              <strong>
+                {data.accessRole === "owner" ? "Требуется контроль владельца" : "Требуется контроль администратора"}
+              </strong>
+              <span>{tableLabel(call)} · {call.actionLabel}</span>
+            </div>
+          </div>
+          <p>{call.routingReason || "Сотрудник не подтвердил вызов вовремя."}</p>
+          <small>Последний запрос: {formatDate(call.lastRequestedAt)}</small>
+          <div className="escalation-toast__actions">
+            {call.status === "new" ? (
+              <button className="primary-button" onClick={() => updateCall(call.id, "accepted")}>
+                <Check size={16} />
+                Принять
+              </button>
+            ) : (
+              <button className="primary-button" onClick={() => acknowledgeCall(call.id)}>
+                <ShieldCheck size={16} />
+                Подтвердить контроль
+              </button>
+            )}
+            <button className="ghost-button" onClick={() => updateCall(call.id, "done")}>
+              <CheckCircle2 size={16} />
+              Готово
+            </button>
+          </div>
+        </article>
+      ))}
+      {alerts.length > 3 && <div className="escalation-toast__more">Еще срочных вызовов: {alerts.length - 3}</div>}
+    </aside>
   );
 }
 
@@ -1868,9 +2133,9 @@ function WaitersEditor({
   return (
     <section className="admin-panel">
       <div className="panel-heading">
-        <h2>Официанты и Telegram</h2>
+        <h2>Официанты и мессенджеры</h2>
         <div className="button-row">
-          <button className="ghost-button" onClick={() => onChange([...waiters, { id: "", name: "Официант", roleId: "waiter", telegramChatId: "", tipUrl: "", active: true }])}>
+          <button className="ghost-button" onClick={() => onChange([...waiters, { id: "", name: "Официант", roleId: "waiter", telegramChatId: "", maxUserId: "", tipUrl: "", active: true }])}>
             <Plus size={18} />
             Официант
           </button>
@@ -1898,6 +2163,7 @@ function WaitersEditor({
           <article className="editor-row" key={`${waiter.id}-${index}`}>
             <Field label="Имя" value={waiter.name} onChange={(value) => update(index, { name: value })} />
             <Field label="Telegram chat_id" value={waiter.telegramChatId} onChange={(value) => update(index, { telegramChatId: value })} />
+            <Field label="MAX user_id" value={waiter.maxUserId} onChange={(value) => update(index, { maxUserId: value })} />
             <Field label="Ссылка для чаевых" value={waiter.tipUrl} onChange={(value) => update(index, { tipUrl: value })} />
             <label className="toggle-row">
               <input type="checkbox" checked={waiter.active} onChange={(event) => update(index, { active: event.target.checked })} />
@@ -2001,12 +2267,12 @@ function StaffEditor({
         <div className="panel-heading">
           <div>
             <h2>Сотрудники</h2>
-            <p className="muted checklist-intro">Добавьте сотрудника, выберите должность и вставьте chat_id, который покажет Telegram-бот после команды /start.</p>
+            <p className="muted checklist-intro">Добавьте сотрудника, выберите должность и укажите Telegram chat_id и/или MAX user_id, который покажет бот.</p>
           </div>
           <div className="button-row">
             <button
               className="ghost-button"
-              onClick={() => onWaitersChange([...waiters, { id: "", name: "Новый сотрудник", roleId: "waiter", telegramChatId: "", tipUrl: "", active: true }])}
+              onClick={() => onWaitersChange([...waiters, { id: "", name: "Новый сотрудник", roleId: "waiter", telegramChatId: "", maxUserId: "", tipUrl: "", active: true }])}
             >
               <Plus size={18} /> Сотрудник
             </button>
@@ -2031,6 +2297,7 @@ function StaffEditor({
                   </select>
                 </label>
                 <Field label="Telegram chat_id" value={waiter.telegramChatId} onChange={(value) => updateWaiter(index, { telegramChatId: value })} />
+                <Field label="MAX user_id" value={waiter.maxUserId} onChange={(value) => updateWaiter(index, { maxUserId: value })} />
                 <Field
                   label={role?.kind === "waiter" ? "Ссылка для чаевых" : "Рабочая ссылка"}
                   value={waiter.tipUrl}
@@ -2063,12 +2330,14 @@ function ManagementTelegramEditor({
   waiters,
   roles,
   telegramBotUrl,
+  maxBotUrl,
   onChange,
   onSave
 }: {
   waiters: Waiter[];
   roles: StaffRoleDefinition[];
   telegramBotUrl: string;
+  maxBotUrl: string;
   onChange: (waiters: Waiter[]) => void;
   onSave: () => void;
 }) {
@@ -2084,14 +2353,14 @@ function ManagementTelegramEditor({
     <section className="admin-panel">
       <div className="panel-heading">
         <div>
-          <h2>Администраторы в Telegram</h2>
-          <p className="muted checklist-intro">Сотрудник пишет боту /start, копирует свой chat_id, который необходимо вставить в соответствующее поле нового сотрудника. После этого он сможет начинать смену и получать резервные вызовы гостей.</p>
+          <h2>Администраторы в Telegram и MAX</h2>
+          <p className="muted checklist-intro">Сотрудник запускает нужного бота и передаёт Telegram chat_id или MAX user_id. Один идентификатор можно назначить только одному сотруднику.</p>
         </div>
         <div className="button-row">
           {adminRole && (
             <button
               className="ghost-button"
-              onClick={() => onChange([...waiters, { id: "", name: "Новый сотрудник", roleId: adminRole.id, telegramChatId: "", tipUrl: "", active: true }])}
+              onClick={() => onChange([...waiters, { id: "", name: "Новый сотрудник", roleId: adminRole.id, telegramChatId: "", maxUserId: "", tipUrl: "", active: true }])}
             >
               <Plus size={18} /> Добавить
             </button>
@@ -2112,6 +2381,11 @@ function ManagementTelegramEditor({
           <a className="ghost-button telegram-bot-link" href={telegramBotUrl} target="_blank" rel="noreferrer">
             <ExternalLink size={17} /> Открыть @{telegramBotName}
           </a>
+          {maxBotUrl && (
+            <a className="ghost-button telegram-bot-link" href={maxBotUrl} target="_blank" rel="noreferrer">
+              <ExternalLink size={17} /> Открыть MAX-бота
+            </a>
+          )}
         </div>
       </div>
 
@@ -2128,13 +2402,14 @@ function ManagementTelegramEditor({
               </select>
             </label>
             <Field label="Telegram chat_id" value={waiter.telegramChatId} onChange={(value) => update(index, { telegramChatId: value })} />
+            <Field label="MAX user_id" value={waiter.maxUserId} onChange={(value) => update(index, { maxUserId: value })} />
             <label className="toggle-row">
               <input type="checkbox" checked={waiter.active} onChange={(event) => update(index, { active: event.target.checked })} />
               Активен
             </label>
           </article>
         ))}
-        {!management.length && <p className="muted">Добавьте сотрудника и зарегистрируйте его Telegram chat_id.</p>}
+        {!management.length && <p className="muted">Добавьте сотрудника и зарегистрируйте его Telegram chat_id или MAX user_id.</p>}
       </div>
     </section>
   );

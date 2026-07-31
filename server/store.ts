@@ -5,12 +5,15 @@ import { config } from "./config";
 import type {
   AppData,
   CallAction,
+  CallRoutingStage,
   CallStatus,
   ChecklistItem,
   DiningTable,
   GuestFeedback,
   LoyaltyLead,
+  MaxMessageRef,
   Offer,
+  OwnerNotificationSettings,
   PerformanceAnalytics,
   ServiceCall,
   ShiftTask,
@@ -24,7 +27,11 @@ import type {
 } from "./types";
 
 const now = () => new Date().toISOString();
+const OWNER_NOTIFICATION_RECIPIENT_ID = "owner-profile-notifications";
 export const CHECKLIST_ITEM_COOLDOWN_MS = 60_000;
+export const WAITER_ACCEPT_TIMEOUT_MS = 60_000;
+export const WAITER_COMPLETE_TIMEOUT_MS = 2 * 60_000;
+export const ADMIN_ACK_TIMEOUT_MS = 60_000;
 
 export type ChecklistCompletionResult =
   | { status: "completed"; shift: WaiterShift }
@@ -79,6 +86,14 @@ const defaultSettings: VenueSettings = {
   accentColor: "#d6a45c",
   secondaryColor: "#f2c2c4",
   backgroundColor: "#120f17"
+};
+
+const defaultOwnerNotifications: OwnerNotificationSettings = {
+  telegramChatId: "",
+  maxUserId: "",
+  telegramEnabled: false,
+  maxEnabled: false,
+  configured: false
 };
 
 const defaultActions: CallAction[] = [
@@ -203,6 +218,7 @@ const defaultTables: DiningTable[] = [
 
 const createDefaultData = (): AppData => ({
   settings: defaultSettings,
+  ownerNotifications: defaultOwnerNotifications,
   offers: defaultOffers,
   actions: defaultActions,
   staffRoles: defaultStaffRoles,
@@ -212,6 +228,7 @@ const createDefaultData = (): AppData => ({
       name: "Дежурный официант",
       roleId: "waiter",
       telegramChatId: "",
+      maxUserId: "",
       tipUrl: "",
       active: true
     }
@@ -256,6 +273,19 @@ export class Store {
     try {
       const raw = await readFile(this.dataFile, "utf-8");
       const stored = JSON.parse(raw) as Partial<AppData>;
+      const ownerRoleIds = new Set(
+        (stored.staffRoles ?? defaultStaffRoles)
+          .filter((role) => role.kind === "owner")
+          .map((role) => role.id)
+      );
+      const legacyOwner = (stored.waiters ?? []).find((waiter) => ownerRoleIds.has(waiter.roleId));
+      const migratedOwnerNotifications: OwnerNotificationSettings = stored.ownerNotifications ?? {
+        telegramChatId: String(legacyOwner?.telegramChatId || "").trim(),
+        maxUserId: String(legacyOwner?.maxUserId || "").trim(),
+        telegramEnabled: Boolean(String(legacyOwner?.telegramChatId || "").trim()),
+        maxEnabled: Boolean(String(legacyOwner?.maxUserId || "").trim()),
+        configured: Boolean(legacyOwner)
+      };
       this.data = {
         ...createDefaultData(),
         ...stored,
@@ -266,6 +296,7 @@ export class Store {
         feedbacks: stored.feedbacks ?? [],
         popups: stored.popups ?? [],
         loyaltyLeads: stored.loyaltyLeads ?? [],
+        ownerNotifications: migratedOwnerNotifications,
         settings: {
           ...defaultSettings,
           ...(stored.settings ?? {})
@@ -315,9 +346,38 @@ export class Store {
     return this.findRole(waiter.roleId) ?? this.findRole("waiter");
   }
 
+  hasMessengerConnection(waiter: Waiter) {
+    return Boolean(waiter.telegramChatId.trim() || waiter.maxUserId.trim());
+  }
+
+  private ownerNotificationRecipient() {
+    const settings = this.data.ownerNotifications;
+    const telegramChatId = settings.telegramEnabled ? settings.telegramChatId.trim() : "";
+    const maxUserId = settings.maxEnabled ? settings.maxUserId.trim() : "";
+    if (!telegramChatId && !maxUserId) return null;
+    return {
+      id: OWNER_NOTIFICATION_RECIPIENT_ID,
+      name: "Владелец",
+      roleId: "owner",
+      telegramChatId,
+      maxUserId,
+      tipUrl: "",
+      active: true
+    } satisfies Waiter;
+  }
+
   findWaiterByChatId(chatId: string | number) {
     const normalized = String(chatId);
+    const owner = this.ownerNotificationRecipient();
+    if (owner?.telegramChatId === normalized) return owner;
     return this.data.waiters.find((waiter) => waiter.telegramChatId.trim() === normalized) ?? null;
+  }
+
+  findWaiterByMaxUserId(userId: string | number) {
+    const normalized = String(userId);
+    const owner = this.ownerNotificationRecipient();
+    if (owner?.maxUserId === normalized) return owner;
+    return this.data.waiters.find((waiter) => waiter.maxUserId.trim() === normalized) ?? null;
   }
 
   findCallById(id: string) {
@@ -554,7 +614,7 @@ export class Store {
     if (!assignedIds.length) return [];
 
     return this.data.waiters.filter((waiter) => {
-      if (!waiter.active || !waiter.telegramChatId.trim() || !assignedIds.includes(waiter.id)) return false;
+      if (!waiter.active || !this.hasMessengerConnection(waiter) || !assignedIds.includes(waiter.id)) return false;
       if (this.roleForWaiter(waiter)?.kind !== "waiter") return false;
       const shift = this.data.shifts.find(
         (item) => item.waiterId === waiter.id && item.status === "active" && item.zones.includes(table.zone)
@@ -565,7 +625,7 @@ export class Store {
 
   activeAdminsForTable(table: DiningTable) {
     return this.data.waiters.filter((member) => {
-      if (!member.active || !member.telegramChatId.trim() || this.roleForWaiter(member)?.kind !== "admin") return false;
+      if (!member.active || !this.hasMessengerConnection(member) || this.roleForWaiter(member)?.kind !== "admin") return false;
       return this.data.shifts.some(
         (shift) => shift.waiterId === member.id && shift.status !== "ended" && shift.zones.includes(table.zone)
       );
@@ -573,8 +633,12 @@ export class Store {
   }
 
   ownersForEscalation() {
+    if (this.data.ownerNotifications.configured) {
+      const owner = this.ownerNotificationRecipient();
+      return owner ? [owner] : [];
+    }
     return this.data.waiters.filter(
-      (member) => member.active && member.telegramChatId.trim() && this.roleForWaiter(member)?.kind === "owner"
+      (member) => member.active && this.hasMessengerConnection(member) && this.roleForWaiter(member)?.kind === "owner"
     );
   }
 
@@ -585,7 +649,7 @@ export class Store {
     if (!assigned.length) return "К столу не назначен официант.";
 
     const details = assigned.map((member) => {
-      if (!member.telegramChatId.trim()) return `${member.name}: Telegram не подключен`;
+      if (!this.hasMessengerConnection(member)) return `${member.name}: Telegram и MAX не подключены`;
       const shift = this.data.shifts.find((item) => item.waiterId === member.id && item.status !== "ended");
       if (!shift) return `${member.name}: смена не начата`;
       if (!shift.zones.includes(table.zone)) return `${member.name}: выбран другой этаж`;
@@ -620,6 +684,20 @@ export class Store {
     this.data.settings = settings;
     await this.persist();
     return this.snapshot().settings;
+  }
+
+  async updateOwnerNotifications(settings: Omit<OwnerNotificationSettings, "configured">) {
+    const telegramChatId = settings.telegramChatId.trim();
+    const maxUserId = settings.maxUserId.trim();
+    this.data.ownerNotifications = {
+      telegramChatId,
+      maxUserId,
+      telegramEnabled: Boolean(settings.telegramEnabled && telegramChatId),
+      maxEnabled: Boolean(settings.maxEnabled && maxUserId),
+      configured: true
+    };
+    await this.persist();
+    return structuredClone(this.data.ownerNotifications);
   }
 
   private normalizeData() {
@@ -665,8 +743,20 @@ export class Store {
     this.data.waiters = this.data.waiters.map((waiter) => ({
       ...waiter,
       roleId: this.findRole(waiter.roleId)?.id ?? "waiter",
+      telegramChatId: waiter.telegramChatId ?? "",
+      maxUserId: waiter.maxUserId ?? "",
       tipUrl: waiter.tipUrl ?? ""
     }));
+    const ownerNotifications = this.data.ownerNotifications ?? defaultOwnerNotifications;
+    const ownerTelegramChatId = String(ownerNotifications.telegramChatId || "").trim();
+    const ownerMaxUserId = String(ownerNotifications.maxUserId || "").trim();
+    this.data.ownerNotifications = {
+      telegramChatId: ownerTelegramChatId,
+      maxUserId: ownerMaxUserId,
+      telegramEnabled: Boolean(ownerNotifications.telegramEnabled && ownerTelegramChatId),
+      maxEnabled: Boolean(ownerNotifications.maxEnabled && ownerMaxUserId),
+      configured: Boolean(ownerNotifications.configured)
+    };
     this.data.tables = this.data.tables.map((table) => {
       const waiterIds = tableWaiterIds(table);
       return {
@@ -717,8 +807,10 @@ export class Store {
       routingStage: call.routingStage ?? "waiter",
       routingReason: call.routingReason ?? "",
       adminEscalationStartedAt: call.adminEscalationStartedAt ?? null,
+      adminAcknowledgedAt: call.adminAcknowledgedAt ?? null,
       adminWarningSentAt: call.adminWarningSentAt ?? null,
       ownerEscalatedAt: call.ownerEscalatedAt ?? null,
+      ownerAcknowledgedAt: call.ownerAcknowledgedAt ?? null,
       pressCount: Number.isFinite(call.pressCount) && call.pressCount > 0 ? call.pressCount : 1,
       reasonCounts:
         Array.isArray(call.reasonCounts) && call.reasonCounts.length
@@ -727,6 +819,11 @@ export class Store {
       cycleStartedAt: call.cycleStartedAt ?? call.createdAt,
       lastRequestedAt: call.lastRequestedAt ?? call.createdAt,
       telegramMessages: (call.telegramMessages ?? []).map((message) => ({
+        ...message,
+        recipientRole: message.recipientRole ?? "unknown",
+        kind: message.kind ?? "call"
+      })),
+      maxMessages: (call.maxMessages ?? []).map((message) => ({
         ...message,
         recipientRole: message.recipientRole ?? "unknown",
         kind: message.kind ?? "call"
@@ -863,6 +960,7 @@ export class Store {
       id: waiter.id || randomUUID(),
       roleId: this.findRole(waiter.roleId)?.id ?? "waiter",
       telegramChatId: waiter.telegramChatId.trim(),
+      maxUserId: String(waiter.maxUserId || "").trim(),
       tipUrl: waiter.tipUrl.trim()
     }));
     await this.persist();
@@ -1040,7 +1138,7 @@ export class Store {
     comment: string;
     guestName: string;
     assignedWaiterId: string | null;
-    routingStage: "waiter" | "admin";
+    routingStage: CallRoutingStage;
     routingReason: string;
   }) {
     const timestamp = now();
@@ -1073,8 +1171,10 @@ export class Store {
         existing.routingStage = input.routingStage;
         existing.routingReason = input.routingReason;
         existing.adminEscalationStartedAt = input.routingStage === "admin" ? timestamp : null;
+        existing.adminAcknowledgedAt = null;
         existing.adminWarningSentAt = null;
-        existing.ownerEscalatedAt = null;
+        existing.ownerEscalatedAt = input.routingStage === "owner" ? timestamp : null;
+        existing.ownerAcknowledgedAt = null;
       } else {
         existing.pressCount += 1;
         const reason = existing.reasonCounts.find((item) => item.actionId === input.action.id);
@@ -1103,13 +1203,16 @@ export class Store {
       routingStage: input.routingStage,
       routingReason: input.routingReason,
       adminEscalationStartedAt: input.routingStage === "admin" ? timestamp : null,
+      adminAcknowledgedAt: null,
       adminWarningSentAt: null,
-      ownerEscalatedAt: null,
+      ownerEscalatedAt: input.routingStage === "owner" ? timestamp : null,
+      ownerAcknowledgedAt: null,
       pressCount: 1,
       reasonCounts: [{ actionId: input.action.id, label: input.action.label, count: 1 }],
       cycleStartedAt: timestamp,
       lastRequestedAt: timestamp,
       telegramMessages: [],
+      maxMessages: [],
       createdAt: timestamp,
       acceptedAt: null,
       doneAt: null
@@ -1132,6 +1235,23 @@ export class Store {
     return structuredClone(call);
   }
 
+  async replaceMaxMessages(callId: string, messages: MaxMessageRef[]) {
+    const call = this.data.calls.find((item) => item.id === callId);
+    if (!call) return null;
+    const unique = new Map(
+      messages.map((message) => [`${message.userId}:${message.kind}:${message.recipientRole}`, message])
+    );
+    call.maxMessages = Array.from(unique.values());
+    await this.persist();
+    return structuredClone(call);
+  }
+
+  async appendMaxMessages(callId: string, messages: MaxMessageRef[]) {
+    const call = this.data.calls.find((item) => item.id === callId);
+    if (!call) return null;
+    return this.replaceMaxMessages(callId, [...call.maxMessages, ...messages]);
+  }
+
   async attachTelegramMessages(callId: string, messages: TelegramMessageRef[]) {
     return this.replaceTelegramMessages(callId, messages);
   }
@@ -1142,13 +1262,21 @@ export class Store {
     return this.replaceTelegramMessages(callId, [...call.telegramMessages, ...messages]);
   }
 
-  callsDueForAdminWarning(at: number) {
+  callsDueForAdminEscalation(at: number) {
     return this.data.calls
       .filter((call) => {
-        if (call.status !== "new" || call.routingStage !== "admin" || !call.adminEscalationStartedAt) return false;
-        if (call.adminWarningSentAt || call.ownerEscalatedAt) return false;
-        const elapsed = at - new Date(call.adminEscalationStartedAt).getTime();
-        return elapsed >= 4 * 60 * 1000 && elapsed < 5 * 60 * 1000;
+        if (
+          (call.status !== "new" && call.status !== "accepted") ||
+          call.routingStage !== "waiter" ||
+          call.adminEscalationStartedAt ||
+          call.ownerEscalatedAt
+        ) {
+          return false;
+        }
+        const startedAt = call.status === "accepted" ? call.acceptedAt : call.lastRequestedAt;
+        if (!startedAt) return false;
+        const timeout = call.status === "accepted" ? WAITER_COMPLETE_TIMEOUT_MS : WAITER_ACCEPT_TIMEOUT_MS;
+        return at - new Date(startedAt).getTime() >= timeout;
       })
       .map((call) => structuredClone(call));
   }
@@ -1156,34 +1284,62 @@ export class Store {
   callsDueForOwnerEscalation(at: number) {
     return this.data.calls
       .filter((call) => {
-        if (call.status !== "new" || !call.adminEscalationStartedAt || call.ownerEscalatedAt) return false;
-        return at - new Date(call.adminEscalationStartedAt).getTime() >= 5 * 60 * 1000;
+        if (
+          (call.status !== "new" && call.status !== "accepted") ||
+          call.routingStage !== "admin" ||
+          !call.adminEscalationStartedAt ||
+          call.adminAcknowledgedAt ||
+          call.ownerEscalatedAt
+        ) {
+          return false;
+        }
+        return at - new Date(call.adminEscalationStartedAt).getTime() >= ADMIN_ACK_TIMEOUT_MS;
       })
       .map((call) => structuredClone(call));
   }
 
-  async markAdminWarningSent(callId: string) {
-    const call = this.data.calls.find((item) => item.id === callId && item.status === "new");
-    if (!call || call.adminWarningSentAt) return null;
-    call.adminWarningSentAt = now();
-    await this.persist();
-    return structuredClone(call);
-  }
-
-  async markOwnerEscalated(callId: string) {
-    const call = this.data.calls.find((item) => item.id === callId && item.status === "new");
-    if (!call || call.ownerEscalatedAt) return null;
-    call.ownerEscalatedAt = now();
-    call.routingStage = "owner";
-    await this.persist();
-    return structuredClone(call);
-  }
-
-  async retryOwnerEscalation(callId: string) {
-    const call = this.data.calls.find((item) => item.id === callId && item.status === "new");
-    if (!call || call.routingStage !== "owner") return null;
+  async startAdminEscalation(callId: string, reason: string, at = new Date()) {
+    const call = this.data.calls.find(
+      (item) =>
+        item.id === callId &&
+        (item.status === "new" || item.status === "accepted") &&
+        item.routingStage === "waiter"
+    );
+    if (!call || call.adminEscalationStartedAt || call.ownerEscalatedAt) return null;
     call.routingStage = "admin";
-    call.ownerEscalatedAt = null;
+    call.routingReason = reason;
+    call.adminEscalationStartedAt = at.toISOString();
+    call.adminAcknowledgedAt = null;
+    call.adminWarningSentAt = null;
+    await this.persist();
+    return structuredClone(call);
+  }
+
+  async markOwnerEscalated(callId: string, reason?: string, at = new Date()) {
+    const call = this.data.calls.find(
+      (item) => item.id === callId && (item.status === "new" || item.status === "accepted")
+    );
+    if (!call || call.ownerEscalatedAt) return null;
+    call.ownerEscalatedAt = at.toISOString();
+    call.ownerAcknowledgedAt = null;
+    call.routingStage = "owner";
+    if (reason) call.routingReason = reason;
+    await this.persist();
+    return structuredClone(call);
+  }
+
+  async acknowledgeEscalation(callId: string, role: "admin" | "owner") {
+    const call = this.data.calls.find(
+      (item) => item.id === callId && item.status !== "done" && item.status !== "cancelled"
+    );
+    if (!call) return null;
+    if (role === "admin" && call.routingStage === "admin") {
+      call.adminAcknowledgedAt = call.adminAcknowledgedAt || now();
+    } else if (role === "owner" && call.routingStage === "owner") {
+      call.ownerAcknowledgedAt = call.ownerAcknowledgedAt || now();
+    } else {
+      return null;
+    }
     await this.persist();
     return structuredClone(call);
   }
@@ -1195,6 +1351,17 @@ export class Store {
       .flatMap((call) =>
         call.telegramMessages
           .filter((message) => message.chatId === normalized)
+          .map((message) => ({ callId: call.id, ...message }))
+      );
+  }
+
+  activeCallMessagesForMaxUser(userId: string | number) {
+    const normalized = String(userId);
+    return this.data.calls
+      .filter((call) => call.status !== "done" && call.status !== "cancelled")
+      .flatMap((call) =>
+        call.maxMessages
+          .filter((message) => message.userId === normalized)
           .map((message) => ({ callId: call.id, ...message }))
       );
   }
@@ -1223,11 +1390,19 @@ export class Store {
     await this.persist();
   }
 
+  async removeMaxMessagesForUser(userId: string | number) {
+    const normalized = String(userId);
+    for (const call of this.data.calls) {
+      call.maxMessages = call.maxMessages.filter((message) => message.userId !== normalized);
+    }
+    await this.persist();
+  }
+
   async acceptCall(callId: string, waiterId: string) {
     const call = this.data.calls.find((item) => item.id === callId);
     const table = call ? this.data.tables.find((item) => item.id === call.tableId) : null;
-    const waiter = this.data.waiters.find((item) => item.id === waiterId && item.active);
-    if (!call || !table || !waiter) return null;
+    const waiter = this.findWaiterById(waiterId);
+    if (!call || !table || !waiter?.active) return null;
     if (call.status !== "new") return { call: structuredClone(call), accepted: false, allowed: true };
 
     const roleKind = this.roleForWaiter(waiter)?.kind;
@@ -1249,6 +1424,12 @@ export class Store {
       call.acceptedByWaiterId = call.acceptedByWaiterId || waiter.id;
       call.lastAcceptedByWaiterId = waiter.id;
     }
+    if (roleKind === "admin" && call.routingStage === "admin") {
+      call.adminAcknowledgedAt = call.adminAcknowledgedAt || call.acceptedAt;
+    }
+    if (roleKind === "owner" && call.routingStage === "owner") {
+      call.ownerAcknowledgedAt = call.ownerAcknowledgedAt || call.acceptedAt;
+    }
     await this.persist();
     return { call: structuredClone(call), accepted: true, allowed: true };
   }
@@ -1262,7 +1443,12 @@ export class Store {
     return structuredClone(call);
   }
 
-  async updateCallStatus(callId: string, status: CallStatus, waiterId?: string | null) {
+  async updateCallStatus(
+    callId: string,
+    status: CallStatus,
+    waiterId?: string | null,
+    accessRole?: "admin" | "owner"
+  ) {
     const call = this.data.calls.find((item) => item.id === callId);
     if (!call) return null;
 
@@ -1273,6 +1459,12 @@ export class Store {
       call.lastAcceptedByStaffId = waiterId || call.lastAcceptedByStaffId;
       call.acceptedByWaiterId = call.acceptedByWaiterId || waiterId || null;
       call.lastAcceptedByWaiterId = waiterId || call.lastAcceptedByWaiterId;
+      if (accessRole === "admin" && call.routingStage === "admin") {
+        call.adminAcknowledgedAt = call.adminAcknowledgedAt || call.acceptedAt;
+      }
+      if (accessRole === "owner" && call.routingStage === "owner") {
+        call.ownerAcknowledgedAt = call.ownerAcknowledgedAt || call.acceptedAt;
+      }
     }
     if (status === "done" && !call.doneAt) call.doneAt = now();
     await this.persist();
@@ -1468,6 +1660,7 @@ export class Store {
 
   /** Находит сотрудника по id */
   findWaiterById(id: string) {
+    if (id === OWNER_NOTIFICATION_RECIPIENT_ID) return this.ownerNotificationRecipient();
     return this.data.waiters.find((w) => w.id === id) ?? null;
   }
 

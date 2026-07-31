@@ -1187,12 +1187,197 @@ select:focus {
   margin: 0;
 }
 
+.owner-notification-settings {
+  display: grid;
+  gap: 16px;
+  margin-top: 26px;
+  border-top: 1px solid #ded6c8;
+  padding-top: 24px;
+}
+
+.owner-notification-heading,
+.owner-channel-title,
+.owner-crm-channel {
+  display: flex;
+  align-items: center;
+}
+
+.owner-notification-heading {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.owner-notification-heading h3,
+.owner-notification-heading p {
+  margin: 0;
+}
+
+.owner-notification-heading p {
+  max-width: 760px;
+  margin-top: 6px;
+  color: #657066;
+  line-height: 1.45;
+}
+
+.owner-notification-heading > svg {
+  flex: 0 0 auto;
+  color: var(--brand-primary);
+}
+
+.owner-channel-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.owner-channel-card {
+  display: grid;
+  gap: 16px;
+  border: 1px solid #ded6c8;
+  border-radius: 12px;
+  padding: 16px;
+  background: #fbf7ef;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.owner-channel-card.is-enabled {
+  border-color: color-mix(in srgb, var(--brand-primary) 55%, #ded6c8);
+  background: #fffdfa;
+  box-shadow: 0 10px 26px rgba(55, 31, 47, 0.08);
+}
+
+.owner-channel-title {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.owner-channel-title strong,
+.owner-channel-title span {
+  display: block;
+}
+
+.owner-channel-title strong {
+  font-size: 18px;
+}
+
+.owner-channel-title span {
+  margin-top: 3px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.channel-ready {
+  color: #287a47;
+}
+
+.channel-unavailable {
+  color: #a63d2f;
+}
+
+.channel-toggle {
+  min-width: 104px;
+  min-height: 38px;
+  border: 1px solid #c9c1b5;
+  border-radius: 999px;
+  padding: 0 14px;
+  color: #5d625e;
+  background: #eee9df;
+  font-weight: 800;
+}
+
+.channel-toggle.is-enabled {
+  border-color: var(--brand-primary);
+  color: #fff;
+  background: var(--brand-primary);
+}
+
+.owner-crm-channel {
+  gap: 9px;
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: #185c35;
+  background: #e7f5eb;
+}
+
+.owner-crm-channel svg {
+  flex: 0 0 auto;
+}
+
 .span-2 {
   grid-column: 1 / -1;
 }
 
 .admin-alert {
   margin-bottom: 14px;
+}
+
+.escalation-toast-stack {
+  position: fixed;
+  z-index: 1200;
+  top: 18px;
+  right: 18px;
+  display: grid;
+  width: min(460px, calc(100vw - 36px));
+  max-height: calc(100vh - 36px);
+  gap: 10px;
+  overflow-y: auto;
+}
+
+.escalation-toast {
+  border: 2px solid #b42318;
+  border-radius: 12px;
+  padding: 16px;
+  color: #3b1110;
+  background: #fff4f1;
+  box-shadow: 0 18px 50px rgba(93, 24, 20, 0.26);
+}
+
+.escalation-toast__heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.escalation-toast__heading > svg {
+  flex: 0 0 auto;
+  color: #b42318;
+}
+
+.escalation-toast__heading strong,
+.escalation-toast__heading span {
+  display: block;
+}
+
+.escalation-toast__heading strong {
+  font-size: 17px;
+}
+
+.escalation-toast__heading span,
+.escalation-toast small {
+  color: #7a2e29;
+}
+
+.escalation-toast p {
+  margin: 12px 0 6px;
+  line-height: 1.4;
+}
+
+.escalation-toast__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.escalation-toast__actions button {
+  min-height: 38px;
+}
+
+.escalation-toast__more {
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #fff;
+  background: #7a1f1a;
+  box-shadow: 0 12px 30px rgba(93, 24, 20, 0.2);
 }
 
 .call-list,
@@ -2151,6 +2336,18 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .owner-channel-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .owner-notification-heading {
+    align-items: flex-start;
+  }
+
+  .owner-channel-title {
+    align-items: flex-start;
+  }
+
   .owner-access-meta {
     border-right: 0;
     border-bottom: 1px solid #ded6c8;
@@ -2164,6 +2361,18 @@ button:disabled {
 
   .call-row {
     grid-template-columns: 1fr;
+  }
+
+  .escalation-toast-stack {
+    top: 10px;
+    right: 10px;
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
+  }
+
+  .escalation-toast__actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .telegram-registration-band {

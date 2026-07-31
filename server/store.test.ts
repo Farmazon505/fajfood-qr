@@ -3,7 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { CHECKLIST_ITEM_COOLDOWN_MS, Store } from "./store";
+import {
+  ADMIN_ACK_TIMEOUT_MS,
+  CHECKLIST_ITEM_COOLDOWN_MS,
+  Store,
+  WAITER_ACCEPT_TIMEOUT_MS,
+  WAITER_COMPLETE_TIMEOUT_MS
+} from "./store";
 import type { WaiterShift } from "./types";
 
 const withStore = async (run: (store: Store) => Promise<void>) => {
@@ -134,6 +140,116 @@ test("repeated calls share one thread and reset after acceptance", async () => {
     const nextGuests = await store.upsertCall({ table, action, comment: "", guestName: "", assignedWaiterId: null, routingStage: "waiter", routingReason: "" });
     assert.notEqual(nextGuests.id, first.id);
     assert.equal(nextGuests.pressCount, 1);
+  });
+});
+
+test("calls escalate after one minute without acceptance and two minutes without completion", async () => {
+  await withStore(async (store) => {
+    const [firstTable, secondTable] = store.snapshot().tables;
+    const action = store.snapshot().actions[0];
+
+    const unanswered = await store.upsertCall({
+      table: firstTable,
+      action,
+      comment: "",
+      guestName: "",
+      assignedWaiterId: null,
+      routingStage: "waiter",
+      routingReason: ""
+    });
+    const unansweredAt = new Date(unanswered.lastRequestedAt).getTime();
+    assert.equal(store.callsDueForAdminEscalation(unansweredAt + WAITER_ACCEPT_TIMEOUT_MS - 1).length, 0);
+    assert.equal(store.callsDueForAdminEscalation(unansweredAt + WAITER_ACCEPT_TIMEOUT_MS).length, 1);
+
+    const adminCall = await store.startAdminEscalation(
+      unanswered.id,
+      "Официант не принял вызов в течение 1 минуты."
+    );
+    assert.equal(adminCall?.routingStage, "admin");
+    const adminStartedAt = new Date(adminCall?.adminEscalationStartedAt || "").getTime();
+    assert.equal(store.callsDueForOwnerEscalation(adminStartedAt + ADMIN_ACK_TIMEOUT_MS - 1).length, 0);
+    assert.equal(store.callsDueForOwnerEscalation(adminStartedAt + ADMIN_ACK_TIMEOUT_MS).length, 1);
+
+    const acknowledged = await store.acknowledgeEscalation(unanswered.id, "admin");
+    assert.ok(acknowledged?.adminAcknowledgedAt);
+    assert.equal(store.callsDueForOwnerEscalation(adminStartedAt + ADMIN_ACK_TIMEOUT_MS + 1).length, 0);
+
+    const accepted = await store.upsertCall({
+      table: secondTable,
+      action,
+      comment: "",
+      guestName: "",
+      assignedWaiterId: null,
+      routingStage: "waiter",
+      routingReason: ""
+    });
+    const acceptedCall = await store.updateCallStatus(accepted.id, "accepted");
+    const acceptedAt = new Date(acceptedCall?.acceptedAt || "").getTime();
+    assert.equal(store.callsDueForAdminEscalation(acceptedAt + WAITER_COMPLETE_TIMEOUT_MS - 1).length, 0);
+    assert.equal(store.callsDueForAdminEscalation(acceptedAt + WAITER_COMPLETE_TIMEOUT_MS).length, 1);
+
+    const slowCall = await store.startAdminEscalation(
+      accepted.id,
+      "Официант принял вызов, но не завершил его в течение 2 минут."
+    );
+    const slowAdminStartedAt = new Date(slowCall?.adminEscalationStartedAt || "").getTime();
+    assert.equal(store.callsDueForOwnerEscalation(slowAdminStartedAt + ADMIN_ACK_TIMEOUT_MS).length, 1);
+
+    const ownerCall = await store.markOwnerEscalated(
+      accepted.id,
+      "Администратор не подтвердил вызов в течение 1 минуты."
+    );
+    assert.equal(ownerCall?.routingStage, "owner");
+    assert.ok(ownerCall?.ownerEscalatedAt);
+    assert.equal(ownerCall?.status, "accepted");
+
+    const ownerAcknowledged = await store.acknowledgeEscalation(accepted.id, "owner");
+    assert.ok(ownerAcknowledged?.ownerAcknowledgedAt);
+  });
+});
+
+test("owner profile controls Telegram and MAX escalation channels", async () => {
+  await withStore(async (store) => {
+    const settings = await store.updateOwnerNotifications({
+      telegramChatId: "30001",
+      maxUserId: "40001",
+      telegramEnabled: true,
+      maxEnabled: false
+    });
+    assert.equal(settings.configured, true);
+    assert.equal(settings.telegramEnabled, true);
+    assert.equal(settings.maxEnabled, false);
+
+    const recipients = store.ownersForEscalation();
+    assert.equal(recipients.length, 1);
+    assert.equal(recipients[0].telegramChatId, "30001");
+    assert.equal(recipients[0].maxUserId, "");
+    assert.equal(store.findWaiterByChatId("30001")?.roleId, "owner");
+    assert.equal(store.findWaiterByMaxUserId("40001"), null);
+
+    const table = store.snapshot().tables[0];
+    const action = store.snapshot().actions[0];
+    const call = await store.upsertCall({
+      table,
+      action,
+      comment: "",
+      guestName: "",
+      assignedWaiterId: null,
+      routingStage: "owner",
+      routingReason: "Администратор не в сети."
+    });
+    const accepted = await store.acceptCall(call.id, recipients[0].id);
+    assert.equal(accepted?.accepted, true);
+    assert.ok(accepted?.call.ownerAcknowledgedAt);
+
+    await store.updateOwnerNotifications({
+      telegramChatId: "30001",
+      maxUserId: "40001",
+      telegramEnabled: false,
+      maxEnabled: false
+    });
+    assert.deepEqual(store.ownersForEscalation(), []);
+    assert.equal(store.findWaiterByChatId("30001"), null);
   });
 });
 

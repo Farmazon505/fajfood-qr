@@ -33,9 +33,15 @@ test("Telegram manages a shift and keeps one live message per table", async () =
     const store = new Store(directory);
     await store.init();
     const waiter = store.snapshot().waiters[0];
-    const admin = { id: "admin-1", name: "Администратор", roleId: "admin", telegramChatId: "20001", tipUrl: "", active: true };
-    const owner = { id: "owner-1", name: "Владелец", roleId: "owner", telegramChatId: "30001", tipUrl: "", active: true };
+    const admin = { id: "admin-1", name: "Администратор", roleId: "admin", telegramChatId: "20001", maxUserId: "", tipUrl: "", active: true };
+    const owner = { id: "owner-1", name: "Владелец", roleId: "owner", telegramChatId: "30001", maxUserId: "", tipUrl: "", active: true };
     await store.replaceWaiters([{ ...waiter, telegramChatId: "10001" }, admin, owner]);
+    const fullChecklistTitle = "Проверить все столы, стулья, диваны и сервировку во всех зонах перед открытием смены";
+    const fullChecklistDescription = "Осмотреть каждый стол без исключения, убрать загрязнения, выровнять стулья и проверить комплектность сервировки.";
+    const checklistItems = store.snapshot().checklistItems;
+    await store.replaceChecklistItems(checklistItems.map((item, index) => index === 0
+      ? { ...item, title: fullChecklistTitle, description: fullChecklistDescription }
+      : item));
     const telegram = new TelegramService(store, "test-token", 10);
 
     const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Astrakhan" }).format(new Date());
@@ -73,6 +79,14 @@ test("Telegram manages a shift and keeps one live message per table", async () =
     assert.ok(startedShift);
     assert.equal(startedShift.status, "checklist");
     assert.ok(startedShift.checklist.length >= 2);
+    const checklistMessage = requests
+      .filter((request) => request.method === "sendMessage" && String(request.payload.text).includes("Чек-лист:"))
+      .at(-1);
+    assert.ok(checklistMessage);
+    assert.match(String(checklistMessage.payload.text), new RegExp(fullChecklistTitle));
+    assert.match(String(checklistMessage.payload.text), new RegExp(fullChecklistDescription));
+    assert.ok(startedShift.checklist.every((item) => String(checklistMessage.payload.text).includes(item.title)));
+    assert.ok(startedShift.checklist.every((item) => !item.description || String(checklistMessage.payload.text).includes(item.description)));
     await telegram.handleUpdate({
       update_id: 10,
       callback_query: {
@@ -236,11 +250,7 @@ test("Telegram manages a shift and keeps one live message per table", async () =
     assert.ok(store.findCallById(fallbackCall.id)?.telegramMessages.some((message) => message.recipientRole === "admin"));
 
     const baseTime = new Date(fallbackCall.adminEscalationStartedAt || fallbackCall.createdAt).getTime();
-    await telegram.processEscalations(baseTime + 4 * 60 * 1000 + 1);
-    assert.ok(store.findCallById(fallbackCall.id)?.adminWarningSentAt);
-    assert.ok(store.findCallById(fallbackCall.id)?.telegramMessages.some((message) => message.kind === "warning"));
-
-    await telegram.processEscalations(baseTime + 5 * 60 * 1000 + 1);
+    await telegram.processEscalations(baseTime + 60 * 1000 + 1);
     const escalated = store.findCallById(fallbackCall.id);
     assert.equal(escalated?.routingStage, "owner");
     const ownerRef = escalated?.telegramMessages.find((message) => message.recipientRole === "owner" && message.kind === "call");

@@ -22,6 +22,8 @@ import {
 import { config, publicBaseUrl } from "./config";
 import { Store } from "./store";
 import { TelegramService } from "./telegram";
+import { MaxService } from "./max";
+import { MessagingService } from "./messaging";
 import { generatePerformanceInsights, isPerformanceAiConfigured } from "./performance-ai";
 import type { CallStatus } from "./types";
 import { crmLoyalty } from "./crm-loyalty";
@@ -51,6 +53,8 @@ const store = new Store();
 await store.init();
 const telegram = new TelegramService(store);
 const crmReservations = new CrmReservationsClient();
+const max = new MaxService(store);
+const messaging = new MessagingService(store, telegram, max);
 const reservationMonitor = new ReservationMonitor(store, telegram, crmReservations);
 
 const app = express();
@@ -232,6 +236,7 @@ app.get("/api/ready", (_request, response) => {
     ok: true,
     tables: snapshot.tables.length,
     telegramEnabled: telegram.enabled(),
+    maxEnabled: max.enabled(),
     publicBaseUrl: publicBaseUrl()
   });
 });
@@ -361,7 +366,14 @@ app.post("/api/public/calls", publicLimiter, async (request, response) => {
   }
 
   const waiters = store.waitersForTable(table);
-  const routingStage = waiters.length ? "waiter" : "admin";
+  const admins = waiters.length ? [] : store.activeAdminsForTable(table);
+  const routingStage = waiters.length ? "waiter" : admins.length ? "admin" : "owner";
+  const fallbackReason = waiters.length
+    ? ""
+    : [
+        store.callFallbackReason(table),
+        admins.length ? "" : "Администратор не в сети."
+      ].filter(Boolean).join(" ");
   const call = await store.upsertCall({
     table,
     action,
@@ -369,17 +381,29 @@ app.post("/api/public/calls", publicLimiter, async (request, response) => {
     guestName: parsed.data.guestName,
     assignedWaiterId: waiters.length === 1 ? waiters[0].id : null,
     routingStage,
-    routingReason: routingStage === "admin" ? store.callFallbackReason(table) : ""
+    routingReason: fallbackReason
   });
 
-  const messages = await telegram.notifyCall({
+  let notified = await messaging.notifyCall({
     call,
     table,
     waiters,
     settings: store.snapshot().settings
   });
+  if (routingStage === "admin" && notified === 0) {
+    const ownerCall = await store.markOwnerEscalated(
+      call.id,
+      `${fallbackReason} Уведомление администратору не доставлено.`.trim()
+    );
+    if (ownerCall) notified += await messaging.notifyCall({
+      call: ownerCall,
+      table,
+      waiters: [],
+      settings: store.snapshot().settings
+    });
+  }
 
-  response.status(201).json({ ok: true, callId: call.id, notified: messages.length, pressCount: call.pressCount });
+  response.status(201).json({ ok: true, callId: call.id, notified, pressCount: call.pressCount });
 });
 
 app.get("/api/public/tips", publicLimiter, (request, response) => {
@@ -641,6 +665,19 @@ app.post("/api/telegram/webhook", async (request, response) => {
   response.json({ ok: true });
 });
 
+app.post("/api/max/webhook", async (request, response) => {
+  if (!max.webhookConfigured()) {
+    response.status(503).json({ error: "MAX webhook не настроен" });
+    return;
+  }
+  if (!max.webhookAuthorized(request.header("x-max-bot-api-secret"))) {
+    response.status(401).json({ error: "Некорректный секрет MAX webhook" });
+    return;
+  }
+  response.json({ ok: true });
+  void max.handleUpdate(request.body).catch((error) => console.error("[max webhook]", error));
+});
+
 const adminLoginSchema = z.object({
   username: z.string().max(64),
   password: z.string().max(128)
@@ -664,6 +701,28 @@ const adminAccountUpdateSchema = z.object({
   password: z.string().min(8).max(128)
 });
 
+const ownerNotificationUpdateSchema = z.object({
+  telegramChatId: z.string().trim().max(32).regex(/^$|^-?\d+$/),
+  maxUserId: z.string().trim().max(32).regex(/^$|^\d+$/),
+  telegramEnabled: z.boolean(),
+  maxEnabled: z.boolean()
+}).superRefine((value, context) => {
+  if (value.telegramEnabled && !value.telegramChatId) {
+    context.addIssue({
+      code: "custom",
+      path: ["telegramChatId"],
+      message: "Укажите Telegram ID или выключите канал"
+    });
+  }
+  if (value.maxEnabled && !value.maxUserId) {
+    context.addIssue({
+      code: "custom",
+      path: ["maxUserId"],
+      message: "Укажите MAX user_id или выключите канал"
+    });
+  }
+});
+
 app.put("/api/admin/admin-account", requireOwner, async (request, response) => {
   const parsed = adminAccountUpdateSchema.safeParse(request.body);
   if (!parsed.success) {
@@ -677,6 +736,36 @@ app.put("/api/admin/admin-account", requireOwner, async (request, response) => {
   } catch (error) {
     response.status(400).json({ error: error instanceof Error ? error.message : "Не удалось обновить доступ администратора" });
   }
+});
+
+app.put("/api/admin/owner-notifications", requireOwner, async (request, response) => {
+  const parsed = ownerNotificationUpdateSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({
+      error: parsed.error.issues[0]?.message || "Проверьте настройки каналов владельца"
+    });
+    return;
+  }
+
+  const staff = store.snapshot().waiters.filter(
+    (member) => store.findRole(member.roleId)?.kind !== "owner"
+  );
+  if (
+    parsed.data.telegramChatId &&
+    staff.some((member) => member.telegramChatId.trim() === parsed.data.telegramChatId)
+  ) {
+    response.status(400).json({ error: "Этот Telegram ID уже назначен сотруднику" });
+    return;
+  }
+  if (
+    parsed.data.maxUserId &&
+    staff.some((member) => member.maxUserId.trim() === parsed.data.maxUserId)
+  ) {
+    response.status(400).json({ error: "Этот MAX user_id уже назначен сотруднику" });
+    return;
+  }
+
+  response.json(await store.updateOwnerNotifications(parsed.data));
 });
 
 app.post("/api/admin/logo", logoUploadParser, async (request, response) => {
@@ -734,6 +823,15 @@ app.get("/api/admin/overview", (request, response) => {
     .map((role) => role.id);
   response.json({
     ...data,
+    ownerNotifications: isOwner
+      ? data.ownerNotifications
+      : {
+          telegramChatId: "",
+          maxUserId: "",
+          telegramEnabled: false,
+          maxEnabled: false,
+          configured: true
+        },
     staffRoles: data.staffRoles.filter((role) => isOwner || role.kind !== "owner"),
     waiters: visibleWaiters,
     checklistItems: data.checklistItems.filter(
@@ -750,7 +848,9 @@ app.get("/api/admin/overview", (request, response) => {
     adminAccount: isOwner ? getAdminAccountSummary() : null,
     publicBaseUrl: publicBaseUrl(),
     telegramEnabled: telegram.enabled(),
-    telegramBotUrl: `https://t.me/${config.TELEGRAM_BOT_USERNAME.replace(/^@/, "")}`
+    telegramBotUrl: `https://t.me/${config.TELEGRAM_BOT_USERNAME.replace(/^@/, "")}`,
+    maxEnabled: max.enabled(),
+    maxBotUrl: config.MAX_BOT_USERNAME ? `https://max.ru/${config.MAX_BOT_USERNAME.replace(/^@/, "")}` : ""
   });
 });
 
@@ -821,6 +921,33 @@ app.put("/api/admin/waiters", async (request, response) => {
     response.status(400).json({ error: "Один Telegram Chat ID нельзя назначить нескольким сотрудникам" });
     return;
   }
+  const maxUserIds = submitted.map((member) => String(member.maxUserId || "").trim()).filter(Boolean);
+  if (new Set(maxUserIds).size !== maxUserIds.length) {
+    response.status(400).json({ error: "Один MAX user_id нельзя назначить нескольким сотрудникам" });
+    return;
+  }
+  const ownerNotifications = store.snapshot().ownerNotifications;
+  const nonOwnerSubmitted = submitted.filter(
+    (member) => store.findRole(String(member.roleId || ""))?.kind !== "owner"
+  );
+  if (
+    ownerNotifications.telegramChatId &&
+    nonOwnerSubmitted.some(
+      (member) => String(member.telegramChatId || "").trim() === ownerNotifications.telegramChatId
+    )
+  ) {
+    response.status(400).json({ error: "Этот Telegram ID уже используется в профиле владельца" });
+    return;
+  }
+  if (
+    ownerNotifications.maxUserId &&
+    nonOwnerSubmitted.some(
+      (member) => String(member.maxUserId || "").trim() === ownerNotifications.maxUserId
+    )
+  ) {
+    response.status(400).json({ error: "Этот MAX user_id уже используется в профиле владельца" });
+    return;
+  }
   const auth = getAdminAuth(request);
   if (auth?.role === "owner") {
     response.json(await store.replaceWaiters(submitted));
@@ -832,6 +959,11 @@ app.put("/api/admin/waiters", async (request, response) => {
   const mergedChatIds = merged.map((member) => String(member.telegramChatId || "").trim()).filter(Boolean);
   if (new Set(mergedChatIds).size !== mergedChatIds.length) {
     response.status(400).json({ error: "Этот Telegram Chat ID уже принадлежит владельцу" });
+    return;
+  }
+  const mergedMaxUserIds = merged.map((member) => String(member.maxUserId || "").trim()).filter(Boolean);
+  if (new Set(mergedMaxUserIds).size !== mergedMaxUserIds.length) {
+    response.status(400).json({ error: "Этот MAX user_id уже принадлежит владельцу" });
     return;
   }
   response.json(await store.replaceWaiters(merged));
@@ -889,7 +1021,7 @@ app.post("/api/admin/shift-tasks", async (request, response) => {
   // Если задание на сегодня и для конкретного сотрудника — отправить уведомление немедленно
   const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: config.VENUE_TIME_ZONE }).format(new Date());
   if (task.date === todayKey && task.waiterId) {
-    if (await telegram.notifyShiftTask(task)) {
+    if (await messaging.notifyShiftTask(task)) {
       await store.markShiftTaskNotified(task.id);
     }
   }
@@ -961,14 +1093,31 @@ app.patch("/api/admin/calls/:id", async (request, response) => {
     return;
   }
 
-  const call = await store.updateCallStatus(request.params.id, status);
+  const call = await store.updateCallStatus(
+    request.params.id,
+    status,
+    null,
+    getAdminAuth(request)?.role
+  );
   if (!call) {
     response.status(404).json({ error: "Вызов не найден" });
     return;
   }
 
-  if (status === "done" || status === "cancelled") await telegram.closeCallMessages(call);
+  if (status === "done" || status === "cancelled") await messaging.closeCallMessages(call);
 
+  response.json(call);
+});
+
+app.post("/api/admin/calls/:id/acknowledge", async (request, response) => {
+  const auth = getAdminAuth(request);
+  const call = auth ? await store.acknowledgeEscalation(request.params.id, auth.role) : null;
+  if (!call) {
+    response.status(409).json({ error: "Эскалация уже закрыта или назначена другой роли" });
+    return;
+  }
+
+  await messaging.syncCall(call);
   response.json(call);
 });
 
@@ -1002,6 +1151,6 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
 app.listen(config.PORT, config.HOST, () => {
   console.log(`API started on http://${config.HOST}:${config.PORT}`);
   console.log(`Admin accounts: ${getAdminAccountSummary().username}, ${config.OWNER_USERNAME}`);
-  telegram.startPolling();
+  messaging.start();
   reservationMonitor.start();
 });

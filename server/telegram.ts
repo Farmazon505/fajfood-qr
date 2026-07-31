@@ -11,6 +11,7 @@ import type {
 import { config, publicBaseUrl } from "./config";
 import type { CrmStaffReservation } from "./crm-reservations";
 import { generatePerformanceInsights } from "./performance-ai";
+import { shiftChecklistText, shiftStartedText } from "./shift-messages";
 
 type TelegramResponse<T> = {
   ok: boolean;
@@ -32,6 +33,11 @@ type TelegramUpdate = {
     data?: string;
     message?: TelegramMessage;
   };
+};
+
+type TelegramCallCoordinator = {
+  syncCall(call: ServiceCall): Promise<void>;
+  closeCall(call: ServiceCall): Promise<void>;
 };
 
 const formatTime = (value: string) =>
@@ -74,6 +80,7 @@ export class TelegramService {
   private escalationTimer: ReturnType<typeof setInterval> | null = null;
   private escalationRunning = false;
   private callQueues = new Map<string, Promise<TelegramMessageRef[]>>();
+  private coordinator: TelegramCallCoordinator | null = null;
 
   constructor(
     private store: Store,
@@ -84,7 +91,11 @@ export class TelegramService {
   }
 
   enabled() {
-    return Boolean(this.token);
+    return Boolean(this.token.trim());
+  }
+
+  setCallCoordinator(coordinator: TelegramCallCoordinator) {
+    this.coordinator = coordinator;
   }
 
   async closeCallMessages(call: ServiceCall) {
@@ -121,10 +132,10 @@ export class TelegramService {
     }
   }
 
-  startPolling() {
+  startPolling(manageEscalations = true) {
     if (!this.enabled()) return;
     void this.configureBot();
-    if (!this.escalationTimer) {
+    if (manageEscalations && !this.escalationTimer) {
       this.escalationTimer = setInterval(() => void this.processEscalations(), 15_000);
       this.escalationTimer.unref();
       void this.processEscalations();
@@ -139,34 +150,61 @@ export class TelegramService {
     if (this.escalationRunning) return;
     this.escalationRunning = true;
     try {
-      for (const call of this.store.callsDueForAdminWarning(at)) {
-        const table = this.store.findTableById(call.tableId);
+      for (const dueCall of this.store.callsDueForAdminEscalation(at)) {
+        const table = this.store.findTableById(dueCall.tableId);
         if (!table) continue;
+        const reason = dueCall.status === "accepted"
+          ? "Официант принял вызов, но не завершил его в течение 2 минут."
+          : "Официант не принял вызов в течение 1 минуты.";
         const admins = this.store.activeAdminsForTable(table);
-        const refs: TelegramMessageRef[] = [];
-        for (const admin of admins) {
-          const sent = await this.request<TelegramMessage>("sendMessage", {
-            chat_id: admin.telegramChatId,
-            text: `⏳ Осталась 1 минута\n${table.name}: вызов не принят. Через минуту уведомление получит владелец.`,
-            reply_markup: this.callKeyboard(call)
-          });
-          if (sent?.message_id) {
-            refs.push({
-              chatId: String(sent.chat.id),
-              messageId: sent.message_id,
-              recipientRole: "admin",
-              kind: "warning"
+        if (!admins.length) {
+          const ownerCall = await this.store.markOwnerEscalated(
+            dueCall.id,
+            `${reason} Администратор не в сети.`,
+            new Date(at)
+          );
+          if (ownerCall) {
+            await this.notifyCall({
+              call: ownerCall,
+              table,
+              waiters: [],
+              settings: this.store.snapshot().settings
             });
           }
+          continue;
         }
-        if (admins.length && !refs.length) continue;
-        await this.store.markAdminWarningSent(call.id);
-        if (refs.length) await this.store.appendTelegramMessages(call.id, refs);
+
+        const adminCall = await this.store.startAdminEscalation(dueCall.id, reason, new Date(at));
+        if (!adminCall) continue;
+        const refs = await this.notifyCall({
+          call: adminCall,
+          table,
+          waiters: [],
+          settings: this.store.snapshot().settings
+        });
+        if (refs.length) continue;
+
+        const ownerCall = await this.store.markOwnerEscalated(
+          adminCall.id,
+          `${reason} Уведомление администратору не доставлено.`,
+          new Date(at)
+        );
+        if (ownerCall) {
+          await this.notifyCall({
+            call: ownerCall,
+            table,
+            waiters: [],
+            settings: this.store.snapshot().settings
+          });
+        }
       }
 
       for (const dueCall of this.store.callsDueForOwnerEscalation(at)) {
-        if (!this.store.ownersForEscalation().length) continue;
-        const call = await this.store.markOwnerEscalated(dueCall.id);
+        const call = await this.store.markOwnerEscalated(
+          dueCall.id,
+          `${dueCall.routingReason} Администратор не подтвердил вызов в течение 1 минуты.`.trim(),
+          new Date(at)
+        );
         const table = call ? this.store.findTableById(call.tableId) : null;
         if (!call || !table) continue;
         await this.notifyCall({
@@ -175,10 +213,6 @@ export class TelegramService {
           waiters: [],
           settings: this.store.snapshot().settings
         });
-        const delivered = this.store
-          .findCallById(call.id)
-          ?.telegramMessages.some((message) => message.kind === "call" && message.recipientRole === "owner");
-        if (!delivered) await this.store.retryOwnerEscalation(call.id);
       }
 
       for (const task of this.store.getShiftTasksForNotification(venueDateKey(new Date(at)))) {
@@ -189,6 +223,29 @@ export class TelegramService {
     } finally {
       this.escalationRunning = false;
     }
+  }
+
+  async notifyAdminWarning(call: ServiceCall, table: DiningTable, admins: Waiter[]) {
+    const refs: TelegramMessageRef[] = [];
+    for (const admin of admins) {
+      const chatId = admin.telegramChatId.trim();
+      if (!chatId) continue;
+      const sent = await this.request<TelegramMessage>("sendMessage", {
+        chat_id: chatId,
+        text: `⏳ Осталась 1 минута\n${table.name}: вызов не принят. Через минуту уведомление получит владелец.`,
+        reply_markup: this.callKeyboard(call)
+      });
+      if (sent?.message_id) {
+        refs.push({
+          chatId: String(sent.chat.id),
+          messageId: sent.message_id,
+          recipientRole: "admin",
+          kind: "warning"
+        });
+      }
+    }
+    if (refs.length) await this.store.appendTelegramMessages(call.id, refs);
+    return refs;
   }
 
   async handleUpdate(update: TelegramUpdate) {
@@ -359,28 +416,12 @@ export class TelegramService {
     await this.sendChecklist(message.chat.id, result.shift);
     await this.request("sendMessage", {
       chat_id: message.chat.id,
-      text: this.shiftStartedText(result.shift),
+      text: shiftStartedText(result.shift),
       reply_markup: menuKeyboard
     });
     if (result.shift.status === "active" && result.shift.roleKind === "waiter") {
       await this.deliverPendingCalls(waiter.id);
     }
-  }
-
-  private shiftStartedText(shift: WaiterShift) {
-    if (shift.roleKind === "admin") {
-      return shift.status === "active"
-        ? "Смена администратора зарегистрирована. Критические вызовы гостей включены."
-        : "Смена администратора зарегистрирована. Критические вызовы уже включены; завершите рабочий чек-лист.";
-    }
-    if (shift.roleKind === "waiter") {
-      return shift.status === "active"
-        ? "Уведомления от ваших столов включены."
-        : "Столы назначены. Уведомления включатся после обязательных пунктов чек-листа.";
-    }
-    return shift.status === "active"
-      ? "Смена зарегистрирована."
-      : "Смена зарегистрирована. Завершите обязательные пункты чек-листа.";
   }
 
   private async sendMorningGreeting(chatId: string | number, waiter: Waiter) {
@@ -422,36 +463,9 @@ export class TelegramService {
   private async sendChecklist(chatId: string | number, shift: WaiterShift, prefix = "") {
     await this.request("sendMessage", {
       chat_id: chatId,
-      text: [prefix, this.checklistText(shift)].filter(Boolean).join("\n\n"),
+      text: [prefix, shiftChecklistText(shift)].filter(Boolean).join("\n\n"),
       reply_markup: this.checklistKeyboard(shift)
     });
-  }
-
-  private checklistText(shift: WaiterShift) {
-    const required = shift.checklist.filter((item) => item.requiredForCalls);
-    const requiredDone = required.filter((item) => item.completedAt).length;
-    const rows = shift.checklist.length
-      ? shift.checklist.map((item) => {
-          const marker = item.completedAt ? "✅" : "⬜";
-          const requiredLabel = item.requiredForCalls ? " · обязательно" : "";
-          const ratingLabel = item.countsForRating === false ? " · без рейтинга" : "";
-          return `${marker} ${item.title}${requiredLabel}${ratingLabel}`;
-        })
-      : ["Чек-лист на сегодня пуст."];
-    const admission = shift.status === "active" ? "Обязательные пункты выполнены" : `Готовность: ${requiredDone}/${required.length}`;
-    const criticalNote = shift.roleKind === "admin" ? "Критические вызовы гостей включены с начала смены." : "";
-    return [
-      `Чек-лист: ${shift.roleName}`,
-      `Этажи: ${shift.zones.join(", ")}`,
-      "",
-      ...rows,
-      "",
-      admission,
-      shift.checklist.length > 1 ? "Следующий пункт можно отметить через 1 минуту после предыдущего." : "",
-      criticalNote
-    ]
-      .filter(Boolean)
-      .join("\n");
   }
 
   private checklistKeyboard(shift: WaiterShift) {
@@ -460,7 +474,7 @@ export class TelegramService {
       .filter(({ item }) => !item.completedAt)
       .map(({ item, index }) => [
         {
-          text: `Сделано: ${item.title}`.slice(0, 58),
+          text: `Сделано: пункт ${index + 1}`,
           callback_data: `check:${shift.id}:${index}`
         }
       ]);
@@ -497,7 +511,7 @@ export class TelegramService {
     await this.request("editMessageText", {
       chat_id: message.chat.id,
       message_id: message.message_id,
-      text: this.checklistText(shift),
+      text: shiftChecklistText(shift),
       reply_markup: this.checklistKeyboard(shift)
     });
 
@@ -512,7 +526,8 @@ export class TelegramService {
     for (const call of this.store.pendingCallsForWaiter(waiterId)) {
       const table = this.store.findTableById(call.tableId);
       if (!table) continue;
-      await this.notifyCall({ call, table, waiters: this.store.waitersForTable(table), settings });
+      if (this.coordinator) await this.coordinator.syncCall(call);
+      else await this.notifyCall({ call, table, waiters: this.store.waitersForTable(table), settings });
     }
   }
 
@@ -563,7 +578,7 @@ export class TelegramService {
       }
 
       const acceptedBy = result.call.lastAcceptedByStaffId
-        ? this.store.snapshot().waiters.find((item) => item.id === result.call.lastAcceptedByStaffId)?.name
+        ? this.store.findWaiterById(result.call.lastAcceptedByStaffId)?.name
         : "другой сотрудник";
       await this.answerCallback(
         callbackId,
@@ -572,12 +587,47 @@ export class TelegramService {
       );
       const table = this.store.findTableById(result.call.tableId);
       if (table) {
-        await this.notifyCall({
-          call: result.call,
-          table,
-          waiters: this.store.waitersForTable(table),
-          settings: this.store.snapshot().settings
-        });
+        if (this.coordinator) await this.coordinator.syncCall(result.call);
+        else {
+          await this.notifyCall({
+            call: result.call,
+            table,
+            waiters: this.store.waitersForTable(table),
+            settings: this.store.snapshot().settings
+          });
+        }
+      }
+      return;
+    }
+
+    if (action === "ack") {
+      const current = this.store.findCallById(callId);
+      const roleKind = this.store.roleForWaiter(waiter)?.kind;
+      const acknowledgementRole =
+        current?.routingStage === "admin" && roleKind === "admin"
+          ? "admin"
+          : current?.routingStage === "owner" && roleKind === "owner"
+            ? "owner"
+            : null;
+      const call = acknowledgementRole
+        ? await this.store.acknowledgeEscalation(callId, acknowledgementRole)
+        : null;
+      if (!call) {
+        await this.answerCallback(callbackId, "Эскалация уже закрыта или назначена другому сотруднику", true);
+        return;
+      }
+      await this.answerCallback(callbackId, "Контроль подтвержден");
+      if (this.coordinator) await this.coordinator.syncCall(call);
+      else {
+        const table = this.store.findTableById(call.tableId);
+        if (table) {
+          await this.notifyCall({
+            call,
+            table,
+            waiters: this.store.waitersForTable(table),
+            settings: this.store.snapshot().settings
+          });
+        }
       }
       return;
     }
@@ -590,7 +640,10 @@ export class TelegramService {
       }
       await this.answerCallback(callbackId, "Стол убран из чата");
       const call = await this.store.completeCall(callId);
-      if (call) await this.deleteCallMessages(call);
+      if (call) {
+        if (this.coordinator) await this.coordinator.closeCall(call);
+        else await this.deleteCallMessages(call);
+      }
     }
   }
 
@@ -598,15 +651,14 @@ export class TelegramService {
     const recipients: Array<{ member: Waiter; recipientRole: "waiter" | "admin" | "owner" }> = [];
     if (call.routingStage === "waiter") {
       recipients.push(...this.store.waitersForTable(table).map((member) => ({ member, recipientRole: "waiter" as const })));
-    } else {
+    } else if (call.routingStage === "admin") {
       recipients.push(
         ...this.store.activeAdminsForTable(table).map((member) => ({ member, recipientRole: "admin" as const }))
       );
-      if (call.routingStage === "owner") {
-        recipients.push(
-          ...this.store.ownersForEscalation().map((member) => ({ member, recipientRole: "owner" as const }))
-        );
-      }
+    } else {
+      recipients.push(
+        ...this.store.ownersForEscalation().map((member) => ({ member, recipientRole: "owner" as const }))
+      );
     }
     const unique = new Map(recipients.map((recipient) => [recipient.member.telegramChatId.trim(), recipient]));
     return Array.from(unique.values()).filter((recipient) => recipient.member.telegramChatId.trim());
@@ -619,7 +671,7 @@ export class TelegramService {
       .map((reason) => `${reason.actionId === call.actionId ? "➡️" : "•"} ${reason.label} — ${reason.count}`)
       .join("\n");
     const acceptedBy = call.lastAcceptedByStaffId
-      ? this.store.snapshot().waiters.find((waiter) => waiter.id === call.lastAcceptedByStaffId)?.name
+      ? this.store.findWaiterById(call.lastAcceptedByStaffId)?.name
       : "";
     const status =
       call.status === "new"
@@ -651,7 +703,8 @@ export class TelegramService {
       call.guestName ? `Гость: ${call.guestName}` : "",
       call.comment ? `Комментарий: ${call.comment}` : "",
       call.routingStage !== "waiter" && call.routingReason ? `Причина перенаправления: ${call.routingReason}` : "",
-      call.routingStage === "owner" ? "Администратор не принял вызов в течение 5 минут." : "",
+      call.routingStage === "admin" && call.adminAcknowledgedAt ? "Администратор подтвердил контроль вызова." : "",
+      call.routingStage === "owner" && call.ownerAcknowledgedAt ? "Владелец подтвердил контроль вызова." : "",
       "",
       `Количество вызовов: ${call.pressCount}`,
       `Первый вызов: ${formatTime(call.cycleStartedAt)}`,
@@ -667,6 +720,17 @@ export class TelegramService {
       return { inline_keyboard: [[{ text: "Принято", callback_data: `call:accepted:${call.id}` }]] };
     }
     if (call.status === "accepted") {
+      const needsEscalationAcknowledgement =
+        (call.routingStage === "admin" && !call.adminAcknowledgedAt) ||
+        (call.routingStage === "owner" && !call.ownerAcknowledgedAt);
+      if (needsEscalationAcknowledgement) {
+        return {
+          inline_keyboard: [
+            [{ text: "Подтвердить контроль", callback_data: `call:ack:${call.id}` }],
+            [{ text: "Готово", callback_data: `call:done:${call.id}` }]
+          ]
+        };
+      }
       return { inline_keyboard: [[{ text: "Готово", callback_data: `call:done:${call.id}` }]] };
     }
     return { inline_keyboard: [] };

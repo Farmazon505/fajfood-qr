@@ -1,0 +1,138 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { MessagingService } from "./messaging";
+import type { MaxService } from "./max";
+import {
+  ADMIN_ACK_TIMEOUT_MS,
+  Store,
+  WAITER_ACCEPT_TIMEOUT_MS,
+  WAITER_COMPLETE_TIMEOUT_MS
+} from "./store";
+import type { TelegramService } from "./telegram";
+import type { ServiceCall } from "./types";
+
+class FakeTransport {
+  notifications: ServiceCall[] = [];
+
+  enabled() {
+    return true;
+  }
+
+  setCallCoordinator() {}
+
+  startPolling() {}
+
+  async start() {}
+
+  async notifyCall({ call }: { call: ServiceCall }) {
+    this.notifications.push(structuredClone(call));
+    return call.routingStage === "owner" ? [] : [{}];
+  }
+
+  async closeCallMessages() {}
+
+  async notifyShiftTask() {
+    return false;
+  }
+}
+
+test("messaging routes timed-out calls through online admin and persists owner CRM escalation", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-messaging-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const waiter = { ...store.snapshot().waiters[0], telegramChatId: "10001" };
+    const admin = {
+      id: "admin-1",
+      name: "Администратор",
+      roleId: "admin",
+      telegramChatId: "20001",
+      maxUserId: "",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([waiter, admin]);
+    const zone = store.listZones()[0];
+    const adminShift = await store.startWaiterShift(admin.id, [zone]);
+    assert.equal(adminShift?.shift.status, "active");
+
+    const telegram = new FakeTransport();
+    const max = new FakeTransport();
+    const messaging = new MessagingService(
+      store,
+      telegram as unknown as TelegramService,
+      max as unknown as MaxService
+    );
+    const action = store.snapshot().actions[0];
+    const [unansweredTable, slowTable, offlineTable] = store.snapshot().tables.filter((table) => table.zone === zone);
+
+    const unanswered = await store.upsertCall({
+      table: unansweredTable,
+      action,
+      comment: "",
+      guestName: "",
+      assignedWaiterId: waiter.id,
+      routingStage: "waiter",
+      routingReason: ""
+    });
+    await messaging.processEscalations(
+      new Date(unanswered.lastRequestedAt).getTime() + WAITER_ACCEPT_TIMEOUT_MS
+    );
+    const adminCall = store.findCallById(unanswered.id);
+    assert.equal(adminCall?.routingStage, "admin");
+    assert.match(adminCall?.routingReason || "", /не принял вызов в течение 1 минуты/);
+
+    await store.acknowledgeEscalation(unanswered.id, "admin");
+    await messaging.processEscalations(
+      new Date(adminCall?.adminEscalationStartedAt || "").getTime() + ADMIN_ACK_TIMEOUT_MS
+    );
+    assert.equal(store.findCallById(unanswered.id)?.routingStage, "admin");
+
+    const slow = await store.upsertCall({
+      table: slowTable,
+      action,
+      comment: "",
+      guestName: "",
+      assignedWaiterId: waiter.id,
+      routingStage: "waiter",
+      routingReason: ""
+    });
+    const accepted = await store.updateCallStatus(slow.id, "accepted");
+    await messaging.processEscalations(
+      new Date(accepted?.acceptedAt || "").getTime() + WAITER_COMPLETE_TIMEOUT_MS
+    );
+    const slowAdminCall = store.findCallById(slow.id);
+    assert.equal(slowAdminCall?.routingStage, "admin");
+    assert.match(slowAdminCall?.routingReason || "", /не завершил его в течение 2 минут/);
+
+    await messaging.processEscalations(
+      new Date(slowAdminCall?.adminEscalationStartedAt || "").getTime() + ADMIN_ACK_TIMEOUT_MS
+    );
+    const ownerCall = store.findCallById(slow.id);
+    assert.equal(ownerCall?.routingStage, "owner");
+    assert.ok(ownerCall?.ownerEscalatedAt);
+    assert.match(ownerCall?.routingReason || "", /не подтвердил вызов в течение 1 минуты/);
+
+    await store.endWaiterShift(admin.id);
+    const offline = await store.upsertCall({
+      table: offlineTable,
+      action,
+      comment: "",
+      guestName: "",
+      assignedWaiterId: waiter.id,
+      routingStage: "waiter",
+      routingReason: ""
+    });
+    await messaging.processEscalations(
+      new Date(offline.lastRequestedAt).getTime() + WAITER_ACCEPT_TIMEOUT_MS
+    );
+    const immediateOwnerCall = store.findCallById(offline.id);
+    assert.equal(immediateOwnerCall?.routingStage, "owner");
+    assert.match(immediateOwnerCall?.routingReason || "", /Администратор не в сети/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
