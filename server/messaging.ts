@@ -17,6 +17,8 @@ const venueDateKey = (value = new Date()) =>
 export class MessagingService {
   private escalationTimer: ReturnType<typeof setInterval> | null = null;
   private escalationRunning = false;
+  private taskRolloverTimer: ReturnType<typeof setInterval> | null = null;
+  private taskRolloverRunning = false;
 
   constructor(
     private store: Store,
@@ -86,16 +88,37 @@ export class MessagingService {
   start() {
     this.telegram.startPolling(false);
     void this.max.start().catch((error) => console.error("[max start]", error));
-    if (!this.enabled() || this.escalationTimer) return;
+    if (!this.taskRolloverTimer) {
+      this.taskRolloverTimer = setInterval(() => void this.processTaskRollovers(), 60_000);
+      this.taskRolloverTimer.unref();
+    }
+    if (!this.enabled()) {
+      void this.processTaskRollovers();
+      return;
+    }
+    if (this.escalationTimer) return;
     this.escalationTimer = setInterval(() => void this.processEscalations(), 15_000);
     this.escalationTimer.unref();
     void this.processEscalations();
+  }
+
+  private async processTaskRollovers(at = Date.now()) {
+    if (this.taskRolloverRunning) return;
+    this.taskRolloverRunning = true;
+    try {
+      await this.store.rolloverIncompleteShiftTasks(venueDateKey(new Date(at)), new Date(at));
+    } catch (error) {
+      console.error("[messaging] Ошибка переноса заданий:", error);
+    } finally {
+      this.taskRolloverRunning = false;
+    }
   }
 
   async processEscalations(at = Date.now()) {
     if (this.escalationRunning) return;
     this.escalationRunning = true;
     try {
+      await this.processTaskRollovers(at);
       for (const dueCall of this.store.callsDueForAdminEscalation(at)) {
         const table = this.store.findTableById(dueCall.tableId);
         if (!table) continue;

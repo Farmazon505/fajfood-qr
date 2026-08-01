@@ -2610,7 +2610,7 @@ function ChecklistEditor({
       <div className="panel-heading">
         <div>
           <h2>Чек-листы по должностям</h2>
-          <p className="muted checklist-intro">Шаблон повторяется каждую смену. Задания по датам добавляются к шаблону только в назначенный день.</p>
+          <p className="muted checklist-intro">Шаблон повторяется каждую смену. Невыполненные задания по датам автоматически переносятся сотруднику на следующий день.</p>
         </div>
       </div>
 
@@ -2718,7 +2718,7 @@ function ChecklistEditor({
               <Plus size={18} /> Назначить
             </button>
           </div>
-          <p className="muted checklist-intro">Персональное задание отправляется в Telegram в назначенную дату даже без открытой смены. Задание всей должности появляется у каждого сотрудника при начале смены.</p>
+          <p className="muted checklist-intro">Персональное задание отправляется в Telegram и MAX в назначенную дату даже без открытой смены. Задание всей должности появляется у каждого сотрудника при начале смены. Если сотрудник не отметил задание выполненным, система создаст его персональную копию на новую дату.</p>
           {taskNotice && <div className="task-notice">{taskNotice}</div>}
 
           <div className="shift-task-list">
@@ -2736,9 +2736,10 @@ function ChecklistEditor({
                   </div>
                   <div>
                     <strong>{waiter?.name || "Вся должность"}</strong>
-                    <span>{task.waiterId ? (task.notified ? "Telegram отправлен" : "Ожидает даты отправки") : "При начале смены"}</span>
+                    <span>{task.waiterId ? (task.notified ? "Уведомление отправлено" : "Ожидает даты отправки") : "При начале смены"}</span>
                   </div>
                   <div className="task-badges">
+                    {task.carriedFromTaskId && <span className="rollover-badge">Перенесено</span>}
                     {task.requiredForCalls && <span className="required-badge">Обязательное</span>}
                     {task.countsForRating === false && <span className="rating-excluded-badge">Без рейтинга</span>}
                   </div>

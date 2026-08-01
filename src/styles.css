@@ -1919,6 +1919,20 @@ fieldset.field {
   font-weight: 800;
 }
 
+.rollover-badge {
+  display: inline-flex !important;
+  align-items: center;
+  width: fit-content;
+  margin: 0 !important;
+  border: 1px solid #b9d2c0;
+  border-radius: 4px;
+  padding: 5px 8px;
+  color: #245c36 !important;
+  background: #e5f4e9;
+  font-size: 12px !important;
+  font-weight: 900;
+}
+
 .task-badges {
   display: grid;
   gap: 5px;

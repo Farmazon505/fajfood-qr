@@ -103,6 +103,9 @@ export type ShiftTask = {
   countsForRating: boolean;
   notified: boolean;       // уже отправлено персональное уведомление
   createdAt: string;
+  carriedFromTaskId?: string | null;
+  rolloverProcessedAt?: string | null;
+  rolloverTargetDate?: string | null;
 };
 
 export type ShiftChecklistEntry = {

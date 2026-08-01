@@ -285,6 +285,141 @@ test("a task scheduled for today is appended to an already running shift", async
   });
 });
 
+test("an incomplete personal dated task is carried forward once per new date", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const original = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date: "2026-01-10",
+      title: "Перенести невыполненное задание",
+      description: "Задание должно оставаться у сотрудника до выполнения",
+      requiredForCalls: true,
+      countsForRating: true
+    });
+
+    const firstCarry = await store.rolloverIncompleteShiftTasks(
+      "2026-01-11",
+      new Date("2026-01-11T00:01:00+04:00")
+    );
+    assert.equal(firstCarry.length, 1);
+    assert.equal(firstCarry[0].waiterId, waiter.id);
+    assert.equal(firstCarry[0].date, "2026-01-11");
+    assert.equal(firstCarry[0].carriedFromTaskId, original.id);
+    assert.equal(firstCarry[0].notified, false);
+    assert.ok(store.findShiftTask(original.id)?.rolloverProcessedAt);
+
+    const repeatedRun = await store.rolloverIncompleteShiftTasks(
+      "2026-01-11",
+      new Date("2026-01-11T00:02:00+04:00")
+    );
+    assert.equal(repeatedRun.length, 0);
+    assert.equal(store.listShiftTasks().length, 2);
+
+    const secondCarry = await store.rolloverIncompleteShiftTasks(
+      "2026-01-12",
+      new Date("2026-01-12T00:01:00+04:00")
+    );
+    assert.equal(secondCarry.length, 1);
+    assert.equal(secondCarry[0].carriedFromTaskId, firstCarry[0].id);
+    assert.equal(store.listShiftTasks().length, 3);
+  });
+});
+
+test("a completed dated task is not carried forward", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const zone = store.listZones()[0];
+    const date = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Astrakhan" }).format(new Date());
+    const nextDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Astrakhan" }).format(
+      new Date(new Date(`${date}T12:00:00+04:00`).getTime() + 24 * 60 * 60 * 1000)
+    );
+    const task = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date,
+      title: "Выполненное задание",
+      description: "Не должно появиться завтра",
+      requiredForCalls: false,
+      countsForRating: true
+    });
+    const started = await store.startWaiterShift(waiter.id, [zone]);
+    assert.ok(started);
+    const taskIndex = started.shift.checklist.findIndex((item) => item.itemId === `task-${task.id}`);
+    assert.ok(taskIndex >= 0);
+    const completed = await store.completeShiftChecklistItem(
+      started.shift.id,
+      waiter.id,
+      taskIndex,
+      new Date(new Date(started.shift.startedAt).getTime() + CHECKLIST_ITEM_COOLDOWN_MS)
+    );
+    assert.equal(completed.status, "completed");
+
+    const carried = await store.rolloverIncompleteShiftTasks(nextDate);
+    assert.equal(carried.length, 0);
+    assert.equal(store.listShiftTasks().length, 1);
+    assert.ok(store.findShiftTask(task.id)?.rolloverProcessedAt);
+  });
+});
+
+test("an incomplete role task is carried forward personally for the affected employee", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const zone = store.listZones()[0];
+    const date = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Astrakhan" }).format(new Date());
+    const nextDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Astrakhan" }).format(
+      new Date(new Date(`${date}T12:00:00+04:00`).getTime() + 24 * 60 * 60 * 1000)
+    );
+    const task = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: null,
+      date,
+      title: "Общее задание должности",
+      description: "Переносится только тому, кто не выполнил",
+      requiredForCalls: false,
+      countsForRating: true
+    });
+    const started = await store.startWaiterShift(waiter.id, [zone]);
+    assert.ok(started?.shift.checklist.some((item) => item.itemId === `task-${task.id}`));
+
+    const carried = await store.rolloverIncompleteShiftTasks(nextDate);
+    assert.equal(carried.length, 1);
+    assert.equal(carried[0].waiterId, waiter.id);
+    assert.equal(carried[0].date, nextDate);
+    assert.equal(carried[0].carriedFromTaskId, task.id);
+  });
+});
+
+test("a carried task is appended to an already running shift on the target date", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const zone = store.listZones()[0];
+    const targetDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Astrakhan" }).format(new Date());
+    const previousDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Astrakhan" }).format(
+      new Date(new Date(`${targetDate}T12:00:00+04:00`).getTime() - 24 * 60 * 60 * 1000)
+    );
+    await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date: previousDate,
+      title: "Просроченное обязательное задание",
+      description: "Должно появиться в уже открытой смене",
+      requiredForCalls: true,
+      countsForRating: true
+    });
+    const started = await store.startWaiterShift(waiter.id, [zone]);
+    assert.ok(started);
+    await completeChecklistItems(store, started.shift, waiter.id);
+    assert.equal(store.currentShiftForWaiter(waiter.id)?.status, "active");
+
+    const carried = await store.rolloverIncompleteShiftTasks(targetDate);
+    assert.equal(carried.length, 1);
+    const updated = store.currentShiftForWaiter(waiter.id);
+    assert.ok(updated?.checklist.some((item) => item.itemId === `task-${carried[0].id}`));
+    assert.equal(updated?.status, "checklist");
+  });
+});
+
 test("shift rating uses five stars and ignores excluded tasks", async () => {
   await withStore(async (store) => {
     const waiter = store.snapshot().waiters[0];

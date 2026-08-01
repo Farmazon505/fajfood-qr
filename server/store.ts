@@ -752,7 +752,10 @@ export class Store {
       requiredForCalls: task.requiredForCalls ?? false,
       countsForRating: task.countsForRating ?? true,
       notified: task.notified ?? false,
-      createdAt: task.createdAt ?? now()
+      createdAt: task.createdAt ?? now(),
+      carriedFromTaskId: task.carriedFromTaskId ?? null,
+      rolloverProcessedAt: task.rolloverProcessedAt ?? null,
+      rolloverTargetDate: task.rolloverTargetDate ?? null
     }));
     this.data.waiters = this.data.waiters.map((waiter) => ({
       ...waiter,
@@ -1618,6 +1621,36 @@ export class Store {
 
   // ─── ShiftTask methods ───────────────────────────────────────────────
 
+  private appendShiftTaskToActiveShifts(task: ShiftTask) {
+    for (const shift of this.data.shifts) {
+      if (shift.status === "ended" || shift.morningGreetingDate !== task.date) continue;
+      if (task.waiterId ? shift.waiterId !== task.waiterId : shift.roleId !== task.roleId) continue;
+
+      const itemId = `task-${task.id}`;
+      if (shift.checklist.some((item) => item.itemId === itemId)) continue;
+      shift.checklist.push({
+        itemId,
+        title: task.title,
+        description: task.description,
+        requiredForCalls: task.requiredForCalls,
+        countsForRating: task.countsForRating,
+        sort: 10_000 + shift.checklist.filter((item) => item.itemId.startsWith("task-")).length * 10,
+        completedAt: null,
+        adminScore: null,
+        adminComment: "",
+        adminPhotoUrl: "",
+        reviewedAt: null,
+        reviewedByRole: null,
+        reviewedByUsername: ""
+      });
+      if (task.requiredForCalls) {
+        shift.status = "checklist";
+        shift.readyAt = null;
+      }
+      shift.score = calculateShiftScore(shift);
+    }
+  }
+
   listShiftTasks(): ShiftTask[] {
     return structuredClone(this.data.shiftTasks);
   }
@@ -1632,40 +1665,101 @@ export class Store {
       ...task,
       id: randomUUID(),
       notified: false,
-      createdAt: now()
+      createdAt: now(),
+      carriedFromTaskId: task.carriedFromTaskId ?? null,
+      rolloverProcessedAt: task.rolloverProcessedAt ?? null,
+      rolloverTargetDate: task.rolloverTargetDate ?? null
     };
     this.data.shiftTasks.unshift(newTask);
-
-    for (const shift of this.data.shifts) {
-      if (shift.status === "ended" || shift.morningGreetingDate !== newTask.date) continue;
-      if (newTask.waiterId ? shift.waiterId !== newTask.waiterId : shift.roleId !== newTask.roleId) continue;
-
-      const itemId = `task-${newTask.id}`;
-      if (shift.checklist.some((item) => item.itemId === itemId)) continue;
-      shift.checklist.push({
-        itemId,
-        title: newTask.title,
-        description: newTask.description,
-        requiredForCalls: newTask.requiredForCalls,
-        countsForRating: newTask.countsForRating,
-        sort: 10_000 + shift.checklist.filter((item) => item.itemId.startsWith("task-")).length * 10,
-        completedAt: null,
-        adminScore: null,
-        adminComment: "",
-        adminPhotoUrl: "",
-        reviewedAt: null,
-        reviewedByRole: null,
-        reviewedByUsername: ""
-      });
-      if (newTask.requiredForCalls) {
-        shift.status = "checklist";
-        shift.readyAt = null;
-      }
-      shift.score = calculateShiftScore(shift);
-    }
+    this.appendShiftTaskToActiveShifts(newTask);
 
     await this.persist();
     return structuredClone(newTask);
+  }
+
+  async rolloverIncompleteShiftTasks(targetDate: string, processedAt = new Date()): Promise<ShiftTask[]> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
+      throw new Error("Invalid shift task rollover date");
+    }
+
+    const timestamp = processedAt.toISOString();
+    const candidates = this.data.shiftTasks
+      .filter((task) => task.date < targetDate && !task.rolloverProcessedAt)
+      .sort((left, right) => left.date.localeCompare(right.date) || left.createdAt.localeCompare(right.createdAt));
+    if (!candidates.length) return [];
+
+    const created: ShiftTask[] = [];
+    for (const source of candidates) {
+      const itemId = `task-${source.id}`;
+      let waiterIds: string[] = [];
+
+      if (source.waiterId) {
+        const member = this.data.waiters.find(
+          (waiter) => waiter.id === source.waiterId && waiter.active && waiter.roleId === source.roleId
+        );
+        const completed = this.data.shifts.some(
+          (shift) => shift.waiterId === source.waiterId
+            && shift.morningGreetingDate === source.date
+            && shift.checklist.some((item) => item.itemId === itemId && item.completedAt)
+        );
+        if (member && !completed) waiterIds = [member.id];
+      } else {
+        const assignedWaiterIds = new Set(
+          this.data.shifts
+            .filter(
+              (shift) => shift.roleId === source.roleId
+                && shift.morningGreetingDate === source.date
+                && shift.checklist.some((item) => item.itemId === itemId)
+            )
+            .map((shift) => shift.waiterId)
+        );
+        waiterIds = Array.from(assignedWaiterIds).filter((waiterId) => {
+          const member = this.data.waiters.find(
+            (waiter) => waiter.id === waiterId && waiter.active && waiter.roleId === source.roleId
+          );
+          if (!member) return false;
+          return !this.data.shifts.some(
+            (shift) => shift.waiterId === waiterId
+              && shift.morningGreetingDate === source.date
+              && shift.checklist.some((item) => item.itemId === itemId && item.completedAt)
+          );
+        });
+      }
+
+      for (const waiterId of waiterIds) {
+        const alreadyCreated = this.data.shiftTasks.some(
+          (task) => task.date === targetDate
+            && task.waiterId === waiterId
+            && task.carriedFromTaskId === source.id
+        );
+        if (alreadyCreated) continue;
+
+        const carriedTask: ShiftTask = {
+          id: randomUUID(),
+          roleId: source.roleId,
+          waiterId,
+          date: targetDate,
+          title: source.title,
+          description: source.description,
+          requiredForCalls: source.requiredForCalls,
+          countsForRating: source.countsForRating,
+          notified: false,
+          createdAt: timestamp,
+          carriedFromTaskId: source.id,
+          rolloverProcessedAt: null,
+          rolloverTargetDate: null
+        };
+        this.data.shiftTasks.unshift(carriedTask);
+        this.appendShiftTaskToActiveShifts(carriedTask);
+        created.push(carriedTask);
+      }
+
+      source.rolloverProcessedAt = timestamp;
+      source.rolloverTargetDate = targetDate;
+    }
+
+    await this.persist();
+    return structuredClone(created);
   }
 
   async deleteShiftTask(id: string): Promise<boolean> {
