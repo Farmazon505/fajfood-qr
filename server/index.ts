@@ -1094,6 +1094,30 @@ app.delete("/api/admin/shift-tasks/:id", async (request, response) => {
   response.json({ ok: true });
 });
 
+app.post("/api/admin/shifts/:id/end", async (request, response) => {
+  const result = await store.endWaiterShiftBySupervisor(request.params.id);
+  if (result.status === "not_found") {
+    response.status(404).json({ error: "Смена не найдена" });
+    return;
+  }
+  if (result.status === "already_ended") {
+    response.status(409).json({ error: "Смена уже завершена" });
+    return;
+  }
+  if (result.status === "not_waiter") {
+    response.status(403).json({ error: "Ручное завершение доступно только для смены официанта" });
+    return;
+  }
+  if (result.status === "tables_assigned") {
+    response.status(409).json({
+      error: `Сначала снимите официанта с назначенных столов: ${result.tableCount}`,
+      tableCount: result.tableCount
+    });
+    return;
+  }
+  response.json(result.shift);
+});
+
 app.put("/api/admin/shifts/:id/review", async (request, response) => {
   const parsed = shiftReviewSchema.safeParse(request.body);
   if (!parsed.success) {

@@ -1387,6 +1387,7 @@ function AdminPage() {
           <EmployeeControl
             waiters={data.waiters}
             roles={data.staffRoles}
+            tables={data.tables}
             shifts={data.shifts}
             ratings={data.ratings}
             accessRole={data.accessRole}
@@ -2862,6 +2863,7 @@ function ReviewImagePreview({
 function EmployeeControl({
   waiters,
   roles,
+  tables,
   shifts,
   ratings,
   accessRole,
@@ -2872,6 +2874,7 @@ function EmployeeControl({
 }: {
   waiters: Waiter[];
   roles: StaffRoleDefinition[];
+  tables: DiningTable[];
   shifts: WaiterShift[];
   ratings: WaiterRating[];
   accessRole: AdminAccessRole;
@@ -2885,6 +2888,9 @@ function EmployeeControl({
     [venueTimeZone]
   );
   const roleMap = useMemo(() => new Map(roles.map((role) => [role.id, role])), [roles]);
+  const activeShiftByWaiterId = useMemo(() => new Map(
+    shifts.filter((shift) => shift.status !== "ended").map((shift) => [shift.waiterId, shift])
+  ), [shifts]);
   const eligibleWaiters = useMemo(
     () => waiters
       .filter((waiter) => {
@@ -2903,6 +2909,8 @@ function EmployeeControl({
   const [notice, setNotice] = useState("");
   const [insight, setInsight] = useState<PerformanceInsightReport | null>(null);
   const [insightBusy, setInsightBusy] = useState(false);
+  const [endingShiftId, setEndingShiftId] = useState("");
+  const [shiftNotice, setShiftNotice] = useState("");
 
   useEffect(() => {
     if (!eligibleWaiters.some((waiter) => waiter.id === selectedWaiterId)) {
@@ -2913,10 +2921,18 @@ function EmployeeControl({
   useEffect(() => {
     setInsight(null);
     setNotice("");
+    setShiftNotice("");
   }, [selectedWaiterId]);
 
   const selectedWaiter = eligibleWaiters.find((waiter) => waiter.id === selectedWaiterId) ?? null;
   const selectedRole = selectedWaiter ? roleMap.get(selectedWaiter.roleId) ?? null : null;
+  const selectedActiveShift = selectedWaiter ? activeShiftByWaiterId.get(selectedWaiter.id) ?? null : null;
+  const assignedTableCount = selectedWaiter
+    ? tables.filter((table) => new Set([
+      ...(table.waiterIds ?? []),
+      ...(table.waiterId ? [table.waiterId] : [])
+    ]).has(selectedWaiter.id)).length
+    : 0;
   const employeeShifts = selectedWaiter
     ? shifts
       .filter((shift) => shift.waiterId === selectedWaiter.id)
@@ -3028,6 +3044,26 @@ function EmployeeControl({
     }
   };
 
+  const endSelectedWaiterShift = async () => {
+    if (!selectedWaiter || !selectedActiveShift || selectedActiveShift.roleKind !== "waiter" || assignedTableCount > 0) return;
+    if (!window.confirm(`Завершить смену официанта «${selectedWaiter.name}»?`)) return;
+    setEndingShiftId(selectedActiveShift.id);
+    setShiftNotice("");
+    try {
+      await api<WaiterShift>(`/api/admin/shifts/${selectedActiveShift.id}/end`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({})
+      });
+      setShiftNotice(`Смена сотрудника «${selectedWaiter.name}» завершена`);
+      await onRefresh();
+    } catch (requestError) {
+      setShiftNotice(requestError instanceof Error ? requestError.message : "Не удалось завершить смену");
+    } finally {
+      setEndingShiftId("");
+    }
+  };
+
   if (!eligibleWaiters.length) {
     return <section className="admin-panel empty-state employee-control-empty">Нет сотрудников, доступных для контроля.</section>;
   }
@@ -3040,16 +3076,16 @@ function EmployeeControl({
         <div className="employee-directory-list">
           {filteredWaiters.map((waiter) => {
             const role = roleMap.get(waiter.roleId);
-            const shift = shifts.find((item) => item.waiterId === waiter.id && item.status !== "ended");
+            const shift = activeShiftByWaiterId.get(waiter.id);
             return (
               <button
                 type="button"
                 key={waiter.id}
-                className={selectedWaiterId === waiter.id ? "active" : ""}
+                className={[selectedWaiterId === waiter.id ? "active" : "", shift ? "is-on-shift" : ""].filter(Boolean).join(" ")}
                 onClick={() => setSelectedWaiterId(waiter.id)}
               >
                 <span className="employee-avatar">{waiter.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
-                <span><strong>{waiter.name}</strong><small>{role?.name || "Сотрудник"} · {shift ? "на смене" : waiter.active ? "не на смене" : "неактивен"}</small></span>
+                <span><strong>{waiter.name}</strong><small>{role?.name || "Сотрудник"} · <span className={shift ? "employee-shift-status is-active" : "employee-shift-status"}>{shift ? "на смене" : waiter.active ? "не на смене" : "неактивен"}</span></small></span>
               </button>
             );
           })}
@@ -3062,8 +3098,20 @@ function EmployeeControl({
           <section className="admin-panel employee-profile-card">
             <div className="employee-profile-heading">
               <span className="employee-avatar employee-avatar--large">{selectedWaiter.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
-              <div><p>Карточка сотрудника</p><h2>{selectedWaiter.name}</h2><span>{selectedRole?.name || "Сотрудник"} · {selectedWaiter.active ? "активен" : "неактивен"}</span></div>
+              <div className="employee-profile-identity"><p>Карточка сотрудника</p><h2>{selectedWaiter.name}</h2><span>{selectedRole?.name || "Сотрудник"} · {selectedActiveShift ? "на смене" : selectedWaiter.active ? "не на смене" : "неактивен"}</span></div>
+              {selectedActiveShift?.roleKind === "waiter" && (
+                <div className="employee-profile-shift-action">
+                  {assignedTableCount === 0 ? (
+                    <button className="ghost-button compact employee-end-shift-button" disabled={endingShiftId === selectedActiveShift.id} onClick={() => void endSelectedWaiterShift()}>
+                      <LogOut size={17} /> {endingShiftId === selectedActiveShift.id ? "Завершаем" : "Завершить смену"}
+                    </button>
+                  ) : (
+                    <span className="employee-shift-blocked">Смена не может быть завершена: назначено столов — {assignedTableCount}</span>
+                  )}
+                </div>
+              )}
             </div>
+            {shiftNotice && <div className="employee-profile-notice">{shiftNotice}</div>}
             <div className="employee-profile-metrics">
               <article><strong>{employeeShifts.length}</strong><span>смен за всё время</span></article>
               <article><strong>{completionRate}%</strong><span>выполнено пунктов</span></article>

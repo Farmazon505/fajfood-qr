@@ -87,6 +87,47 @@ test("waiter receives table calls only after required checklist is complete", as
   });
 });
 
+test("a supervisor can end only an unassigned waiter shift", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const started = await store.startWaiterShift(waiter.id, [store.listZones()[0]]);
+    assert.ok(started);
+
+    const blocked = await store.endWaiterShiftBySupervisor(started.shift.id);
+    assert.equal(blocked.status, "tables_assigned");
+    if (blocked.status === "tables_assigned") assert.ok(blocked.tableCount > 0);
+    assert.ok(store.currentShiftForWaiter(waiter.id));
+
+    await store.replaceTables(store.snapshot().tables.map((table) => ({
+      ...table,
+      waiterId: null,
+      waiterIds: []
+    })));
+    const ended = await store.endWaiterShiftBySupervisor(started.shift.id);
+    assert.equal(ended.status, "ended");
+    assert.equal(store.currentShiftForWaiter(waiter.id), null);
+
+    const repeated = await store.endWaiterShiftBySupervisor(started.shift.id);
+    assert.equal(repeated.status, "already_ended");
+
+    const admin = {
+      id: "admin-shift-test",
+      name: "Тестовый администратор",
+      roleId: "admin",
+      telegramChatId: "",
+      maxUserId: "",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([...store.snapshot().waiters, admin]);
+    const adminShift = await store.startWaiterShift(admin.id, [store.listZones()[0]]);
+    assert.ok(adminShift);
+    const forbidden = await store.endWaiterShiftBySupervisor(adminShift.shift.id);
+    assert.equal(forbidden.status, "not_waiter");
+    assert.ok(store.currentShiftForWaiter(admin.id));
+  });
+});
+
 test("checklist items require one minute between distinct completions", async () => {
   await withStore(async (store) => {
     const waiter = store.snapshot().waiters[0];

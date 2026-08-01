@@ -2359,9 +2359,35 @@ button:disabled {
   box-shadow: inset 4px 0 0 var(--brand-primary);
 }
 
+.employee-directory-list > button.is-on-shift {
+  border-color: #79b88c;
+  background: #edf8f0;
+  box-shadow: inset 4px 0 0 #2f8a50;
+}
+
+.employee-directory-list > button.is-on-shift:hover,
+.employee-directory-list > button.is-on-shift.active {
+  border-color: #2f8a50;
+  background: #e2f3e7;
+  box-shadow: inset 4px 0 0 #247240, 0 0 0 2px rgba(47, 138, 80, 0.12);
+}
+
+.employee-directory-list > button.is-on-shift .employee-avatar {
+  background: #2f8a50;
+}
+
 .employee-directory-list > button strong,
 .employee-directory-list > button small {
   display: block;
+}
+
+.employee-shift-status {
+  color: inherit;
+}
+
+.employee-shift-status.is-active {
+  color: #247240;
+  font-weight: 900;
 }
 
 .employee-directory-list > button small {
@@ -2409,6 +2435,47 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 16px;
+  flex-wrap: wrap;
+}
+
+.employee-profile-identity {
+  min-width: 0;
+}
+
+.employee-profile-shift-action {
+  max-width: 280px;
+  margin-left: auto;
+}
+
+.employee-end-shift-button {
+  border-color: rgba(255, 255, 255, 0.45) !important;
+  color: #fffdfa !important;
+  background: rgba(255, 255, 255, 0.1) !important;
+}
+
+.employee-end-shift-button:hover {
+  border-color: #fffdfa !important;
+  background: rgba(255, 255, 255, 0.18) !important;
+}
+
+.employee-shift-blocked {
+  display: block;
+  border-radius: 8px;
+  padding: 9px 11px;
+  color: #ffe6bd;
+  background: rgba(122, 69, 10, 0.38);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.employee-profile-notice {
+  margin-top: 14px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #174e2d;
+  background: #e1f3e6;
+  font-weight: 800;
 }
 
 .employee-profile-heading p,
@@ -2430,7 +2497,7 @@ button:disabled {
   font-size: 26px;
 }
 
-.employee-profile-heading > div > span {
+.employee-profile-identity > span {
   display: block;
   margin-top: 4px;
   color: #cdd4ce;
@@ -3088,6 +3155,17 @@ button:disabled {
 
   .employee-directory-list {
     max-height: 360px;
+  }
+
+  .employee-profile-shift-action {
+    width: 100%;
+    max-width: none;
+    margin-left: 0;
+  }
+
+  .employee-end-shift-button {
+    width: 100%;
+    justify-content: center;
   }
 
   .employee-profile-heading,

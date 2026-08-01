@@ -40,6 +40,13 @@ export type ChecklistCompletionResult =
   | { status: "cooldown"; shift: WaiterShift; retryAfterSeconds: number }
   | { status: "not_found"; shift: null };
 
+export type SupervisorShiftEndResult =
+  | { status: "ended"; shift: WaiterShift }
+  | { status: "not_found" }
+  | { status: "already_ended" }
+  | { status: "not_waiter" }
+  | { status: "tables_assigned"; tableCount: number };
+
 const venueDateKey = (value = new Date()) =>
   new Intl.DateTimeFormat("en-CA", { timeZone: config.VENUE_TIME_ZONE }).format(value);
 
@@ -1165,6 +1172,19 @@ export class Store {
   async endWaiterShiftById(shiftId: string) {
     const shift = this.data.shifts.find((item) => item.id === shiftId && item.status !== "ended");
     return shift ? this.endWaiterShift(shift.waiterId) : null;
+  }
+
+  async endWaiterShiftBySupervisor(shiftId: string): Promise<SupervisorShiftEndResult> {
+    const shift = this.data.shifts.find((item) => item.id === shiftId);
+    if (!shift) return { status: "not_found" };
+    if (shift.status === "ended") return { status: "already_ended" };
+    if (shift.roleKind !== "waiter") return { status: "not_waiter" };
+
+    const tableCount = this.data.tables.filter((table) => tableWaiterIds(table).includes(shift.waiterId)).length;
+    if (tableCount > 0) return { status: "tables_assigned", tableCount };
+
+    const ended = await this.endWaiterShift(shift.waiterId);
+    return ended ? { status: "ended", shift: ended } : { status: "not_found" };
   }
 
   async upsertCall(input: {
