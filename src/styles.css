@@ -71,6 +71,12 @@ textarea {
   resize: vertical;
 }
 
+textarea.auto-grow-textarea {
+  min-height: 46px;
+  overflow-y: hidden;
+  resize: none;
+}
+
 input:focus,
 textarea:focus,
 select:focus {

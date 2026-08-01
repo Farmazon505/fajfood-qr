@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, FormEvent, ReactNode } from "react";
 import { TableTentDesigner } from "./TableTentDesigner";
 import {
@@ -1028,6 +1028,7 @@ function AdminPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState("");
+  const checklistDirtyRef = useRef(false);
 
   const authHeaders = useMemo(() => ({ authorization: `Bearer ${token}` }), [token]);
 
@@ -1037,7 +1038,9 @@ function AdminPage() {
       const overview = await api<AdminData>("/api/admin/overview", {
         headers: authHeaders
       });
-      setData(overview);
+      setData((current) => checklistDirtyRef.current && current
+        ? { ...overview, checklistItems: current.checklistItems }
+        : overview);
       setError("");
     } catch (requestError) {
       localStorage.removeItem("adminToken");
@@ -1098,7 +1101,7 @@ function AdminPage() {
     }
   };
 
-  const saveResource = async <T,>(resource: string, body: T, message: string) => {
+  const saveResource = async <T,>(resource: string, body: T, message: string, onSaved?: () => void) => {
     setSaved("");
     setError("");
     try {
@@ -1107,6 +1110,7 @@ function AdminPage() {
         headers: authHeaders,
         body: JSON.stringify(body)
       });
+      onSaved?.();
       setSaved(message);
       setTimeout(() => setSaved(""), 3000);
       await loadAdmin();
@@ -1405,8 +1409,16 @@ function AdminPage() {
             roles={data.staffRoles}
             waiters={data.waiters}
             authHeaders={authHeaders}
-            onChange={(checklistItems) => setData({ ...data, checklistItems })}
-            onSave={() => void saveResource("checklist", data.checklistItems, "Шаблоны чек-листов сохранены")}
+            onChange={(checklistItems) => {
+              checklistDirtyRef.current = true;
+              setData((current) => current ? { ...current, checklistItems } : current);
+            }}
+            onSave={() => void saveResource(
+              "checklist",
+              data.checklistItems,
+              "Шаблоны чек-листов сохранены",
+              () => { checklistDirtyRef.current = false; }
+            )}
             onRefresh={loadAdmin}
           />
         )}
@@ -2665,8 +2677,8 @@ function ChecklistEditor({
                   <button className="icon-button" disabled={roleIndex === 0} onClick={() => moveItem(roleIndex, -1)} aria-label="Поднять выше"><ArrowUp size={17} /></button>
                   <button className="icon-button" disabled={roleIndex === roleEntries.length - 1} onClick={() => moveItem(roleIndex, 1)} aria-label="Опустить ниже"><ArrowDown size={17} /></button>
                 </div>
-                <Field label="Задача" value={item.title} onChange={(value) => updateItem(globalIndex, { title: value })} />
-                <Field label="Пояснение" value={item.description} onChange={(value) => updateItem(globalIndex, { description: value })} />
+                <Field label="Задача" value={item.title} onChange={(value) => updateItem(globalIndex, { title: value })} textarea autoGrow />
+                <Field label="Пояснение" value={item.description} onChange={(value) => updateItem(globalIndex, { description: value })} textarea autoGrow />
                 <label className="toggle-row">
                   <input type="checkbox" checked={item.requiredForCalls} onChange={(event) => updateItem(globalIndex, { requiredForCalls: event.target.checked })} />
                   Обязателен для допуска
@@ -2705,8 +2717,8 @@ function ChecklistEditor({
                 {roleWaiters.map((waiter) => <option key={waiter.id} value={waiter.id}>{waiter.name}</option>)}
               </select>
             </label>
-            <Field label="Задание" value={taskTitle} onChange={setTaskTitle} placeholder="Например: проверить летнюю веранду" />
-            <Field label="Пояснение" value={taskDescription} onChange={setTaskDescription} placeholder="Что именно нужно сделать" />
+            <Field label="Задание" value={taskTitle} onChange={setTaskTitle} placeholder="Например: проверить летнюю веранду" textarea autoGrow />
+            <Field label="Пояснение" value={taskDescription} onChange={setTaskDescription} placeholder="Что именно нужно сделать" textarea autoGrow />
             <label className="toggle-row shift-task-required">
               <input type="checkbox" checked={taskRequired} onChange={(event) => setTaskRequired(event.target.checked)} />
               Обязательно для допуска
@@ -3742,6 +3754,7 @@ function Field({
   value,
   onChange,
   textarea,
+  autoGrow,
   full,
   short,
   placeholder
@@ -3750,11 +3763,24 @@ function Field({
   value: string;
   onChange: (value: string) => void;
   textarea?: boolean;
+  autoGrow?: boolean;
   full?: boolean;
   short?: boolean;
   placeholder?: string;
 }) {
   const helpText = placeholder && placeholder.length > 18 ? placeholder : "";
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const resizeTextarea = (element: HTMLTextAreaElement) => {
+    if (!autoGrow) return;
+    element.style.height = "auto";
+    element.style.height = `${element.scrollHeight}px`;
+  };
+
+  useEffect(() => {
+    if (textareaRef.current) resizeTextarea(textareaRef.current);
+  }, [autoGrow, value]);
+
   return (
     <label className={`field ${full ? "field-full" : ""} ${short ? "field-short" : ""}`}>
       <span className="field-label">
@@ -3767,7 +3793,18 @@ function Field({
         )}
       </span>
       {textarea ? (
-        <textarea rows={4} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} title={value || helpText || undefined} />
+        <textarea
+          ref={textareaRef}
+          className={autoGrow ? "auto-grow-textarea" : undefined}
+          rows={autoGrow ? 1 : 4}
+          value={value}
+          onChange={(event) => {
+            resizeTextarea(event.target);
+            onChange(event.target.value);
+          }}
+          placeholder={placeholder}
+          title={value || helpText || undefined}
+        />
       ) : (
         <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} title={value || helpText || undefined} />
       )}
