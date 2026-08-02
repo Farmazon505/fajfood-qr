@@ -18,8 +18,8 @@ const venueDateKey = (value = new Date()) =>
 export class MessagingService {
   private escalationTimer: ReturnType<typeof setInterval> | null = null;
   private escalationRunning = false;
-  private taskRolloverTimer: ReturnType<typeof setInterval> | null = null;
-  private taskRolloverRunning = false;
+  private dailyMaintenanceTimer: ReturnType<typeof setInterval> | null = null;
+  private dailyMaintenanceRunning = false;
 
   constructor(
     private store: Store,
@@ -110,12 +110,12 @@ export class MessagingService {
   start() {
     this.telegram.startPolling(false);
     void this.max.start().catch((error) => console.error("[max start]", error));
-    if (!this.taskRolloverTimer) {
-      this.taskRolloverTimer = setInterval(() => void this.processTaskRollovers(), 60_000);
-      this.taskRolloverTimer.unref();
+    if (!this.dailyMaintenanceTimer) {
+      this.dailyMaintenanceTimer = setInterval(() => void this.processDailyMaintenance(), 60_000);
+      this.dailyMaintenanceTimer.unref();
     }
     if (!this.enabled()) {
-      void this.processTaskRollovers();
+      void this.processDailyMaintenance();
       return;
     }
     if (this.escalationTimer) return;
@@ -124,15 +124,18 @@ export class MessagingService {
     void this.processEscalations();
   }
 
-  private async processTaskRollovers(at = Date.now()) {
-    if (this.taskRolloverRunning) return;
-    this.taskRolloverRunning = true;
+  private async processDailyMaintenance(at = Date.now()) {
+    if (this.dailyMaintenanceRunning) return;
+    this.dailyMaintenanceRunning = true;
     try {
-      await this.store.rolloverIncompleteShiftTasks(venueDateKey(new Date(at)), new Date(at));
+      const currentTime = new Date(at);
+      const currentDateKey = venueDateKey(currentTime);
+      await this.store.endOpenShiftsBeforeDate(currentDateKey, currentTime);
+      await this.store.rolloverIncompleteShiftTasks(currentDateKey, currentTime);
     } catch (error) {
-      console.error("[messaging] Ошибка переноса заданий:", error);
+      console.error("[messaging] Ошибка ежедневного обслуживания:", error);
     } finally {
-      this.taskRolloverRunning = false;
+      this.dailyMaintenanceRunning = false;
     }
   }
 
@@ -140,7 +143,7 @@ export class MessagingService {
     if (this.escalationRunning) return;
     this.escalationRunning = true;
     try {
-      await this.processTaskRollovers(at);
+      await this.processDailyMaintenance(at);
       for (const dueCall of this.store.callsDueForAdminEscalation(at)) {
         const table = this.store.findTableById(dueCall.tableId);
         if (!table) continue;

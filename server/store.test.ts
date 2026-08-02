@@ -128,6 +128,46 @@ test("a supervisor can end only an unassigned waiter shift", async () => {
   });
 });
 
+test("open employee shifts end automatically when the venue date changes", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const admin = {
+      id: "admin-midnight-test",
+      name: "Администратор полуночи",
+      roleId: "admin",
+      telegramChatId: "",
+      maxUserId: "",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([...store.snapshot().waiters, admin]);
+
+    const zone = store.listZones()[0];
+    const waiterShift = await store.startWaiterShift(waiter.id, [zone]);
+    const adminShift = await store.startWaiterShift(admin.id, [zone]);
+    assert.ok(waiterShift);
+    assert.ok(adminShift);
+    assert.ok(store.snapshot().tables.some((table) => table.waiterIds.includes(waiter.id)));
+
+    const [year, month, day] = waiterShift.shift.morningGreetingDate.split("-").map(Number);
+    const nextDateKey = new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+    const endedAt = new Date(`${nextDateKey}T00:00:05.000Z`);
+    assert.deepEqual(
+      await store.endOpenShiftsBeforeDate(waiterShift.shift.morningGreetingDate, endedAt),
+      []
+    );
+    assert.ok(store.currentShiftForWaiter(waiter.id));
+    const ended = await store.endOpenShiftsBeforeDate(nextDateKey, endedAt);
+
+    assert.equal(ended.length, 2);
+    assert.ok(ended.every((shift) => shift.status === "ended" && shift.endedAt === endedAt.toISOString()));
+    assert.equal(store.currentShiftForWaiter(waiter.id), null);
+    assert.equal(store.currentShiftForWaiter(admin.id), null);
+    assert.ok(store.snapshot().tables.every((table) => !table.waiterIds.includes(waiter.id)));
+    assert.deepEqual(await store.endOpenShiftsBeforeDate(nextDateKey, endedAt), []);
+  });
+});
+
 test("checklist items require one minute between distinct completions", async () => {
   await withStore(async (store) => {
     const waiter = store.snapshot().waiters[0];

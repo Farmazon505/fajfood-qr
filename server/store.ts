@@ -1186,6 +1186,27 @@ export class Store {
     return structuredClone(shift);
   }
 
+  async endOpenShiftsBeforeDate(dateKey: string, endedAt = new Date()) {
+    const shifts = this.data.shifts.filter(
+      (shift) => shift.status !== "ended" && shift.morningGreetingDate < dateKey
+    );
+    if (!shifts.length) return [];
+
+    const timestamp = endedAt.toISOString();
+    const waiterIds = new Set(shifts.map((shift) => shift.waiterId));
+    for (const shift of shifts) {
+      shift.status = "ended";
+      shift.endedAt = timestamp;
+      shift.score = calculateShiftScore(shift);
+    }
+    this.data.tables = this.data.tables.map((table) => {
+      const waiterIdsForTable = tableWaiterIds(table).filter((id) => !waiterIds.has(id));
+      return { ...table, waiterIds: waiterIdsForTable, waiterId: waiterIdsForTable[0] ?? null };
+    });
+    await this.persist();
+    return shifts.map((shift) => structuredClone(shift));
+  }
+
   async endWaiterShiftById(shiftId: string) {
     const shift = this.data.shifts.find((item) => item.id === shiftId && item.status !== "ended");
     return shift ? this.endWaiterShift(shift.waiterId) : null;

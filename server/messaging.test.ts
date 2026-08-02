@@ -192,3 +192,35 @@ test("messaging alerts the owner once when a required checklist is overdue", asy
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("messaging daily maintenance closes a shift from the previous venue date", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-midnight-shift-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const waiter = store.snapshot().waiters[0];
+    const started = await store.startWaiterShift(waiter.id, [store.listZones()[0]]);
+    assert.ok(started);
+
+    const telegram = new FakeTransport();
+    const max = new FakeTransport();
+    const webPush = new FakeWebPush();
+    const messaging = new MessagingService(
+      store,
+      telegram as unknown as TelegramService,
+      max as unknown as MaxService,
+      webPush as unknown as OwnerWebPushService
+    );
+    const nextVenueDay = new Date(started.shift.startedAt).getTime() + 36 * 60 * 60 * 1000;
+    await messaging.processEscalations(nextVenueDay);
+
+    const closed = store.snapshot().shifts.find((shift) => shift.id === started.shift.id);
+    assert.equal(closed?.status, "ended");
+    assert.equal(closed?.endedAt, new Date(nextVenueDay).toISOString());
+    assert.equal(store.currentShiftForWaiter(waiter.id), null);
+    assert.ok(store.snapshot().tables.every((table) => !table.waiterIds.includes(waiter.id)));
+    assert.equal(telegram.ownerAlerts.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
