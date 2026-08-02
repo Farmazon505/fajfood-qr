@@ -597,3 +597,22 @@ test("performance analytics finds repeated task and employee failures", async ()
     assert.equal(employeeOnly.roleSummaries[0].employeeCount, 1);
   });
 });
+
+test("an unfinished required checklist becomes overdue only once", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const started = await store.startWaiterShift(waiter.id, [store.listZones()[0]]);
+    assert.ok(started);
+    assert.equal(started.shift.status, "checklist");
+    const startedAt = new Date(started.shift.startedAt).getTime();
+
+    assert.equal(store.shiftsDueForChecklistAlert(startedAt + 999, 1_000).length, 0);
+    const due = store.shiftsDueForChecklistAlert(startedAt + 1_000, 1_000);
+    assert.equal(due.length, 1);
+    assert.equal(due[0].id, started.shift.id);
+
+    const marked = await store.markChecklistOverdueNotified(started.shift.id, new Date(startedAt + 1_000));
+    assert.ok(marked?.checklistOverdueNotifiedAt);
+    assert.equal(store.shiftsDueForChecklistAlert(startedAt + 2_000, 1_000).length, 0);
+  });
+});

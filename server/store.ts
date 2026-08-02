@@ -33,6 +33,7 @@ export const CHECKLIST_ITEM_COOLDOWN_MS = 60_000;
 export const WAITER_ACCEPT_TIMEOUT_MS = 60_000;
 export const WAITER_COMPLETE_TIMEOUT_MS = 2 * 60_000;
 export const ADMIN_ACK_TIMEOUT_MS = 60_000;
+export const CHECKLIST_OVERDUE_TIMEOUT_MS = config.CHECKLIST_OVERDUE_MINUTES * 60_000;
 
 export type ChecklistCompletionResult =
   | { status: "completed"; shift: WaiterShift }
@@ -826,6 +827,7 @@ export class Store {
         readyAt: shift.readyAt ?? null,
         endedAt: shift.endedAt ?? null,
         morningGreetingDate: shift.morningGreetingDate || venueDateKey(new Date(shift.startedAt)),
+        checklistOverdueNotifiedAt: shift.checklistOverdueNotifiedAt ?? null,
         score: 0
       };
       normalized.score = calculateShiftScore(normalized);
@@ -1076,7 +1078,8 @@ export class Store {
       startedAt: timestamp,
       readyAt: requiredComplete ? timestamp : null,
       endedAt: null,
-      morningGreetingDate: dateKey
+      morningGreetingDate: dateKey,
+      checklistOverdueNotifiedAt: null
     };
 
     this.data.shifts.unshift(shift);
@@ -1186,6 +1189,33 @@ export class Store {
   async endWaiterShiftById(shiftId: string) {
     const shift = this.data.shifts.find((item) => item.id === shiftId && item.status !== "ended");
     return shift ? this.endWaiterShift(shift.waiterId) : null;
+  }
+
+  shiftsDueForChecklistAlert(at: number, timeoutMs = CHECKLIST_OVERDUE_TIMEOUT_MS) {
+    return this.data.shifts
+      .filter((shift) => {
+        if (
+          shift.status !== "checklist" ||
+          shift.roleKind === "owner" ||
+          shift.checklistOverdueNotifiedAt
+        ) {
+          return false;
+        }
+        const startedAt = new Date(shift.startedAt).getTime();
+        if (!Number.isFinite(startedAt) || at - startedAt < timeoutMs) return false;
+        return shift.checklist.some((item) => item.requiredForCalls && !item.completedAt);
+      })
+      .map((shift) => structuredClone(shift));
+  }
+
+  async markChecklistOverdueNotified(shiftId: string, at = new Date()) {
+    const shift = this.data.shifts.find(
+      (item) => item.id === shiftId && item.status === "checklist" && !item.checklistOverdueNotifiedAt
+    );
+    if (!shift) return null;
+    shift.checklistOverdueNotifiedAt = at.toISOString();
+    await this.persist();
+    return structuredClone(shift);
   }
 
   async endWaiterShiftBySupervisor(shiftId: string): Promise<SupervisorShiftEndResult> {

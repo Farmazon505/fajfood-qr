@@ -65,6 +65,7 @@ import type {
   LoyaltyLead,
   Offer,
   OwnerNotificationSettings,
+  OwnerWebPushStatus,
   PerformanceAnalytics,
   PerformanceInsightReport,
   ServiceCall,
@@ -144,8 +145,20 @@ type AdminData = AppData & {
   accessRole: AdminAccessRole;
   username: string;
   adminAccount: AdminAccountSummary | null;
+  ownerWebPush: OwnerWebPushStatus;
   popups: PopupNotification[];
 };
+
+const webPushApplicationKey = (value: string) => {
+  const padding = "=".repeat((4 - (value.length % 4)) % 4);
+  const base64 = `${value}${padding}`.replace(/-/g, "+").replace(/_/g, "/");
+  const raw = window.atob(base64);
+  return Uint8Array.from(raw, (character) => character.charCodeAt(0));
+};
+
+const isStandaloneWebApp = () =>
+  window.matchMedia("(display-mode: standalone)").matches ||
+  Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
 
 const api = async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
   const response = await fetch(path, {
@@ -1438,6 +1451,7 @@ function AdminPage() {
             ownerUsername={data.username}
             adminAccount={data.adminAccount}
             ownerNotifications={data.ownerNotifications}
+            ownerWebPush={data.ownerWebPush}
             telegramAvailable={data.telegramEnabled}
             maxAvailable={data.maxEnabled}
             authHeaders={authHeaders}
@@ -1493,6 +1507,7 @@ function OwnerProfile({
   ownerUsername,
   adminAccount,
   ownerNotifications,
+  ownerWebPush,
   telegramAvailable,
   maxAvailable,
   authHeaders,
@@ -1501,6 +1516,7 @@ function OwnerProfile({
   ownerUsername: string;
   adminAccount: AdminAccountSummary;
   ownerNotifications: OwnerNotificationSettings;
+  ownerWebPush: OwnerWebPushStatus;
   telegramAvailable: boolean;
   maxAvailable: boolean;
   authHeaders: { authorization: string };
@@ -1517,6 +1533,124 @@ function OwnerProfile({
   const [notificationBusy, setNotificationBusy] = useState(false);
   const [notificationMessage, setNotificationMessage] = useState("");
   const [notificationError, setNotificationError] = useState("");
+  const [pushStatus, setPushStatus] = useState(ownerWebPush);
+  const [pushPermission, setPushPermission] = useState<NotificationPermission>(
+    typeof Notification === "undefined" ? "default" : Notification.permission
+  );
+  const [pushSubscribed, setPushSubscribed] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushMessage, setPushMessage] = useState("");
+  const [pushError, setPushError] = useState("");
+
+  const pushSupported = typeof window !== "undefined" &&
+    "serviceWorker" in navigator &&
+    "PushManager" in window &&
+    "Notification" in window;
+  const standalone = typeof window !== "undefined" && isStandaloneWebApp();
+
+  useEffect(() => {
+    setPushStatus(ownerWebPush);
+  }, [ownerWebPush]);
+
+  useEffect(() => {
+    if (!pushSupported) return;
+    let cancelled = false;
+    void navigator.serviceWorker.register("/admin-sw.js", { scope: "/" }).then(async (registration) => {
+      const subscription = await registration.pushManager.getSubscription();
+      if (!cancelled) {
+        setPushSubscribed(Boolean(subscription));
+        setPushPermission(Notification.permission);
+      }
+    }).catch(() => {
+      if (!cancelled) setPushError("Не удалось подготовить системные уведомления");
+    });
+    return () => { cancelled = true; };
+  }, [pushSupported]);
+
+  const enableWebPush = async () => {
+    setPushMessage("");
+    setPushError("");
+    if (!pushSupported) {
+      setPushError("Этот браузер не поддерживает системные Web Push-уведомления");
+      return;
+    }
+    if (!pushStatus.enabled || !pushStatus.publicKey) {
+      setPushError("Web Push ещё не настроен на сервере");
+      return;
+    }
+    if (/iPad|iPhone|iPod/.test(navigator.userAgent) && !standalone) {
+      setPushError("На iPhone сначала добавьте Faj QR на экран «Домой» и откройте приложение с иконки");
+      return;
+    }
+
+    setPushBusy(true);
+    try {
+      const permission = await Notification.requestPermission();
+      setPushPermission(permission);
+      if (permission !== "granted") {
+        throw new Error("Разрешите уведомления Faj QR в настройках iPhone");
+      }
+      const registration = await navigator.serviceWorker.register("/admin-sw.js", { scope: "/" });
+      const existing = await registration.pushManager.getSubscription();
+      const subscription = existing ?? await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: webPushApplicationKey(pushStatus.publicKey)
+      });
+      const updated = await api<OwnerWebPushStatus>("/api/admin/web-push/subscriptions", {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify(subscription.toJSON())
+      });
+      setPushStatus(updated);
+      setPushSubscribed(true);
+      setPushMessage("Системные уведомления включены на этом устройстве");
+      await onRefresh();
+    } catch (error) {
+      setPushError(error instanceof Error ? error.message : "Не удалось включить системные уведомления");
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const disableWebPush = async () => {
+    setPushMessage("");
+    setPushError("");
+    if (!pushSupported) return;
+    setPushBusy(true);
+    try {
+      const registration = await navigator.serviceWorker.getRegistration("/");
+      const subscription = await registration?.pushManager.getSubscription();
+      if (subscription) {
+        await api<OwnerWebPushStatus>("/api/admin/web-push/subscriptions", {
+          method: "DELETE",
+          headers: authHeaders,
+          body: JSON.stringify({ endpoint: subscription.endpoint })
+        });
+        await subscription.unsubscribe();
+      }
+      setPushSubscribed(false);
+      setPushMessage("Системные уведомления выключены на этом устройстве");
+      await onRefresh();
+    } catch (error) {
+      setPushError(error instanceof Error ? error.message : "Не удалось выключить системные уведомления");
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const testWebPush = async () => {
+    setPushMessage("");
+    setPushError("");
+    setPushBusy(true);
+    try {
+      await api("/api/admin/web-push/test", { method: "POST", headers: authHeaders });
+      setPushMessage("Тест отправлен. Проверьте экран блокировки и Центр уведомлений");
+    } catch (error) {
+      setPushError(error instanceof Error ? error.message : "Тестовое уведомление не отправлено");
+    } finally {
+      setPushBusy(false);
+    }
+  };
 
   useEffect(() => {
     setAdminUsername(adminAccount.username);
@@ -1822,6 +1956,62 @@ function OwnerProfile({
           </button>
         </div>
       </form>
+
+      <div className="owner-notification-settings owner-web-push-settings">
+        <div className="owner-notification-heading">
+          <div>
+            <h3>Системные уведомления iPhone</h3>
+            <p>
+              Приходят на экран блокировки, даже когда Faj QR закрыт. Уведомляем о срочных вызовах гостя и о чек-листе,
+              который не завершён за {pushStatus.checklistOverdueMinutes} минут после начала смены.
+            </p>
+          </div>
+          <BellRing size={22} />
+        </div>
+
+        <div className="owner-push-status-grid">
+          <div className={pushStatus.enabled ? "is-ready" : "is-missing"}>
+            <strong>Сервер</strong>
+            <span>{pushStatus.enabled ? "Готов" : "Не настроен"}</span>
+          </div>
+          <div className={standalone ? "is-ready" : "is-missing"}>
+            <strong>Приложение</strong>
+            <span>{standalone ? "Открыто с экрана Домой" : "Откройте установленное приложение"}</span>
+          </div>
+          <div className={pushPermission === "granted" ? "is-ready" : "is-missing"}>
+            <strong>Разрешение iPhone</strong>
+            <span>{pushPermission === "granted" ? "Разрешено" : pushPermission === "denied" ? "Запрещено" : "Не запрошено"}</span>
+          </div>
+          <div className={pushSubscribed ? "is-ready" : "is-missing"}>
+            <strong>Это устройство</strong>
+            <span>{pushSubscribed ? "Подключено" : "Не подключено"}</span>
+          </div>
+        </div>
+
+        {!standalone && (
+          <p className="owner-push-instruction">
+            На iPhone: откройте сайт в Safari → «Поделиться» → «На экран Домой», затем запустите Faj QR с новой иконки.
+          </p>
+        )}
+        {pushMessage && <div className="success-line owner-account-status">{pushMessage}</div>}
+        {pushError && <div className="error-line owner-account-status">{pushError}</div>}
+        <div className="button-row owner-account-actions owner-push-actions">
+          {pushSubscribed ? (
+            <button className="ghost-button" type="button" disabled={pushBusy} onClick={() => void disableWebPush()}>
+              Выключить на этом устройстве
+            </button>
+          ) : (
+            <button className="primary-button" type="button" disabled={pushBusy || !pushStatus.enabled} onClick={() => void enableWebPush()}>
+              <BellRing size={18} />
+              {pushBusy ? "Подключаем" : "Включить на этом iPhone"}
+            </button>
+          )}
+          <button className="secondary-button" type="button" disabled={pushBusy || !pushSubscribed} onClick={() => void testWebPush()}>
+            Отправить тест
+          </button>
+        </div>
+        <small>Подключено устройств владельца: {pushStatus.subscriptionCount}</small>
+      </div>
     </section>
   );
 }

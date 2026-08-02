@@ -7,15 +7,18 @@ import { MessagingService } from "./messaging";
 import type { MaxService } from "./max";
 import {
   ADMIN_ACK_TIMEOUT_MS,
+  CHECKLIST_OVERDUE_TIMEOUT_MS,
   Store,
   WAITER_ACCEPT_TIMEOUT_MS,
   WAITER_COMPLETE_TIMEOUT_MS
 } from "./store";
 import type { TelegramService } from "./telegram";
 import type { ServiceCall } from "./types";
+import type { OwnerWebPushService } from "./web-push";
 
 class FakeTransport {
   notifications: ServiceCall[] = [];
+  ownerAlerts: string[] = [];
 
   enabled() {
     return true;
@@ -36,6 +39,24 @@ class FakeTransport {
 
   async notifyShiftTask() {
     return false;
+  }
+
+  async notifyOwnerAlert(text: string) {
+    this.ownerAlerts.push(text);
+    return 1;
+  }
+}
+
+class FakeWebPush {
+  notifications: Array<{ title: string; body: string; tag?: string }> = [];
+
+  enabled() {
+    return true;
+  }
+
+  async notify(payload: { title: string; body: string; tag?: string }) {
+    this.notifications.push(payload);
+    return { sent: 1, failed: 0, removed: 0 };
   }
 }
 
@@ -132,6 +153,41 @@ test("messaging routes timed-out calls through online admin and persists owner C
     const immediateOwnerCall = store.findCallById(offline.id);
     assert.equal(immediateOwnerCall?.routingStage, "owner");
     assert.match(immediateOwnerCall?.routingReason || "", /Администратор не в сети/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("messaging alerts the owner once when a required checklist is overdue", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-checklist-alert-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const waiter = store.snapshot().waiters[0];
+    const started = await store.startWaiterShift(waiter.id, [store.listZones()[0]]);
+    assert.ok(started);
+
+    const telegram = new FakeTransport();
+    const max = new FakeTransport();
+    const webPush = new FakeWebPush();
+    const messaging = new MessagingService(
+      store,
+      telegram as unknown as TelegramService,
+      max as unknown as MaxService,
+      webPush as unknown as OwnerWebPushService
+    );
+    const overdueAt = new Date(started.shift.startedAt).getTime() + CHECKLIST_OVERDUE_TIMEOUT_MS;
+    await messaging.processEscalations(overdueAt);
+
+    assert.equal(telegram.ownerAlerts.length, 1);
+    assert.match(telegram.ownerAlerts[0], /Чек-лист не завершён/);
+    assert.equal(webPush.notifications.length, 1);
+    assert.match(webPush.notifications[0].title, /Чек-лист не завершён/);
+    assert.ok(store.currentShiftForWaiter(waiter.id)?.checklistOverdueNotifiedAt);
+
+    await messaging.processEscalations(overdueAt + 60_000);
+    assert.equal(telegram.ownerAlerts.length, 1);
+    assert.equal(webPush.notifications.length, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

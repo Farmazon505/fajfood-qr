@@ -43,7 +43,32 @@ const envSchema = z.object({
   AI_PROXY_URL: aiProxyUrlSchema.default(""),
   OPENROUTER_API_KEY: z.string().optional().default(""),
   AI_MODEL: z.string().min(1).default("openai/gpt-4o-mini"),
-  AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(12000)
+  AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(12000),
+  WEB_PUSH_VAPID_PUBLIC_KEY: z.string().trim().optional().default(""),
+  WEB_PUSH_VAPID_PRIVATE_KEY: z.string().trim().optional().default(""),
+  WEB_PUSH_VAPID_SUBJECT: z.string().trim().optional().default(""),
+  CHECKLIST_OVERDUE_MINUTES: z.coerce.number().int().min(5).max(240).default(30)
+}).superRefine((value, context) => {
+  const hasPublicKey = Boolean(value.WEB_PUSH_VAPID_PUBLIC_KEY);
+  const hasPrivateKey = Boolean(value.WEB_PUSH_VAPID_PRIVATE_KEY);
+  if (hasPublicKey !== hasPrivateKey) {
+    context.addIssue({
+      code: "custom",
+      path: [hasPublicKey ? "WEB_PUSH_VAPID_PRIVATE_KEY" : "WEB_PUSH_VAPID_PUBLIC_KEY"],
+      message: "Both Web Push VAPID keys must be configured together"
+    });
+  }
+  if (
+    value.WEB_PUSH_VAPID_SUBJECT &&
+    !value.WEB_PUSH_VAPID_SUBJECT.startsWith("mailto:") &&
+    !value.WEB_PUSH_VAPID_SUBJECT.startsWith("https://")
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["WEB_PUSH_VAPID_SUBJECT"],
+      message: "WEB_PUSH_VAPID_SUBJECT must be an https URL or mailto address"
+    });
+  }
 });
 
 export const config = envSchema.parse(process.env);

@@ -1359,6 +1359,63 @@ select:focus {
   flex: 0 0 auto;
 }
 
+.owner-web-push-settings > small {
+  color: #657066;
+}
+
+.owner-push-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.owner-push-status-grid > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  border: 1px solid #ded6c8;
+  border-radius: 10px;
+  padding: 12px;
+  background: #fbf7ef;
+}
+
+.owner-push-status-grid strong,
+.owner-push-status-grid span {
+  overflow-wrap: anywhere;
+}
+
+.owner-push-status-grid span {
+  color: #657066;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.owner-push-status-grid > .is-ready {
+  border-color: #9bcaae;
+  background: #edf8f0;
+}
+
+.owner-push-status-grid > .is-ready strong {
+  color: #185c35;
+}
+
+.owner-push-status-grid > .is-missing strong {
+  color: #8a4b25;
+}
+
+.owner-push-instruction {
+  margin: 0;
+  border-left: 4px solid var(--brand-accent);
+  padding: 12px 14px;
+  color: #5d625e;
+  background: #fbf7ef;
+  line-height: 1.45;
+}
+
+.owner-push-actions {
+  flex-wrap: wrap;
+}
+
 .span-2 {
   grid-column: 1 / -1;
 }
@@ -3215,6 +3272,10 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .owner-push-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .owner-notification-heading {
     align-items: flex-start;
   }
@@ -3398,6 +3459,10 @@ button:disabled {
 }
 
 @media (max-width: 380px) {
+  .owner-push-status-grid {
+    grid-template-columns: 1fr;
+  }
+
   .guest-shell {
     padding-inline: 8px;
   }

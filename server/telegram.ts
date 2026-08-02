@@ -248,6 +248,23 @@ export class TelegramService {
     return refs;
   }
 
+  async notifyOwnerAlert(text: string) {
+    if (!this.enabled()) return 0;
+    const chatIds = Array.from(new Set(
+      this.store.ownersForEscalation().map((owner) => owner.telegramChatId.trim()).filter(Boolean)
+    ));
+    let delivered = 0;
+    for (const chatId of chatIds) {
+      const sent = await this.request<TelegramMessage>("sendMessage", {
+        chat_id: chatId,
+        text,
+        disable_notification: false
+      });
+      if (sent?.message_id) delivered += 1;
+    }
+    return delivered;
+  }
+
   async handleUpdate(update: TelegramUpdate) {
     const text = update.message?.text?.trim();
     if (text) {

@@ -12,6 +12,12 @@ export type OwnerNotificationSettings = {
   maxEnabled: boolean;
   configured: boolean;
 };
+export type OwnerWebPushStatus = {
+  enabled: boolean;
+  publicKey: string;
+  subscriptionCount: number;
+  checklistOverdueMinutes: number;
+};
 export type StaffRoleKind = "owner" | "admin" | "waiter" | "staff";
 export type CallRoutingStage = "waiter" | "admin" | "owner";
 
@@ -140,6 +146,7 @@ export type WaiterShift = {
   readyAt: string | null;
   endedAt: string | null;
   morningGreetingDate: string;
+  checklistOverdueNotifiedAt: string | null;
 };
 
 export type WaiterRating = {

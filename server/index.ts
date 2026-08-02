@@ -24,6 +24,7 @@ import { Store } from "./store";
 import { TelegramService } from "./telegram";
 import { MaxService } from "./max";
 import { MessagingService } from "./messaging";
+import { OwnerWebPushService } from "./web-push";
 import { generatePerformanceInsights, isPerformanceAiConfigured } from "./performance-ai";
 import type { CallStatus } from "./types";
 import { crmLoyalty } from "./crm-loyalty";
@@ -52,10 +53,12 @@ assertProductionSecrets();
 await initializeAdminCredentials();
 const store = new Store();
 await store.init();
+const ownerWebPush = new OwnerWebPushService();
+await ownerWebPush.init();
 const telegram = new TelegramService(store);
 const crmReservations = new CrmReservationsClient();
 const max = new MaxService(store);
-const messaging = new MessagingService(store, telegram, max);
+const messaging = new MessagingService(store, telegram, max, ownerWebPush);
 const reservationMonitor = new ReservationMonitor(store, telegram, crmReservations);
 
 const app = express();
@@ -404,23 +407,20 @@ app.post("/api/public/calls", publicLimiter, async (request, response) => {
     routingReason: fallbackReason
   });
 
-  let notified = await messaging.notifyCall({
-    call,
-    table,
-    waiters,
-    settings: store.snapshot().settings
-  });
+  let notified = routingStage === "owner"
+    ? await messaging.notifyOwnerEscalation(call)
+    : await messaging.notifyCall({
+        call,
+        table,
+        waiters,
+        settings: store.snapshot().settings
+      });
   if (routingStage === "admin" && notified === 0) {
     const ownerCall = await store.markOwnerEscalated(
       call.id,
       `${fallbackReason} Уведомление администратору не доставлено.`.trim()
     );
-    if (ownerCall) notified += await messaging.notifyCall({
-      call: ownerCall,
-      table,
-      waiters: [],
-      settings: store.snapshot().settings
-    });
+    if (ownerCall) notified += await messaging.notifyOwnerEscalation(ownerCall);
   }
 
   response.status(201).json({ ok: true, callId: call.id, notified, pressCount: call.pressCount });
@@ -743,6 +743,19 @@ const ownerNotificationUpdateSchema = z.object({
   }
 });
 
+const ownerPushSubscriptionSchema = z.object({
+  endpoint: z.string().url().max(4096).refine((value) => value.startsWith("https://")),
+  expirationTime: z.number().nullable().optional(),
+  keys: z.object({
+    p256dh: z.string().min(16).max(512),
+    auth: z.string().min(8).max(256)
+  })
+});
+
+const ownerPushUnsubscribeSchema = z.object({
+  endpoint: z.string().url().max(4096).refine((value) => value.startsWith("https://"))
+});
+
 app.put("/api/admin/admin-account", requireOwner, async (request, response) => {
   const parsed = adminAccountUpdateSchema.safeParse(request.body);
   if (!parsed.success) {
@@ -786,6 +799,52 @@ app.put("/api/admin/owner-notifications", requireOwner, async (request, response
   }
 
   response.json(await store.updateOwnerNotifications(parsed.data));
+});
+
+app.get("/api/admin/web-push/status", requireOwner, (_request, response) => {
+  response.json(ownerWebPush.status());
+});
+
+app.post("/api/admin/web-push/subscriptions", requireOwner, async (request, response) => {
+  const parsed = ownerPushSubscriptionSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Некорректная Web Push подписка" });
+    return;
+  }
+  try {
+    response.json(await ownerWebPush.subscribe(parsed.data, String(request.headers["user-agent"] || "")));
+  } catch (error) {
+    response.status(503).json({
+      error: error instanceof Error ? error.message : "Не удалось включить системные уведомления"
+    });
+  }
+});
+
+app.delete("/api/admin/web-push/subscriptions", requireOwner, async (request, response) => {
+  const parsed = ownerPushUnsubscribeSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Некорректная Web Push подписка" });
+    return;
+  }
+  response.json(await ownerWebPush.unsubscribe(parsed.data.endpoint));
+});
+
+app.post("/api/admin/web-push/test", requireOwner, async (_request, response) => {
+  if (!ownerWebPush.enabled()) {
+    response.status(503).json({ error: "Web Push ещё не настроен на сервере" });
+    return;
+  }
+  const result = await ownerWebPush.notify({
+    title: "Faj QR: уведомления включены",
+    body: "Тестовое системное уведомление доставлено на устройство владельца.",
+    url: "/admin",
+    tag: `test-${Date.now()}`
+  });
+  if (!result.sent) {
+    response.status(409).json({ error: "Нет активной подписки устройства", ...result });
+    return;
+  }
+  response.json(result);
 });
 
 app.post("/api/admin/review-media", reviewImageUploadParser, async (request, response) => {
@@ -902,7 +961,13 @@ app.get("/api/admin/overview", (request, response) => {
     telegramEnabled: telegram.enabled(),
     telegramBotUrl: `https://t.me/${config.TELEGRAM_BOT_USERNAME.replace(/^@/, "")}`,
     maxEnabled: max.enabled(),
-    maxBotUrl: config.MAX_BOT_USERNAME ? `https://max.ru/${config.MAX_BOT_USERNAME.replace(/^@/, "")}` : ""
+    maxBotUrl: config.MAX_BOT_USERNAME ? `https://max.ru/${config.MAX_BOT_USERNAME.replace(/^@/, "")}` : "",
+    ownerWebPush: isOwner ? ownerWebPush.status() : {
+      enabled: false,
+      publicKey: "",
+      subscriptionCount: 0,
+      checklistOverdueMinutes: config.CHECKLIST_OVERDUE_MINUTES
+    }
   });
 });
 
@@ -1231,7 +1296,11 @@ app.use(
     immutable: true,
     maxAge: "1y",
     setHeaders(response, filePath) {
-      if (filePath.endsWith("index.html")) {
+      if (
+        filePath.endsWith("index.html") ||
+        filePath.endsWith("admin-sw.js") ||
+        filePath.endsWith("manifest.webmanifest")
+      ) {
         response.setHeader("cache-control", "no-store");
       }
     }

@@ -3,6 +3,7 @@ import type { Store } from "./store";
 import type { TelegramService } from "./telegram";
 import type { DiningTable, ServiceCall, ShiftTask, VenueSettings, Waiter } from "./types";
 import { config } from "./config";
+import type { OwnerWebPushService } from "./web-push";
 
 type CallNotification = {
   call: ServiceCall;
@@ -23,7 +24,8 @@ export class MessagingService {
   constructor(
     private store: Store,
     private telegram: TelegramService,
-    private max: MaxService
+    private max: MaxService,
+    private webPush: OwnerWebPushService | null = null
   ) {
     const coordinator = {
       syncCall: async (call: ServiceCall) => {
@@ -38,7 +40,7 @@ export class MessagingService {
   }
 
   enabled() {
-    return this.telegram.enabled() || this.max.enabled();
+    return this.telegram.enabled() || this.max.enabled() || Boolean(this.webPush?.enabled());
   }
 
   async notifyCall(options: CallNotification) {
@@ -72,6 +74,26 @@ export class MessagingService {
     for (const result of results) {
       if (result.status === "rejected") console.error("[messaging] Ошибка удаления сообщения:", result.reason);
     }
+  }
+
+  async notifyOwnerEscalation(call: ServiceCall) {
+    const table = this.store.findTableById(call.tableId);
+    if (!table) return 0;
+    const [messengerDelivered, pushResult] = await Promise.all([
+      this.notifyCall({
+        call,
+        table,
+        waiters: [],
+        settings: this.store.snapshot().settings
+      }),
+      this.webPush?.notify({
+        title: "Срочный вызов гостя",
+        body: `${table.name}${table.zone ? ` · ${table.zone}` : ""}: ${call.actionLabel}. ${call.routingReason}`.trim(),
+        url: "/admin",
+        tag: `call-${call.id}`
+      }) ?? Promise.resolve({ sent: 0, failed: 0, removed: 0 })
+    ]);
+    return messengerDelivered + pushResult.sent;
   }
 
   async notifyShiftTask(task: ShiftTask) {
@@ -132,7 +154,7 @@ export class MessagingService {
             `${reason} Администратор не в сети.`,
             new Date(at)
           );
-          if (ownerCall) await this.syncCall(ownerCall);
+          if (ownerCall) await this.notifyOwnerEscalation(ownerCall);
           continue;
         }
 
@@ -151,7 +173,7 @@ export class MessagingService {
           `${reason} Уведомление администратору не доставлено.`,
           new Date(at)
         );
-        if (ownerCall) await this.syncCall(ownerCall);
+        if (ownerCall) await this.notifyOwnerEscalation(ownerCall);
       }
 
       for (const dueCall of this.store.callsDueForOwnerEscalation(at)) {
@@ -160,7 +182,34 @@ export class MessagingService {
           `${dueCall.routingReason} Администратор не подтвердил вызов в течение 1 минуты.`.trim(),
           new Date(at)
         );
-        if (call) await this.syncCall(call);
+        if (call) await this.notifyOwnerEscalation(call);
+      }
+
+      for (const shift of this.store.shiftsDueForChecklistAlert(at)) {
+        const pending = shift.checklist.filter((item) => item.requiredForCalls && !item.completedAt);
+        const titles = pending.slice(0, 3).map((item) => item.title).join(", ");
+        const more = pending.length > 3 ? ` и ещё ${pending.length - 3}` : "";
+        const body = `${shift.waiterName} не завершил обязательный чек-лист. Не выполнено: ${titles}${more}.`;
+        const telegramText = [
+          "⚠️ Чек-лист не завершён",
+          `Сотрудник: ${shift.waiterName}`,
+          `Должность: ${shift.roleName}`,
+          `Не выполнено: ${titles}${more}`,
+          `${config.CHECKLIST_OVERDUE_MINUTES} минут с начала смены.`,
+          `${config.PUBLIC_BASE_URL || ""}/admin`
+        ].filter(Boolean).join("\n");
+        const [telegramResult, pushResult] = await Promise.all([
+          this.telegram.notifyOwnerAlert(telegramText),
+          this.webPush?.notify({
+            title: "Чек-лист не завершён",
+            body,
+            url: "/admin",
+            tag: `checklist-${shift.id}`
+          }) ?? Promise.resolve({ sent: 0, failed: 0, removed: 0 })
+        ]);
+        if (telegramResult + pushResult.sent > 0) {
+          await this.store.markChecklistOverdueNotified(shift.id, new Date(at));
+        }
       }
 
       for (const task of this.store.getShiftTasksForNotification(venueDateKey(new Date(at)))) {
