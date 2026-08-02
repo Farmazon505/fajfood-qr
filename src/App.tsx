@@ -1019,6 +1019,16 @@ function LogoMark({ settings, className = "" }: { settings: VenueSettings; class
   );
 }
 
+function AdminAppLogo({ className = "" }: { className?: string }) {
+  return (
+    <img
+      className={`admin-app-logo ${className}`}
+      src="/faj-qr-icon-512.png"
+      alt="Логотип Faj QR"
+    />
+  );
+}
+
 function AdminPage() {
   const [token, setToken] = useState(() => localStorage.getItem("adminToken") || "");
   const [username, setUsername] = useState(() => localStorage.getItem("adminUsername") || "admin");
@@ -1164,7 +1174,7 @@ function AdminPage() {
     return (
       <main className="admin-login">
         <form onSubmit={login}>
-          <QrCode size={36} />
+          <AdminAppLogo className="admin-app-logo--login" />
           <h1>QR на стол</h1>
           <p>Панель администратора</p>
           <input
@@ -1245,7 +1255,7 @@ function AdminPage() {
       >
         <div className="admin-sidebar-head">
           <div className="brand-lockup">
-            <LogoMark settings={data.settings} className="logo-mark--sidebar" />
+            <AdminAppLogo className="admin-app-logo--sidebar" />
             <div>
               <strong>{data.settings.name}</strong>
               <span>{[
