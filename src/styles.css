@@ -3170,6 +3170,11 @@ button:disabled {
     max-width: 100%;
   }
 
+  .admin-content > .admin-mobile-bar {
+    width: auto;
+    max-width: none;
+  }
+
   .admin-content :where(h1, h2, h3, h4, p, strong, small, span, label, button) {
     overflow-wrap: anywhere;
     word-break: break-word;
