@@ -234,7 +234,7 @@ export function TableTentDesigner({ tables, settings, publicUrl }: Props) {
 
             <div className="form-group">
               <label><ImageIcon size={16} style={{display: 'inline', verticalAlign: 'text-bottom', marginRight: '4px'}}/> Фоновое изображение</label>
-              <div style={{ display: 'flex', gap: '10px' }}>
+              <div className="designer-upload-actions">
                 <button className="secondary-button" onClick={() => fileInputRef.current?.click()} style={{ flex: 1 }}>
                   <Upload size={16} /> Загрузить фон
                 </button>
@@ -279,22 +279,22 @@ export function TableTentDesigner({ tables, settings, publicUrl }: Props) {
               />
             </div>
 
-            <div className="form-group" style={{ display: 'flex', gap: '20px' }}>
-              <div style={{ flex: 1 }}>
+            <div className="form-group designer-color-grid">
+              <div>
                 <label>Цвет текста</label>
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                   <input type="color" value={textColor} onChange={e => setTextColor(e.target.value)} />
                   <span style={{ fontFamily: 'monospace', fontSize: '12px' }}>{textColor}</span>
                 </div>
               </div>
-              <div style={{ flex: 1 }}>
+              <div>
                 <label>Цвет QR-кода</label>
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                   <input type="color" value={qrColor} onChange={e => setQrColor(e.target.value)} />
                   <span style={{ fontFamily: 'monospace', fontSize: '12px' }}>{qrColor}</span>
                 </div>
               </div>
-              <div style={{ flex: 1 }}>
+              <div>
                 <label>Фон QR-кода</label>
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                   <input type="color" value={qrBgColor} onChange={e => setQrBgColor(e.target.value)} />
@@ -303,7 +303,7 @@ export function TableTentDesigner({ tables, settings, publicUrl }: Props) {
               </div>
             </div>
 
-            <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+            <div className="designer-print-actions">
               <button className="primary-button" onClick={handlePrintAll} style={{ flex: 1 }}>
                 <Printer size={20} /> Скачать для ВСЕХ столов (PDF)
               </button>

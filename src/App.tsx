@@ -3683,7 +3683,7 @@ function FeedbacksList({ feedbacks, tables, waiters }: { feedbacks: GuestFeedbac
         <h2>Отзывы гостей</h2>
         <Star size={20} />
       </div>
-      <div className="admin-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: '24px' }}>
+      <div className="admin-grid feedback-metrics">
         <Metric title="Всего отзывов" value={total} icon={<MessageSquare size={22} />} />
         <Metric title="Средняя оценка" value={Number(averageRating)} icon={<Star size={22} />} />
         <Metric title="Проблемных (1-3)" value={negativeCount} icon={<AlertTriangle size={22} />} />
@@ -4112,32 +4112,32 @@ function PopupsEditor({
             <div className="empty-state" style={{ minHeight: "120px" }}>Уведомлений пока нет</div>
           ) : (
             popups.map(popup => (
-              <div key={popup.id} style={{ border: "1px solid #ded6c8", borderRadius: "8px", padding: "16px", display: "flex", gap: "16px", background: popup.active ? "#fff" : "#f9f9f9", opacity: popup.active ? 1 : 0.7 }}>
+              <div className="popup-admin-row" key={popup.id} style={{ background: popup.active ? "#fff" : "#f9f9f9", opacity: popup.active ? 1 : 0.7 }}>
                 {popup.imageUrl ? (
-                  <img src={popup.imageUrl} alt="" style={{ width: "120px", height: "80px", objectFit: "cover", borderRadius: "4px" }} />
+                  <img className="popup-admin-thumbnail" src={popup.imageUrl} alt="" />
                 ) : (
-                  <div style={{ width: "120px", height: "80px", background: "#eee", borderRadius: "4px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <div className="popup-admin-thumbnail popup-admin-placeholder">
                     <Gift size={24} color="#ccc" />
                   </div>
                 )}
 
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "6px" }}>
+                <div className="popup-admin-content">
+                  <div className="popup-admin-heading">
                     <span style={{ fontSize: "12px", padding: "2px 6px", borderRadius: "4px", background: popup.active ? "#dff2df" : "#123c28", color: popup.active ? "#123c28" : "#fff", fontWeight: "bold" }}>
                       {popup.active ? "АКТИВНО" : "НЕАКТИВНО"}
                     </span>
                     <strong style={{ fontSize: "16px" }}>{popup.title}</strong>
                   </div>
-                  <div style={{ fontSize: "14px", color: "#666", marginBottom: "8px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <div className="popup-admin-body">
                     {popup.body}
                   </div>
-                  <div style={{ fontSize: "12px", color: "#888", display: "flex", gap: "16px" }}>
+                  <div className="popup-admin-meta">
                     <span>Кнопка: {popup.buttonText || "нет"}</span>
                     <span>Порядок: {popup.sort}</span>
                   </div>
                 </div>
 
-                <div style={{ display: "flex", flexDirection: "column", gap: "8px", minWidth: "140px" }}>
+                <div className="popup-admin-actions">
                   <button className="ghost-button" style={{ minHeight: "32px", fontSize: "13px" }} onClick={() => toggleActive(popup)}>
                     {popup.active ? "Деактивировать" : "Активировать"}
                   </button>

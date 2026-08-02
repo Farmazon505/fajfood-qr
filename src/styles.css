@@ -1047,6 +1047,8 @@ select:focus {
   min-height: 100vh;
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
+  width: 100%;
+  max-width: 100%;
   background: #f8f0ef;
 }
 
@@ -1135,6 +1137,7 @@ select:focus {
 
 .admin-content {
   padding: 26px;
+  width: 100%;
   min-width: 0;
   max-width: 100%;
 }
@@ -2444,6 +2447,7 @@ button:disabled {
 .employee-checklist-review,
 .employee-history-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -2599,6 +2603,9 @@ button:disabled {
 }
 
 .employee-shift-control {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   border: 1px solid #d9d0c4;
   border-radius: 12px;
@@ -2668,6 +2675,9 @@ button:disabled {
 }
 
 .employee-checklist-item {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid #ded6c8;
   border-left-width: 5px;
   border-radius: 10px;
@@ -2688,6 +2698,8 @@ button:disabled {
   margin: 10px 0 0 46px;
   color: #5e685f;
   line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .employee-checklist-item-heading {
@@ -2700,6 +2712,14 @@ button:disabled {
 .employee-checklist-item-heading strong,
 .employee-checklist-item-heading small {
   display: block;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.employee-checklist-item-heading > div,
+.employee-item-review-form > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .employee-checklist-item-heading small {
@@ -2735,6 +2755,83 @@ button:disabled {
   margin: 16px 0 0 46px;
   border-top: 1px solid #eee6dc;
   padding-top: 14px;
+}
+
+.feedback-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 24px;
+}
+
+.popup-admin-row {
+  min-width: 0;
+  display: flex;
+  gap: 16px;
+  border: 1px solid #ded6c8;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.popup-admin-thumbnail {
+  width: 120px;
+  height: 80px;
+  display: block;
+  flex: 0 0 120px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.popup-admin-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #eee;
+}
+
+.popup-admin-content {
+  min-width: 0;
+  flex: 1;
+}
+
+.popup-admin-heading,
+.popup-admin-meta {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.popup-admin-heading {
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.popup-admin-heading strong,
+.popup-admin-body,
+.popup-admin-meta {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.popup-admin-body {
+  margin-bottom: 8px;
+  overflow: hidden;
+  color: #666;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popup-admin-meta {
+  gap: 8px 16px;
+  color: #888;
+  font-size: 12px;
+}
+
+.popup-admin-actions {
+  min-width: 140px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .employee-review-comment textarea {
@@ -2844,6 +2941,15 @@ button:disabled {
 @media (max-width: 1040px) {
   .admin-shell {
     grid-template-columns: 1fr;
+    overflow-x: clip;
+  }
+
+  .admin-content {
+    --admin-inline-start: max(26px, env(safe-area-inset-left));
+    --admin-inline-end: max(26px, env(safe-area-inset-right));
+    padding-right: var(--admin-inline-end);
+    padding-left: var(--admin-inline-start);
+    overflow-x: clip;
   }
 
   .admin-sidebar {
@@ -2909,11 +3015,16 @@ button:disabled {
     justify-content: space-between;
     gap: 12px;
     min-height: 64px;
-    margin: -26px -26px 22px;
+    margin:
+      -26px
+      calc(-1 * var(--admin-inline-end))
+      22px
+      calc(-1 * var(--admin-inline-start));
     padding:
       calc(10px + env(safe-area-inset-top))
-      26px
-      10px;
+      var(--admin-inline-end)
+      10px
+      var(--admin-inline-start);
     color: #fffdfa;
     background: color-mix(in srgb, var(--brand-bg) 94%, transparent);
     box-shadow: 0 8px 26px rgba(31, 25, 30, 0.14);
@@ -3031,15 +3142,37 @@ button:disabled {
   }
 
   .admin-content {
-    padding: 14px 12px calc(24px + env(safe-area-inset-bottom));
+    --admin-inline-start: max(12px, env(safe-area-inset-left));
+    --admin-inline-end: max(12px, env(safe-area-inset-right));
+    padding:
+      14px
+      var(--admin-inline-end)
+      calc(24px + env(safe-area-inset-bottom))
+      var(--admin-inline-start);
   }
 
   .admin-mobile-bar {
-    margin: -14px -12px 18px;
+    margin:
+      -14px
+      calc(-1 * var(--admin-inline-end))
+      18px
+      calc(-1 * var(--admin-inline-start));
     padding:
       calc(8px + env(safe-area-inset-top))
-      12px
-      8px;
+      var(--admin-inline-end)
+      8px
+      var(--admin-inline-start);
+  }
+
+  .admin-content :where(section, article, div, form, fieldset, label),
+  .admin-content :where(button, input, textarea, select) {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .admin-content :where(h1, h2, h3, h4, p, strong, small, span, label, button) {
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   .admin-header h1 {
@@ -3123,9 +3256,11 @@ button:disabled {
   .status-actions > button,
   .button-row > button,
   .button-row > a,
+  .button-row > label,
   .admin-header > button {
     width: 100%;
     justify-content: center;
+    white-space: normal;
   }
 
   .role-tabs,
@@ -3222,6 +3357,36 @@ button:disabled {
     margin-left: 0;
   }
 
+  .popup-admin-row {
+    flex-direction: column;
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .popup-admin-thumbnail {
+    width: 100%;
+    height: min(180px, 46vw);
+    flex-basis: auto;
+  }
+
+  .popup-admin-body {
+    white-space: normal;
+  }
+
+  .popup-admin-actions {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .popup-admin-actions > button {
+    width: 100%;
+  }
+
+  .feedback-metrics {
+    grid-template-columns: 1fr;
+  }
+
   .employee-history-list article {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3247,6 +3412,23 @@ button:disabled {
   .action-grid--home .call-action {
     min-height: 148px;
     padding: 11px;
+  }
+
+  .star-score-control {
+    width: 100%;
+    justify-content: space-between;
+    gap: 0;
+  }
+
+  .star-score-control button {
+    width: 32px;
+    min-width: 32px;
+    flex: 0 1 32px;
+  }
+
+  .star-score-control strong {
+    min-width: 22px;
+    margin-left: 2px;
   }
 }
 
@@ -3350,11 +3532,57 @@ button:disabled {
   grid-template-columns: 350px 1fr;
   gap: 24px;
   align-items: start;
+  min-width: 0;
+  max-width: 100%;
 }
 
 @media (max-width: 900px) {
   .table-tent-designer {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.designer-controls,
+.designer-controls .admin-card,
+.designer-controls .admin-card-body,
+.designer-controls .form-group {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.designer-upload-actions,
+.designer-color-grid,
+.designer-print-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.designer-color-grid {
+  gap: 20px;
+}
+
+.designer-color-grid > div,
+.designer-print-actions > button {
+  min-width: 0;
+  flex: 1;
+}
+
+.designer-print-actions {
+  margin-top: 10px;
+}
+
+@media (max-width: 680px) {
+  .designer-upload-actions,
+  .designer-color-grid,
+  .designer-print-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .designer-upload-actions > button,
+  .designer-print-actions > button {
+    width: 100%;
+    white-space: normal;
   }
 }
 
