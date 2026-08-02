@@ -56,7 +56,24 @@ test("Telegram manages a shift and keeps one live message per table", async () =
     });
     await telegram.processEscalations();
     assert.equal(store.findShiftTask(personalTask.id)?.notified, true);
-    assert.ok(requests.some((request) => request.method === "sendMessage" && String(request.payload.text).includes("Персональное задание")));
+    const taskNotification = requests.find(
+      (request) => request.method === "sendMessage" && String(request.payload.text).includes("Персональное задание")
+    );
+    assert.ok(taskNotification);
+    assert.match(JSON.stringify(taskNotification.payload.reply_markup), new RegExp(`task:complete:${personalTask.id}`));
+
+    await telegram.handleUpdate({
+      update_id: 0,
+      callback_query: {
+        id: "complete-personal-task",
+        data: `task:complete:${personalTask.id}`,
+        message: { message_id: 701, chat: { id: "10001" } }
+      }
+    });
+    assert.ok(store.findShiftTask(personalTask.id)?.completedAt);
+    const completedTaskMessage = requests.filter((request) => request.method === "editMessageText").at(-1);
+    assert.match(String(completedTaskMessage?.payload.text), /Задание выполнено/);
+    assert.deepEqual(completedTaskMessage?.payload.reply_markup, { inline_keyboard: [] });
 
     await telegram.handleUpdate({
       update_id: 1,

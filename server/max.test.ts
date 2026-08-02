@@ -114,6 +114,67 @@ test("MAX delivers a call and handles accept and done callbacks", async () => {
   }
 });
 
+test("MAX lets an employee complete a personal dated task from its notification", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-max-task-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const waiter = store.snapshot().waiters[0];
+    await store.replaceWaiters([{
+      ...waiter,
+      telegramChatId: "",
+      maxUserId: "30003"
+    }]);
+    const task = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date: "2026-08-02",
+      title: "Проверить выполнение задания в MAX",
+      description: "Кнопка должна закрыть задание без открытой смены",
+      requiredForCalls: false,
+      countsForRating: true
+    });
+
+    const requests: Array<{ method: string; endpoint: string; options: Record<string, unknown> }> = [];
+    const max = new MaxService(store, "test-token");
+    (max as unknown as { request: (method: string, endpoint: string, options: Record<string, unknown>) => Promise<unknown> }).request =
+      async (method, endpoint, options = {}) => {
+        requests.push({ method, endpoint, options });
+        if (method === "POST" && endpoint === "messages") {
+          return {
+            message: {
+              recipient: { chat_id: null, chat_type: "dialog" },
+              body: { mid: "max-task-message", text: "" }
+            }
+          };
+        }
+        return { success: true };
+      };
+
+    assert.equal(await max.notifyShiftTask(task), true);
+    const notification = requests.find((request) => request.endpoint === "messages");
+    assert.match(JSON.stringify(notification?.options.body), new RegExp(`task:complete:${task.id}`));
+
+    await max.handleUpdate({
+      update_type: "message_callback",
+      timestamp: Date.now(),
+      callback: {
+        callback_id: "complete-task",
+        payload: `task:complete:${task.id}`,
+        user: { user_id: 30003 }
+      }
+    });
+
+    assert.ok(store.findShiftTask(task.id)?.completedAt);
+    const completed = requests.filter((request) => request.endpoint === "answers").at(-1);
+    const completedBody = JSON.stringify(completed?.options.body);
+    assert.match(completedBody, /Задание выполнено/);
+    assert.doesNotMatch(completedBody, new RegExp(`task:complete:${task.id}`));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("MAX manages a shift and shows the full checklist item text", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-max-shift-"));
   try {

@@ -40,6 +40,11 @@ export type ChecklistCompletionResult =
   | { status: "cooldown"; shift: WaiterShift; retryAfterSeconds: number }
   | { status: "not_found"; shift: null };
 
+export type ShiftTaskCompletionResult =
+  | { status: "completed"; task: ShiftTask }
+  | { status: "already_completed"; task: ShiftTask }
+  | { status: "not_found"; task: null };
+
 export type SupervisorShiftEndResult =
   | { status: "ended"; shift: WaiterShift }
   | { status: "not_found" }
@@ -759,6 +764,7 @@ export class Store {
       requiredForCalls: task.requiredForCalls ?? false,
       countsForRating: task.countsForRating ?? true,
       notified: task.notified ?? false,
+      completedAt: task.completedAt ?? null,
       createdAt: task.createdAt ?? now(),
       carriedFromTaskId: task.carriedFromTaskId ?? null,
       rolloverProcessedAt: task.rolloverProcessedAt ?? null,
@@ -1033,6 +1039,7 @@ export class Store {
     // Добавляем задания на смену для текущей даты
     const todayTasks = this.data.shiftTasks
       .filter((task) => {
+        if (task.completedAt) return false;
         if (task.date !== dateKey) return false;
         if (task.waiterId !== null) return task.waiterId === waiter.id;
         return task.roleId === role.id;
@@ -1118,6 +1125,13 @@ export class Store {
 
     const timestamp = completedAt.toISOString();
     item.completedAt = timestamp;
+    if (item.itemId.startsWith("task-")) {
+      const taskId = item.itemId.slice("task-".length);
+      const task = this.data.shiftTasks.find(
+        (entry) => entry.id === taskId && entry.waiterId === waiterId
+      );
+      if (task && !task.completedAt) task.completedAt = timestamp;
+    }
     const requiredComplete = shift.checklist.every((entry) => !entry.requiredForCalls || entry.completedAt);
     if (requiredComplete && shift.status === "checklist") {
       shift.status = "active";
@@ -1642,6 +1656,7 @@ export class Store {
   // ─── ShiftTask methods ───────────────────────────────────────────────
 
   private appendShiftTaskToActiveShifts(task: ShiftTask) {
+    if (task.completedAt) return;
     for (const shift of this.data.shifts) {
       if (shift.status === "ended" || shift.morningGreetingDate !== task.date) continue;
       if (task.waiterId ? shift.waiterId !== task.waiterId : shift.roleId !== task.roleId) continue;
@@ -1680,11 +1695,12 @@ export class Store {
     return task ? structuredClone(task) : null;
   }
 
-  async addShiftTask(task: Omit<ShiftTask, "id" | "notified" | "createdAt">): Promise<ShiftTask> {
+  async addShiftTask(task: Omit<ShiftTask, "id" | "notified" | "completedAt" | "createdAt">): Promise<ShiftTask> {
     const newTask: ShiftTask = {
       ...task,
       id: randomUUID(),
       notified: false,
+      completedAt: null,
       createdAt: now(),
       carriedFromTaskId: task.carriedFromTaskId ?? null,
       rolloverProcessedAt: task.rolloverProcessedAt ?? null,
@@ -1695,6 +1711,41 @@ export class Store {
 
     await this.persist();
     return structuredClone(newTask);
+  }
+
+  async completeShiftTask(
+    taskId: string,
+    waiterId: string,
+    completedAt = new Date()
+  ): Promise<ShiftTaskCompletionResult> {
+    const task = this.data.shiftTasks.find(
+      (entry) => entry.id === taskId && entry.waiterId === waiterId
+    );
+    if (!task) return { status: "not_found", task: null };
+    if (task.completedAt) return { status: "already_completed", task: structuredClone(task) };
+
+    const timestamp = completedAt.toISOString();
+    task.completedAt = timestamp;
+    const itemId = `task-${task.id}`;
+    for (const shift of this.data.shifts) {
+      if (shift.waiterId !== waiterId || shift.morningGreetingDate !== task.date) continue;
+      const item = shift.checklist.find((entry) => entry.itemId === itemId);
+      if (!item || item.completedAt) continue;
+      item.completedAt = timestamp;
+      if (shift.status !== "ended") {
+        const requiredComplete = shift.checklist.every(
+          (entry) => !entry.requiredForCalls || entry.completedAt
+        );
+        if (requiredComplete && shift.status === "checklist") {
+          shift.status = "active";
+          shift.readyAt = timestamp;
+        }
+      }
+      shift.score = calculateShiftScore(shift);
+    }
+
+    await this.persist();
+    return { status: "completed", task: structuredClone(task) };
   }
 
   async rolloverIncompleteShiftTasks(targetDate: string, processedAt = new Date()): Promise<ShiftTask[]> {
@@ -1717,7 +1768,7 @@ export class Store {
         const member = this.data.waiters.find(
           (waiter) => waiter.id === source.waiterId && waiter.active && waiter.roleId === source.roleId
         );
-        const completed = this.data.shifts.some(
+        const completed = Boolean(source.completedAt) || this.data.shifts.some(
           (shift) => shift.waiterId === source.waiterId
             && shift.morningGreetingDate === source.date
             && shift.checklist.some((item) => item.itemId === itemId && item.completedAt)
@@ -1764,6 +1815,7 @@ export class Store {
           requiredForCalls: source.requiredForCalls,
           countsForRating: source.countsForRating,
           notified: false,
+          completedAt: null,
           createdAt: timestamp,
           carriedFromTaskId: source.id,
           rolloverProcessedAt: null,
@@ -1803,7 +1855,7 @@ export class Store {
   getShiftTasksForNotification(dateKey: string): ShiftTask[] {
     return structuredClone(
       this.data.shiftTasks.filter(
-        (task) => task.date === dateKey && task.waiterId !== null && !task.notified
+        (task) => task.date === dateKey && task.waiterId !== null && !task.notified && !task.completedAt
       )
     );
   }

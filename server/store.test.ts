@@ -320,9 +320,12 @@ test("a task scheduled for today is appended to an already running shift", async
     assert.equal(updated.status, "checklist");
     assert.ok(updated.checklist.some((item) => item.itemId === `task-${task.id}`));
 
-    const taskIndex = updated.checklist.findIndex((item) => item.itemId === `task-${task.id}`);
-    await completeChecklistItems(store, updated, waiter.id, [taskIndex]);
+    const completed = await store.completeShiftTask(task.id, waiter.id);
+    assert.equal(completed.status, "completed");
     assert.equal(store.currentShiftForWaiter(waiter.id)?.status, "active");
+    assert.ok(store.currentShiftForWaiter(waiter.id)?.checklist.find(
+      (item) => item.itemId === `task-${task.id}`
+    )?.completedAt);
   });
 });
 
@@ -395,10 +398,48 @@ test("a completed dated task is not carried forward", async () => {
       new Date(new Date(started.shift.startedAt).getTime() + CHECKLIST_ITEM_COOLDOWN_MS)
     );
     assert.equal(completed.status, "completed");
+    assert.ok(store.findShiftTask(task.id)?.completedAt);
 
     const carried = await store.rolloverIncompleteShiftTasks(nextDate);
     assert.equal(carried.length, 0);
     assert.equal(store.listShiftTasks().length, 1);
+    assert.ok(store.findShiftTask(task.id)?.rolloverProcessedAt);
+  });
+});
+
+test("a personal dated task can be completed without a shift and is not carried forward", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const task = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date: "2026-01-10",
+      title: "Отметить персональное задание в боте",
+      description: "Смена для выполнения не требуется",
+      requiredForCalls: false,
+      countsForRating: true
+    });
+
+    const denied = await store.completeShiftTask(task.id, "another-employee");
+    assert.equal(denied.status, "not_found");
+
+    const completed = await store.completeShiftTask(
+      task.id,
+      waiter.id,
+      new Date("2026-01-10T12:00:00+04:00")
+    );
+    assert.equal(completed.status, "completed");
+    assert.ok(completed.task.completedAt);
+    assert.equal(store.getShiftTasksForNotification(task.date).length, 0);
+
+    const repeated = await store.completeShiftTask(task.id, waiter.id);
+    assert.equal(repeated.status, "already_completed");
+
+    const carried = await store.rolloverIncompleteShiftTasks(
+      "2026-01-11",
+      new Date("2026-01-11T00:01:00+04:00")
+    );
+    assert.equal(carried.length, 0);
     assert.ok(store.findShiftTask(task.id)?.rolloverProcessedAt);
   });
 });

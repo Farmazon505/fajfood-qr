@@ -102,6 +102,7 @@ export type ShiftTask = {
   requiredForCalls: boolean;
   countsForRating: boolean;
   notified: boolean;       // уже отправлено персональное уведомление
+  completedAt: string | null;
   createdAt: string;
   carriedFromTaskId?: string | null;
   rolloverProcessedAt?: string | null;

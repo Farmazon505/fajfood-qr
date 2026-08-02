@@ -2749,7 +2749,11 @@ function ChecklistEditor({
                   </div>
                   <div>
                     <strong>{waiter?.name || "Вся должность"}</strong>
-                    <span>{task.waiterId ? (task.notified ? "Уведомление отправлено" : "Ожидает даты отправки") : "При начале смены"}</span>
+                    <span>{task.completedAt
+                      ? `Выполнено ${formatDate(task.completedAt)}`
+                      : task.waiterId
+                        ? (task.notified ? "Уведомление отправлено" : "Ожидает даты отправки")
+                        : "При начале смены"}</span>
                   </div>
                   <div className="task-badges">
                     {task.carriedFromTaskId && <span className="rollover-badge">Перенесено</span>}

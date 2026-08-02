@@ -14,7 +14,7 @@ import type {
   Waiter,
   WaiterShift
 } from "./types";
-import { shiftChecklistText, shiftStartedText } from "./shift-messages";
+import { shiftChecklistText, shiftStartedText, shiftTaskText } from "./shift-messages";
 
 type MaxUser = {
   user_id: number;
@@ -216,6 +216,10 @@ export class MaxService {
       await this.handleChecklistCallback(callbackId, userId, payload);
       return;
     }
+    if (payload.startsWith("task:complete:")) {
+      await this.handleShiftTaskCallback(callbackId, userId, payload);
+      return;
+    }
     if (payload.startsWith("call:")) {
       await this.handleCallCallback(callbackId, userId, payload);
     }
@@ -271,18 +275,20 @@ export class MaxService {
     const waiter = this.store.findWaiterById(task.waiterId);
     const userId = waiter?.maxUserId?.trim();
     if (!userId) return false;
-    const roleLabel = this.store.findRole(task.roleId)?.name || "Должность";
-    const requiredLabel = task.requiredForCalls ? " (обязательное для допуска)" : "";
-    const sent = await this.sendMessage(userId, {
-      text: [
-        `🗓 Задание на смену ${task.date}`,
-        "",
-        `Должность: ${roleLabel}`,
-        `Задание: ${task.title}${requiredLabel}`,
-        task.description ? `Пояснение: ${task.description}` : ""
-      ].filter(Boolean).join("\n")
-    });
+    const sent = await this.sendMessage(userId, this.shiftTaskBody(task));
     return Boolean(sent);
+  }
+
+  private shiftTaskBody(task: ShiftTask): MaxMessageBody {
+    const roleLabel = this.store.findRole(task.roleId)?.name || "Должность";
+    return {
+      text: shiftTaskText(task, roleLabel),
+      attachments: task.completedAt
+        ? []
+        : this.keyboard([[
+            this.callbackButton("✅ Отметить выполненным", `task:complete:${task.id}`, "positive")
+          ]])
+    };
   }
 
   async closeCallMessages(call: ServiceCall) {
@@ -541,6 +547,34 @@ export class MaxService {
     const shift = result.shift;
     await this.answerCallback(callbackId, "Отмечено", this.checklistBody(shift));
     if (before?.status !== "active" && shift.status === "active") {
+      await this.sendMessage(String(userId), {
+        text: "Все обязательные пункты выполнены. Чек-лист смены завершен.",
+        attachments: this.menuKeyboard(true)
+      });
+      if (shift.roleKind === "waiter") await this.deliverPendingCalls(waiter.id);
+    }
+  }
+
+  private async handleShiftTaskCallback(callbackId: string, userId: number, data: string) {
+    const waiter = await this.requireWaiter(userId, callbackId);
+    if (!waiter) return;
+
+    const taskId = data.slice("task:complete:".length);
+    const before = this.store.currentShiftForWaiter(waiter.id);
+    const result = await this.store.completeShiftTask(taskId, waiter.id);
+    if (result.status === "not_found") {
+      await this.answerCallback(callbackId, "Задание не найдено или назначено другому сотруднику");
+      return;
+    }
+
+    await this.answerCallback(
+      callbackId,
+      result.status === "completed" ? "Задание выполнено" : "Задание уже отмечено",
+      this.shiftTaskBody(result.task)
+    );
+
+    const shift = this.store.currentShiftForWaiter(waiter.id);
+    if (before?.status !== "active" && shift?.status === "active") {
       await this.sendMessage(String(userId), {
         text: "Все обязательные пункты выполнены. Чек-лист смены завершен.",
         attachments: this.menuKeyboard(true)

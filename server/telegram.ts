@@ -11,7 +11,7 @@ import type {
 import { config, publicBaseUrl } from "./config";
 import type { CrmStaffReservation } from "./crm-reservations";
 import { generatePerformanceInsights } from "./performance-ai";
-import { shiftChecklistText, shiftStartedText } from "./shift-messages";
+import { shiftChecklistText, shiftStartedText, shiftTaskText } from "./shift-messages";
 
 type TelegramResponse<T> = {
   ok: boolean;
@@ -280,6 +280,11 @@ export class TelegramService {
       return;
     }
 
+    if (query.data.startsWith("task:complete:")) {
+      await this.handleShiftTaskCallback(query.id, query.message, query.data);
+      return;
+    }
+
     if (query.data.startsWith("call:")) {
       await this.handleCallCallback(query.id, query.message, query.data);
     }
@@ -516,6 +521,37 @@ export class TelegramService {
     });
 
     if (before?.status !== "active" && shift.status === "active") {
+      await this.sendText(message.chat.id, "Все обязательные пункты выполнены. Чек-лист смены завершен.");
+      if (shift.roleKind === "waiter") await this.deliverPendingCalls(waiter.id);
+    }
+  }
+
+  private async handleShiftTaskCallback(callbackId: string, message: TelegramMessage, data: string) {
+    const waiter = await this.requireWaiter(message.chat.id, callbackId);
+    if (!waiter) return;
+
+    const taskId = data.slice("task:complete:".length);
+    const before = this.store.currentShiftForWaiter(waiter.id);
+    const result = await this.store.completeShiftTask(taskId, waiter.id);
+    if (result.status === "not_found") {
+      await this.answerCallback(callbackId, "Задание не найдено или назначено другому сотруднику", true);
+      return;
+    }
+
+    const roleLabel = this.store.findRole(result.task.roleId)?.name || "Должность";
+    await this.answerCallback(
+      callbackId,
+      result.status === "completed" ? "Задание выполнено" : "Задание уже отмечено"
+    );
+    await this.request("editMessageText", {
+      chat_id: message.chat.id,
+      message_id: message.message_id,
+      text: shiftTaskText(result.task, roleLabel),
+      reply_markup: { inline_keyboard: [] }
+    });
+
+    const shift = this.store.currentShiftForWaiter(waiter.id);
+    if (before?.status !== "active" && shift?.status === "active") {
       await this.sendText(message.chat.id, "Все обязательные пункты выполнены. Чек-лист смены завершен.");
       if (shift.roleKind === "waiter") await this.deliverPendingCalls(waiter.id);
     }
@@ -938,19 +974,16 @@ export class TelegramService {
     if (!waiter?.telegramChatId?.trim()) return false;
 
     const roleLabel = this.store.findRole(task.roleId)?.name || "Должность";
-    const requiredLabel = task.requiredForCalls ? " (обязательное для допуска)" : "";
-    const lines = [
-      `🗓 Задание на смену ${task.date}`,
-      "",
-      `Должность: ${roleLabel}`,
-      `Задание: ${task.title}${requiredLabel}`,
-      task.description ? `Пояснение: ${task.description}` : ""
-    ].filter(Boolean).join("\n");
 
     const sent = await this.request<TelegramMessage>("sendMessage", {
       chat_id: waiter.telegramChatId.trim(),
-      text: lines,
-      reply_markup: menuKeyboard
+      text: shiftTaskText(task, roleLabel),
+      reply_markup: {
+        inline_keyboard: [[{
+          text: "✅ Отметить выполненным",
+          callback_data: `task:complete:${task.id}`
+        }]]
+      }
     });
     return Boolean(sent);
   }

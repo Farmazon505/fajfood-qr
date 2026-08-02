@@ -1,4 +1,17 @@
-import type { WaiterShift } from "./types";
+import type { ShiftTask, WaiterShift } from "./types";
+
+export const shiftTaskText = (task: ShiftTask, roleLabel: string) => {
+  const requiredLabel = task.requiredForCalls ? " (обязательное для допуска)" : "";
+  return [
+    `🗓 Задание на смену ${task.date}`,
+    "",
+    `Должность: ${roleLabel}`,
+    `Задание: ${task.title}${requiredLabel}`,
+    task.description ? `Пояснение: ${task.description}` : "",
+    task.completedAt ? "" : "Нажмите кнопку ниже после выполнения.",
+    task.completedAt ? "✅ Задание выполнено" : ""
+  ].filter(Boolean).join("\n");
+};
 
 export const shiftChecklistText = (shift: WaiterShift) => {
   const required = shift.checklist.filter((item) => item.requiredForCalls);
