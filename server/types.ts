@@ -362,6 +362,7 @@ export type PopupNotification = {
 };
 
 export type AppData = {
+  analyticsStartedAt: string;
   settings: VenueSettings;
   ownerNotifications: OwnerNotificationSettings;
   offers: Offer[];

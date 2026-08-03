@@ -2123,8 +2123,14 @@ function Dashboard({
   monthAgoDate.setDate(monthAgoDate.getDate() - 29);
   const [dateFrom, setDateFrom] = useState(localDateKey(monthAgoDate));
   const [dateTo, setDateTo] = useState(today);
+  const analyticsStartedAt = new Date(data.analyticsStartedAt || 0);
+  const analyticsStartedAtMs = analyticsStartedAt.getTime();
   const inPeriod = (value: string) => {
-    const key = localDateKey(new Date(value));
+    const date = new Date(value);
+    const timestamp = date.getTime();
+    if (!Number.isFinite(timestamp)) return false;
+    if (Number.isFinite(analyticsStartedAtMs) && timestamp < analyticsStartedAtMs) return false;
+    const key = localDateKey(date);
     return (!dateFrom || key >= dateFrom) && (!dateTo || key <= dateTo);
   };
   const calls = data.calls.filter((call) => inPeriod(call.createdAt));
@@ -2154,7 +2160,15 @@ function Dashboard({
   return (
     <div className="dashboard-layout">
       <section className="admin-panel dashboard-period-filter">
-        <div><strong>Период отчёта</strong><span>Все показатели ниже рассчитаны только за выбранные даты.</span></div>
+        <div>
+          <strong>Период отчёта</strong>
+          <span>
+            Все показатели ниже рассчитаны только за выбранные даты
+            {Number.isFinite(analyticsStartedAtMs) && analyticsStartedAtMs > 0
+              ? ` и учитывают новую статистику с ${analyticsStartedAt.toLocaleDateString("ru-RU")}.`
+              : "."}
+          </span>
+        </div>
         <label className="field"><span>С</span><input type="date" value={dateFrom} max={dateTo || undefined} onChange={(event) => setDateFrom(event.target.value)} /></label>
         <label className="field"><span>По</span><input type="date" value={dateTo} min={dateFrom || undefined} onChange={(event) => setDateTo(event.target.value)} /></label>
       </section>
