@@ -8,7 +8,7 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:web": "vite --host 0.0.0.0 --port 5175 --strictPort",
     "build": "tsc --noEmit && vite build",
-    "test": "node --import tsx --test server/ai-proxy.test.ts server/auth.test.ts server/crm-reservations.test.ts server/legal.test.ts server/max.test.ts server/messaging.test.ts server/staff-auth.test.ts server/staff-reservation-access.test.ts server/store.test.ts server/telegram.test.ts server/web-push.test.ts",
+    "test": "node --import tsx --test server/admin-swipe.test.ts server/ai-proxy.test.ts server/auth.test.ts server/crm-reservations.test.ts server/legal.test.ts server/max.test.ts server/messaging.test.ts server/staff-auth.test.ts server/staff-reservation-access.test.ts server/store.test.ts server/telegram.test.ts server/web-push.test.ts",
     "start": "node --import tsx server/index.ts",
     "preview": "vite preview --host 0.0.0.0"
   },

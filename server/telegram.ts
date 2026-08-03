@@ -174,7 +174,12 @@ export class TelegramService {
           continue;
         }
 
-        const adminCall = await this.store.startAdminEscalation(dueCall.id, reason, new Date(at));
+        const adminCall = await this.store.startAdminEscalation(
+          dueCall.id,
+          reason,
+          admins.map((admin) => admin.id),
+          new Date(at)
+        );
         if (!adminCall) continue;
         const refs = await this.notifyCall({
           call: adminCall,

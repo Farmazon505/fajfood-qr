@@ -61,6 +61,16 @@ const max = new MaxService(store);
 const messaging = new MessagingService(store, telegram, max, ownerWebPush);
 const reservationMonitor = new ReservationMonitor(store, telegram, crmReservations);
 
+async function refreshOffersFromCrm() {
+  if (!crmLoyalty.configured()) return;
+  try {
+    const offers = await crmLoyalty.getOffers();
+    await store.replaceOffers(offers);
+  } catch (error) {
+    console.error("[CRM] Не удалось обновить акции, сохранена локальная копия", error);
+  }
+}
+
 const app = express();
 app.disable("x-powered-by");
 if (config.TRUST_PROXY === "true") app.set("trust proxy", 1);
@@ -403,6 +413,8 @@ app.post("/api/public/calls", publicLimiter, async (request, response) => {
     comment: parsed.data.comment,
     guestName: parsed.data.guestName,
     assignedWaiterId: waiters.length === 1 ? waiters[0].id : null,
+    waiterRecipientIds: waiters.map((waiter) => waiter.id),
+    adminRecipientIds: admins.map((admin) => admin.id),
     routingStage,
     routingReason: fallbackReason
   });
@@ -471,7 +483,7 @@ app.post("/api/public/loyalty", publicLimiter, loyaltyLimiter, async (request, r
 
   const table = parsed.data.tableSlug ? store.findTableBySlug(parsed.data.tableSlug) : null;
   const existingLead = store.findLoyaltyLeadByPhone(phone);
-  if (existingLead?.crmUserId && existingLead.accessTokenHash) {
+  if (existingLead?.crmUserId && existingLead.phoneVerifiedAt && existingLead.accessTokenHash) {
     response.status(409).json({
       error: "Этот номер уже зарегистрирован. Для переноса карты на другой телефон обратитесь к администратору."
     });
@@ -516,9 +528,25 @@ app.post("/api/public/loyalty", publicLimiter, loyaltyLimiter, async (request, r
   }
 
   try {
-    const verification = await crmLoyalty.startVerification(phone);
+    const verification = await crmLoyalty.startVerification({
+      sourceRegistrationId: lead.id,
+      name: lead.name,
+      phone: lead.phone,
+      birthday: lead.birthday || undefined,
+      personalDataConsent: {
+        accepted: true,
+        acceptedAt: lead.personalDataConsentAcceptedAt,
+        documentVersion: lead.personalDataConsentVersion,
+        documentUrl: `${publicBaseUrl()}${PERSONAL_DATA_CONSENT_PATH}`,
+        documentHash: lead.personalDataConsentHash,
+      },
+      marketingConsent: lead.marketingConsent,
+      ipAddress: lead.consentIpAddress,
+      userAgent: lead.consentUserAgent,
+    });
 
     await store.updateLoyaltyLead(lead.id, {
+      crmUserId: verification.pendingUserId,
       verificationId: verification.verificationId,
       verificationExpiresAt: verification.expiresAt,
       syncError: ""
@@ -976,7 +1004,29 @@ app.put("/api/admin/settings", async (request, response) => {
 });
 
 app.put("/api/admin/offers", async (request, response) => {
-  response.json(await store.replaceOffers(Array.isArray(request.body) ? request.body : []));
+  const offers = (Array.isArray(request.body) ? request.body : []).map((offer) => ({
+    ...offer,
+    id: String(offer?.id || randomUUID())
+  }));
+  try {
+    const synchronized = await crmLoyalty.replaceOffers(offers);
+    response.json(await store.replaceOffers(synchronized));
+  } catch (error) {
+    response.status(502).json({
+      error: error instanceof Error ? error.message : "Не удалось сохранить акции в CRM"
+    });
+  }
+});
+
+app.post("/api/admin/offers/sync", async (_request, response) => {
+  try {
+    const offers = await crmLoyalty.getOffers();
+    response.json(await store.replaceOffers(offers));
+  } catch (error) {
+    response.status(502).json({
+      error: error instanceof Error ? error.message : "Не удалось получить акции из CRM"
+    });
+  }
 });
 
 app.get("/api/admin/popups", (_request, response) => {
@@ -1330,4 +1380,6 @@ app.listen(config.PORT, config.HOST, () => {
   console.log(`Admin accounts: ${getAdminAccountSummary().username}, ${config.OWNER_USERNAME}`);
   messaging.start();
   reservationMonitor.start();
+  void refreshOffersFromCrm();
+  setInterval(() => void refreshOffersFromCrm(), 5 * 60 * 1000).unref();
 });

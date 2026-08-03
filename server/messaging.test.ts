@@ -105,6 +105,7 @@ test("messaging routes timed-out calls through online admin and persists owner C
     const adminCall = store.findCallById(unanswered.id);
     assert.equal(adminCall?.routingStage, "admin");
     assert.match(adminCall?.routingReason || "", /не принял вызов в течение 1 минуты/);
+    assert.deepEqual(adminCall?.missedByStaff.map((event) => [event.staffId, event.role]), [[waiter.id, "waiter"]]);
 
     await store.acknowledgeEscalation(unanswered.id, "admin");
     await messaging.processEscalations(
@@ -136,6 +137,9 @@ test("messaging routes timed-out calls through online admin and persists owner C
     assert.equal(ownerCall?.routingStage, "owner");
     assert.ok(ownerCall?.ownerEscalatedAt);
     assert.match(ownerCall?.routingReason || "", /не подтвердил вызов в течение 1 минуты/);
+    assert.deepEqual(ownerCall?.missedByStaff.map((event) => [event.staffId, event.role]), [[admin.id, "admin"]]);
+    assert.equal(store.waiterRatings().find((rating) => rating.waiterId === waiter.id)?.missedCallCount, 1);
+    assert.equal(store.waiterRatings().find((rating) => rating.waiterId === admin.id)?.missedCallCount, 1);
 
     await store.endWaiterShift(admin.id);
     const offline = await store.upsertCall({

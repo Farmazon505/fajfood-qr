@@ -162,6 +162,7 @@ export type WaiterRating = {
   completionRate: number;
   trend: number;
   shiftCount: number;
+  missedCallCount: number;
   rank: number;
 };
 
@@ -172,6 +173,7 @@ export type RolePerformanceSummary = {
   ratedShiftCount: number;
   averageStars: number;
   completionRate: number;
+  missedCallCount: number;
 };
 
 export type TaskPerformancePattern = {
@@ -208,10 +210,18 @@ export type EmployeePerformancePattern = {
 export type PerformanceAnalytics = {
   generatedAt: string;
   analyzedShiftCount: number;
+  totalMissedCalls: number;
   roleSummaries: RolePerformanceSummary[];
   taskPatterns: TaskPerformancePattern[];
   employeePatterns: EmployeePerformancePattern[];
   recommendations: string[];
+};
+
+export type MissedCallEvent = {
+  staffId: string;
+  role: "waiter" | "admin";
+  at: string;
+  cycleStartedAt: string;
 };
 
 export type EmployeePerformanceAdvice = {
@@ -280,6 +290,9 @@ export type ServiceCall = {
   adminWarningSentAt: string | null;
   ownerEscalatedAt: string | null;
   ownerAcknowledgedAt: string | null;
+  waiterRecipientIds: string[];
+  adminRecipientIds: string[];
+  missedByStaff: MissedCallEvent[];
   pressCount: number;
   reasonCounts: CallReasonCount[];
   cycleStartedAt: string;

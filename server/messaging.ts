@@ -151,6 +151,16 @@ export class MessagingService {
           ? "Официант принял вызов, но не завершил его в течение 2 минут."
           : "Официант не принял вызов в течение 1 минуты.";
         const admins = this.store.activeAdminsForTable(table);
+        if (dueCall.status === "new") {
+          await this.store.recordMissedCallRecipients(
+            dueCall.id,
+            "waiter",
+            dueCall.waiterRecipientIds.length
+              ? dueCall.waiterRecipientIds
+              : dueCall.assignedWaiterId ? [dueCall.assignedWaiterId] : [],
+            new Date(at)
+          );
+        }
         if (!admins.length) {
           const ownerCall = await this.store.markOwnerEscalated(
             dueCall.id,
@@ -161,7 +171,12 @@ export class MessagingService {
           continue;
         }
 
-        const adminCall = await this.store.startAdminEscalation(dueCall.id, reason, new Date(at));
+        const adminCall = await this.store.startAdminEscalation(
+          dueCall.id,
+          reason,
+          admins.map((admin) => admin.id),
+          new Date(at)
+        );
         if (!adminCall) continue;
         const delivered = await this.notifyCall({
           call: adminCall,
@@ -180,6 +195,12 @@ export class MessagingService {
       }
 
       for (const dueCall of this.store.callsDueForOwnerEscalation(at)) {
+        await this.store.recordMissedCallRecipients(
+          dueCall.id,
+          "admin",
+          dueCall.adminRecipientIds,
+          new Date(at)
+        );
         const call = await this.store.markOwnerEscalated(
           dueCall.id,
           `${dueCall.routingReason} Администратор не подтвердил вызов в течение 1 минуты.`.trim(),

@@ -1,4 +1,5 @@
 import { config } from "./config";
+import type { Offer } from "./types";
 
 export type LoyaltyProfile = {
   userId: string;
@@ -27,12 +28,18 @@ type CrmResponse = {
 
 export type LoyaltyVerificationStart = {
   verificationId: string;
+  pendingUserId: string;
   expiresAt: string;
   channels: {
     telegram: { url: string } | null;
     max: { url: string } | null;
   };
 };
+
+export type LoyaltyVerificationStartRequest = Omit<
+  LoyaltyRegistrationRequest,
+  "verificationId" | "tableSlug"
+>;
 
 export type LoyaltyVerificationStatus = {
   id: string;
@@ -82,11 +89,26 @@ export class CrmLoyaltyService {
     return data.profile;
   }
 
-  async startVerification(phone: string) {
+  async startVerification(payload: LoyaltyVerificationStartRequest) {
     return this.request<LoyaltyVerificationStart>("/api/integrations/loyalty/verification/start", {
       method: "POST",
-      body: JSON.stringify({ phone }),
+      body: JSON.stringify(payload),
     });
+  }
+
+  async getOffers() {
+    const data = await this.request<{ offers: Offer[] }>("/api/integrations/qrnastol/promotions", {
+      method: "GET",
+    });
+    return data.offers;
+  }
+
+  async replaceOffers(offers: Offer[]) {
+    const data = await this.request<{ offers: Offer[] }>("/api/integrations/qrnastol/promotions", {
+      method: "PUT",
+      body: JSON.stringify(offers),
+    });
+    return data.offers;
   }
 
   async getVerification(verificationId: string) {

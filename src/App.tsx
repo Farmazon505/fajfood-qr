@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, FormEvent, ReactNode } from "react";
 import { TableTentDesigner } from "./TableTentDesigner";
+import { swipeAllowedTarget, swipeProgress, type SwipeStart } from "./admin-swipe";
 import {
   BellRing,
   ArrowDown,
@@ -1052,6 +1053,27 @@ function AdminPage() {
   const [error, setError] = useState("");
   const [saved, setSaved] = useState("");
   const checklistDirtyRef = useRef(false);
+  const contentRef = useRef<HTMLElement | null>(null);
+  const tabHistoryRef = useRef<string[]>(["dashboard"]);
+  const swipeStartRef = useRef<SwipeStart | null>(null);
+  const swipeActiveRef = useRef(false);
+
+  const selectAdminTab = useCallback((tabId: string, remember = true) => {
+    setActiveTab((current) => {
+      if (current === tabId) return current;
+      if (remember) tabHistoryRef.current.push(tabId);
+      return tabId;
+    });
+    setSaved("");
+    setSidebarOpen(false);
+  }, []);
+
+  const returnToPreviousTab = useCallback(() => {
+    if (tabHistoryRef.current.length <= 1) return;
+    tabHistoryRef.current.pop();
+    const previous = tabHistoryRef.current.at(-1) || "dashboard";
+    selectAdminTab(previous, false);
+  }, [selectAdminTab]);
 
   const authHeaders = useMemo(() => ({ authorization: `Bearer ${token}` }), [token]);
 
@@ -1106,6 +1128,62 @@ function AdminPage() {
     desktop.addEventListener("change", closeOnDesktop);
     return () => desktop.removeEventListener("change", closeOnDesktop);
   }, []);
+
+  useEffect(() => {
+    const panel = contentRef.current;
+    if (!panel) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (window.innerWidth > 1040 || sidebarOpen || tabHistoryRef.current.length <= 1 || !swipeAllowedTarget(event.target)) return;
+      if (event.clientX > Math.min(44, window.innerWidth * 0.12)) return;
+      swipeStartRef.current = { x: event.clientX, y: event.clientY, pointerId: event.pointerId };
+      swipeActiveRef.current = false;
+      panel.classList.remove("admin-content--snap");
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      const start = swipeStartRef.current;
+      if (!start || event.pointerId !== start.pointerId) return;
+      const progress = swipeProgress(start, event.clientX, event.clientY);
+      if (!swipeActiveRef.current && !progress.horizontal) return;
+      swipeActiveRef.current = true;
+      event.preventDefault();
+      panel.style.setProperty("--admin-swipe-x", `${Math.min(progress.dx, window.innerWidth)}px`);
+    };
+    const finish = (event: PointerEvent) => {
+      const start = swipeStartRef.current;
+      if (!start || event.pointerId !== start.pointerId) return;
+      const progress = swipeProgress(start, event.clientX, event.clientY);
+      swipeStartRef.current = null;
+      if (!swipeActiveRef.current) return;
+      swipeActiveRef.current = false;
+      panel.classList.add("admin-content--snap");
+      if (progress.complete) {
+        panel.style.setProperty("--admin-swipe-x", `${window.innerWidth}px`);
+        window.setTimeout(() => {
+          returnToPreviousTab();
+          panel.classList.remove("admin-content--snap");
+          panel.style.setProperty("--admin-swipe-x", "0px");
+        }, 220);
+      } else {
+        panel.style.setProperty("--admin-swipe-x", "0px");
+      }
+    };
+    const cancel = () => {
+      swipeStartRef.current = null;
+      swipeActiveRef.current = false;
+      panel.classList.add("admin-content--snap");
+      panel.style.setProperty("--admin-swipe-x", "0px");
+    };
+    panel.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointermove", onPointerMove, { passive: false });
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", cancel);
+    return () => {
+      panel.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", cancel);
+    };
+  }, [returnToPreviousTab, sidebarOpen]);
 
   const login = async (event: FormEvent) => {
     event.preventDefault();
@@ -1183,6 +1261,18 @@ function AdminPage() {
     await loadAdmin();
   };
 
+  const syncOffers = async () => {
+    setError("");
+    try {
+      const offers = await api<Offer[]>("/api/admin/offers/sync", { method: "POST", headers: authHeaders });
+      setData((current) => current ? { ...current, offers } : current);
+      setSaved("Акции обновлены из CRM");
+      window.setTimeout(() => setSaved(""), 3000);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось обновить акции из CRM");
+    }
+  };
+
   if (!token) {
     return (
       <main className="admin-login">
@@ -1227,14 +1317,14 @@ function AdminPage() {
     { id: "tables", label: "Столы и QR", icon: <Table2 size={18} /> },
     { id: "table-tents", label: "Тейбл-тенты", icon: <Printer size={18} /> },
     { id: "staff", label: "Сотрудники", icon: <Users size={18} /> },
-    { id: "management", label: "Telegram", icon: <ShieldCheck size={18} /> },
     { id: "shifts", label: "Смены и рейтинг", icon: <Trophy size={18} /> },
+    { id: "shift-journal", label: "Журнал смен", icon: <CalendarDays size={18} /> },
     { id: "employee-control", label: "Контроль сотрудников", icon: <Eye size={18} /> },
+    { id: "ai-analytics", label: "ИИ-аналитика", icon: <Sparkles size={18} /> },
     { id: "checklist", label: "Чек-листы", icon: <ClipboardCheck size={18} /> },
     ...(data.accessRole === "owner"
       ? [
-          { id: "owner-profile", label: "Профиль владельца", icon: <KeyRound size={18} /> },
-          { id: "owner-efficiency", label: "Эффективность админов", icon: <Briefcase size={18} /> }
+          { id: "owner-profile", label: "Профиль владельца", icon: <KeyRound size={18} /> }
         ]
       : []),
     { id: "actions", label: "Кнопки", icon: <BellRing size={18} /> },
@@ -1293,9 +1383,7 @@ function AdminPage() {
               key={tab.id}
               className={activeTab === tab.id ? "active" : ""}
               onClick={() => {
-                setActiveTab(tab.id);
-                setSaved("");
-                setSidebarOpen(false);
+                selectAdminTab(tab.id);
               }}
             >
               {tab.icon}
@@ -1318,7 +1406,7 @@ function AdminPage() {
         </button>
       </aside>
 
-      <section className="admin-content">
+      <section className="admin-content" ref={contentRef}>
         <div className="admin-mobile-bar">
           <button
             className="mobile-menu-button"
@@ -1337,8 +1425,8 @@ function AdminPage() {
             <p>Панель управления</p>
             <h1>{tabs.find((tab) => tab.id === activeTab)?.label}</h1>
           </div>
-          <button className="ghost-button" onClick={() => void loadAdmin()}>
-            Обновить
+          <button className="icon-button admin-refresh-button" onClick={() => void loadAdmin()} aria-label="Обновить данные" title="Обновить данные">
+            <RefreshCw size={18} />
           </button>
         </header>
 
@@ -1387,17 +1475,6 @@ function AdminPage() {
           />
         )}
 
-        {activeTab === "management" && (
-          <ManagementTelegramEditor
-            waiters={data.waiters}
-            roles={data.staffRoles}
-            telegramBotUrl={data.telegramBotUrl}
-            maxBotUrl={data.maxBotUrl}
-            onChange={(waiters) => setData({ ...data, waiters })}
-            onSave={() => void saveResource("waiters", data.waiters, "Аккаунты руководителей сохранены")}
-          />
-        )}
-
         {activeTab === "shifts" && (
           <ShiftsAndRatings
             ratings={data.ratings.filter((rating) => rating.roleKind !== "admin" && rating.roleKind !== "owner")}
@@ -1407,6 +1484,20 @@ function AdminPage() {
             authHeaders={authHeaders}
             onRefresh={loadAdmin}
             title="Смены сотрудников"
+            mode="ratings"
+          />
+        )}
+
+        {activeTab === "shift-journal" && (
+          <ShiftsAndRatings
+            ratings={data.ratings}
+            shifts={data.shifts}
+            performance={data.performance}
+            performanceAiEnabled={data.performanceAiEnabled}
+            authHeaders={authHeaders}
+            onRefresh={loadAdmin}
+            title="Смены сотрудников"
+            mode="journal"
           />
         )}
 
@@ -1419,9 +1510,21 @@ function AdminPage() {
             ratings={data.ratings}
             accessRole={data.accessRole}
             venueTimeZone={data.venueTimeZone}
+            authHeaders={authHeaders}
+            onRefresh={loadAdmin}
+          />
+        )}
+
+        {activeTab === "ai-analytics" && (
+          <ShiftsAndRatings
+            ratings={data.ratings}
+            shifts={data.shifts}
+            performance={data.performance}
             performanceAiEnabled={data.performanceAiEnabled}
             authHeaders={authHeaders}
             onRefresh={loadAdmin}
+            title="Общая аналитика"
+            mode="ai"
           />
         )}
 
@@ -1459,18 +1562,6 @@ function AdminPage() {
           />
         )}
 
-        {activeTab === "owner-efficiency" && data.accessRole === "owner" && (
-          <ShiftsAndRatings
-            ratings={data.ratings.filter((rating) => rating.roleKind === "admin")}
-            shifts={data.shifts.filter((shift) => shift.roleKind === "admin")}
-            performance={filterPerformanceAnalytics(data.performance, data.staffRoles.filter((role) => role.kind === "admin").map((role) => role.id))}
-            performanceAiEnabled={data.performanceAiEnabled}
-            authHeaders={authHeaders}
-            onRefresh={loadAdmin}
-            title="Эффективность администраторов"
-          />
-        )}
-
         {activeTab === "actions" && (
           <ActionsEditor
             actions={data.actions}
@@ -1484,6 +1575,7 @@ function AdminPage() {
             offers={data.offers}
             onChange={(offers) => setData({ ...data, offers })}
             onSave={() => void saveResource("offers", data.offers, "Акции сохранены")}
+            onSync={() => void syncOffers()}
           />
         )}
 
@@ -2023,23 +2115,68 @@ function Dashboard({
   data: AdminData;
   updateCall: (callId: string, status: CallStatus) => void;
 }) {
-  const newCalls = data.calls.filter((call) => call.status === "new").length;
+  const localDateKey = (value: Date) => new Intl.DateTimeFormat("en-CA", {
+    timeZone: data.venueTimeZone || "Europe/Astrakhan"
+  }).format(value);
+  const today = localDateKey(new Date());
+  const monthAgoDate = new Date();
+  monthAgoDate.setDate(monthAgoDate.getDate() - 29);
+  const [dateFrom, setDateFrom] = useState(localDateKey(monthAgoDate));
+  const [dateTo, setDateTo] = useState(today);
+  const inPeriod = (value: string) => {
+    const key = localDateKey(new Date(value));
+    return (!dateFrom || key >= dateFrom) && (!dateTo || key <= dateTo);
+  };
+  const calls = data.calls.filter((call) => inPeriod(call.createdAt));
+  const totalCalls = calls.reduce((sum, call) => sum + call.pressCount, 0);
+  const missedCalls = calls.reduce(
+    (sum, call) => sum + call.missedByStaff.filter((event) => inPeriod(event.at)).length,
+    0
+  );
+  const repeatedCalls = calls.reduce(
+    (sum, call) => sum + call.reasonCounts.reduce((reasonSum, reason) => reasonSum + Math.max(0, reason.count - 1), 0),
+    0
+  );
+  const completedCalls = calls.filter((call) => call.status === "done").length;
+  const responseTimes = calls
+    .filter((call) => call.acceptedAt)
+    .map((call) => Math.max(0, new Date(call.acceptedAt!).getTime() - new Date(call.cycleStartedAt).getTime()));
+  const averageResponseSeconds = responseTimes.length
+    ? Math.round(responseTimes.reduce((sum, value) => sum + value, 0) / responseTimes.length / 1000)
+    : 0;
+  const loyaltyRegistrations = data.loyaltyLeads.filter((lead) => inPeriod(lead.createdAt)).length;
+  const feedbacks = data.feedbacks.filter((feedback) => inPeriod(feedback.createdAt));
+  const averageFeedback = feedbacks.length
+    ? Math.round((feedbacks.reduce((sum, feedback) => sum + feedback.rating, 0) / feedbacks.length) * 10) / 10
+    : 0;
   const tableName = (id: string) => data.tables.find((table) => table.id === id)?.name || "Стол";
 
   return (
-    <div className="admin-grid">
-      <Metric title="Новые вызовы" value={newCalls} icon={<BellRing size={22} />} />
-      <Metric title="Столы" value={data.tables.length} icon={<Table2 size={22} />} />
-      <Metric title="Официанты" value={data.waiters.filter((waiter) => waiter.active).length} icon={<Users size={22} />} />
-      <Metric title="Анкеты" value={data.loyaltyLeads.length} icon={<Gift size={22} />} />
+    <div className="dashboard-layout">
+      <section className="admin-panel dashboard-period-filter">
+        <div><strong>Период отчёта</strong><span>Все показатели ниже рассчитаны только за выбранные даты.</span></div>
+        <label className="field"><span>С</span><input type="date" value={dateFrom} max={dateTo || undefined} onChange={(event) => setDateFrom(event.target.value)} /></label>
+        <label className="field"><span>По</span><input type="date" value={dateTo} min={dateFrom || undefined} onChange={(event) => setDateTo(event.target.value)} /></label>
+      </section>
 
-      <section className="admin-panel span-2">
+      <div className="admin-grid dashboard-metrics">
+        <Metric title="Всего нажатий вызова" value={totalCalls} icon={<BellRing size={22} />} />
+        <Metric title="Пропущенные вызовы" value={missedCalls} icon={<AlertTriangle size={22} />} />
+        <Metric title="Повторные вызовы" value={repeatedCalls} icon={<RefreshCw size={22} />} />
+        <Metric title="Завершено обращений" value={completedCalls} icon={<CheckCircle2 size={22} />} />
+        <Metric title="Среднее время ответа" value={`${averageResponseSeconds} сек.`} icon={<Clock size={22} />} />
+        <Metric title="Регистрации лояльности" value={loyaltyRegistrations} icon={<Gift size={22} />} />
+        <Metric title="Отзывы" value={feedbacks.length} icon={<MessageSquare size={22} />} />
+        <Metric title="Средняя оценка гостей" value={feedbacks.length ? `${averageFeedback} ★` : "—"} icon={<Star size={22} />} />
+      </div>
+
+      <section className="admin-panel">
         <div className="panel-heading">
-          <h2>Последние вызовы</h2>
+          <div><h2>Вызовы за период</h2><p className="muted">Показаны последние 30 обращений внутри выбранного периода.</p></div>
           <MessageSquare size={20} />
         </div>
         <div className="call-list">
-          {data.calls.slice(0, 12).map((call) => (
+          {calls.slice(0, 30).map((call) => (
             <article className={`call-row status-${call.status}`} key={call.id}>
               <div>
                 <strong>{tableName(call.tableId)} - {call.actionLabel}</strong>
@@ -2048,7 +2185,7 @@ function Dashboard({
               <StatusButtons call={call} updateCall={updateCall} />
             </article>
           ))}
-          {!data.calls.length && <p className="muted">Пока нет вызовов.</p>}
+          {!calls.length && <p className="muted">За выбранный период вызовов нет.</p>}
         </div>
       </section>
     </div>
@@ -2491,6 +2628,7 @@ function StaffEditor({
   onSaveWaiters: () => void;
   onSaveRoles: () => void;
 }) {
+  const [roleFilter, setRoleFilter] = useState("all");
   const updateWaiter = (index: number, patch: Partial<Waiter>) => {
     onWaitersChange(waiters.map((waiter, waiterIndex) => (waiterIndex === index ? { ...waiter, ...patch } : waiter)));
   };
@@ -2525,7 +2663,9 @@ function StaffEditor({
               </button>
             </div>
           </div>
-          <div className="editor-list">
+          <details className="role-editor-disclosure">
+            <summary>Список должностей ({roles.length})</summary>
+            <div className="editor-list">
             {roles.map((role, index) => {
               const roleInUse = waiters.some((waiter) => waiter.roleId === role.id);
               return (
@@ -2553,7 +2693,8 @@ function StaffEditor({
                 </article>
               );
             })}
-          </div>
+            </div>
+          </details>
         </section>
       )}
 
@@ -2576,8 +2717,18 @@ function StaffEditor({
           </div>
         </div>
 
+        <div className="staff-filter-toolbar">
+          <label className="field">
+            <span>Фильтр по должности</span>
+            <select value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}>
+              <option value="all">Все должности</option>
+              {roles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
+            </select>
+          </label>
+        </div>
+
         <div className="editor-list">
-          {waiters.map((waiter, index) => {
+          {waiters.map((waiter, index) => ({ waiter, index })).filter(({ waiter }) => roleFilter === "all" || waiter.roleId === roleFilter).map(({ waiter, index }) => {
             const role = roles.find((item) => item.id === waiter.roleId);
             return (
               <article className="editor-row employee-editor-row" key={`${waiter.id}-${index}`}>
@@ -2614,6 +2765,7 @@ function StaffEditor({
               </article>
             );
           })}
+          {!waiters.some((waiter) => roleFilter === "all" || waiter.roleId === roleFilter) && <p className="muted">В этой должности сотрудников пока нет.</p>}
         </div>
       </section>
     </div>
@@ -2986,6 +3138,7 @@ function filterPerformanceAnalytics(performance: PerformanceAnalytics, roleIds: 
   return {
     generatedAt: performance.generatedAt,
     analyzedShiftCount: roleSummaries.reduce((sum, item) => sum + item.ratedShiftCount, 0),
+    totalMissedCalls: roleSummaries.reduce((sum, item) => sum + item.missedCallCount, 0),
     roleSummaries,
     taskPatterns,
     employeePatterns,
@@ -3084,7 +3237,6 @@ function EmployeeControl({
   ratings,
   accessRole,
   venueTimeZone,
-  performanceAiEnabled,
   authHeaders,
   onRefresh
 }: {
@@ -3095,7 +3247,6 @@ function EmployeeControl({
   ratings: WaiterRating[];
   accessRole: AdminAccessRole;
   venueTimeZone: string;
-  performanceAiEnabled: boolean;
   authHeaders: Record<string, string>;
   onRefresh: () => Promise<void>;
 }) {
@@ -3117,27 +3268,38 @@ function EmployeeControl({
       .sort((left, right) => left.name.localeCompare(right.name, "ru")),
     [accessRole, roleMap, waiters]
   );
-  const [selectedWaiterId, setSelectedWaiterId] = useState(eligibleWaiters[0]?.id || "");
+  const [selectedWaiterId, setSelectedWaiterId] = useState("");
   const [selectedDate, setSelectedDate] = useState(todayKey);
-  const [search, setSearch] = useState("");
+  const [onShiftOnly, setOnShiftOnly] = useState(true);
   const [drafts, setDrafts] = useState<Record<string, EmployeeItemReviewDraft>>({});
   const [savingItem, setSavingItem] = useState("");
   const [notice, setNotice] = useState("");
-  const [insight, setInsight] = useState<PerformanceInsightReport | null>(null);
-  const [insightBusy, setInsightBusy] = useState(false);
   const [endingShiftId, setEndingShiftId] = useState("");
   const [shiftNotice, setShiftNotice] = useState("");
 
   useEffect(() => {
     if (!eligibleWaiters.some((waiter) => waiter.id === selectedWaiterId)) {
-      setSelectedWaiterId(eligibleWaiters[0]?.id || "");
+      setSelectedWaiterId("");
     }
   }, [eligibleWaiters, selectedWaiterId]);
 
   useEffect(() => {
-    setInsight(null);
     setNotice("");
     setShiftNotice("");
+  }, [selectedWaiterId]);
+
+  useEffect(() => {
+    if (!selectedWaiterId) return;
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectedWaiterId("");
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
   }, [selectedWaiterId]);
 
   const selectedWaiter = eligibleWaiters.find((waiter) => waiter.id === selectedWaiterId) ?? null;
@@ -3163,12 +3325,7 @@ function EmployeeControl({
     ? Math.round((reviewedItems.reduce((sum, item) => sum + (item.adminScore || 0), 0) / reviewedItems.length) * 100) / 100
     : 0;
   const completionRate = allItems.length ? Math.round((completedItems.length / allItems.length) * 100) : 0;
-  const filteredWaiters = eligibleWaiters.filter((waiter) => {
-    const query = search.trim().toLocaleLowerCase("ru-RU");
-    if (!query) return true;
-    const role = roleMap.get(waiter.roleId);
-    return `${waiter.name} ${role?.name || ""}`.toLocaleLowerCase("ru-RU").includes(query);
-  });
+  const filteredWaiters = eligibleWaiters.filter((waiter) => !onShiftOnly || activeShiftByWaiterId.has(waiter.id));
 
   const draftKey = (shiftId: string, itemId: string) => `${shiftId}:${itemId}`;
   const draftFor = (shift: WaiterShift, item: WaiterShift["checklist"][number]) =>
@@ -3243,23 +3400,6 @@ function EmployeeControl({
     }
   };
 
-  const generateEmployeeInsight = async () => {
-    if (!selectedWaiter) return;
-    setInsightBusy(true);
-    setNotice("");
-    try {
-      setInsight(await api<PerformanceInsightReport>(`/api/admin/employees/${selectedWaiter.id}/performance-insights`, {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({})
-      }));
-    } catch (requestError) {
-      setNotice(requestError instanceof Error ? requestError.message : "Не удалось сформировать резюме");
-    } finally {
-      setInsightBusy(false);
-    }
-  };
-
   const endSelectedWaiterShift = async () => {
     if (!selectedWaiter || !selectedActiveShift || selectedActiveShift.roleKind !== "waiter" || assignedTableCount > 0) return;
     if (!window.confirm(`Завершить смену официанта «${selectedWaiter.name}»?`)) return;
@@ -3286,31 +3426,36 @@ function EmployeeControl({
 
   return (
     <div className="employee-control-layout">
-      <aside className="admin-panel employee-directory">
-        <div className="panel-heading"><div><h2>Сотрудники</h2><p className="muted">Выберите карточку для контроля.</p></div><Users size={20} /></div>
-        <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Найти сотрудника" aria-label="Найти сотрудника" />
-        <div className="employee-directory-list">
-          {filteredWaiters.map((waiter) => {
-            const role = roleMap.get(waiter.roleId);
-            const shift = activeShiftByWaiterId.get(waiter.id);
-            return (
-              <button
-                type="button"
-                key={waiter.id}
-                className={[selectedWaiterId === waiter.id ? "active" : "", shift ? "is-on-shift" : ""].filter(Boolean).join(" ")}
-                onClick={() => setSelectedWaiterId(waiter.id)}
-              >
-                <span className="employee-avatar">{waiter.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
-                <span><strong>{waiter.name}</strong><small>{role?.name || "Сотрудник"} · <span className={shift ? "employee-shift-status is-active" : "employee-shift-status"}>{shift ? "на смене" : waiter.active ? "не на смене" : "неактивен"}</span></small></span>
-              </button>
-            );
-          })}
-          {!filteredWaiters.length && <p className="muted">Поиск не дал результатов.</p>}
+      <section className="admin-panel employee-picker-panel">
+        <div className="panel-heading"><div><h2>Сотрудники</h2><p className="muted">Выберите сотрудника — его карточка откроется в отдельном окне.</p></div><Users size={20} /></div>
+        <div className="employee-picker-toolbar">
+          <div className="employee-scope-switch" role="group" aria-label="Список сотрудников">
+            <button type="button" className={onShiftOnly ? "active" : ""} onClick={() => setOnShiftOnly(true)}>На смене</button>
+            <button type="button" className={!onShiftOnly ? "active" : ""} onClick={() => setOnShiftOnly(false)}>Все сотрудники</button>
+          </div>
+          <label className="field employee-select-field">
+            <span>Сотрудник</span>
+            <select value="" onChange={(event) => setSelectedWaiterId(event.target.value)}>
+              <option value="">Выберите сотрудника</option>
+              {filteredWaiters.map((waiter) => {
+                const role = roleMap.get(waiter.roleId);
+                const shift = activeShiftByWaiterId.get(waiter.id);
+                return <option key={waiter.id} value={waiter.id}>{shift ? "● " : ""}{waiter.name} · {role?.name || "Сотрудник"}</option>;
+              })}
+            </select>
+          </label>
         </div>
-      </aside>
+        {!filteredWaiters.length && <p className="muted employee-picker-empty">Сейчас на смене нет сотрудников.</p>}
+      </section>
 
       {selectedWaiter && (
-        <div className="employee-control-content">
+        <div className="employee-control-modal" role="dialog" aria-modal="true" aria-label={`Карточка сотрудника ${selectedWaiter.name}`}>
+          <div className="employee-control-modal__window">
+          <div className="employee-control-modal__bar">
+            <div><span className={selectedActiveShift ? "employee-online-dot is-active" : "employee-online-dot"} /><strong>{selectedWaiter.name}</strong></div>
+            <button className="icon-button" type="button" onClick={() => setSelectedWaiterId("")} aria-label="Закрыть карточку" title="Закрыть"><X size={20} /></button>
+          </div>
+          <div className="employee-control-content">
           <section className="admin-panel employee-profile-card">
             <div className="employee-profile-heading">
               <span className="employee-avatar employee-avatar--large">{selectedWaiter.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span>
@@ -3333,28 +3478,8 @@ function EmployeeControl({
               <article><strong>{completionRate}%</strong><span>выполнено пунктов</span></article>
               <article><strong>{reviewedItems.length ? `${explicitAverage} ★` : "—"}</strong><span>средняя оценка проверок</span></article>
               <article><strong>{employeeRating?.score ? `${employeeRating.score} ★` : "—"}</strong><span>общий рейтинг</span></article>
+              <article><strong>{employeeRating?.missedCallCount ?? 0}</strong><span>пропущено вызовов</span></article>
             </div>
-          </section>
-
-          <section className="admin-panel employee-ai-card">
-            <div className="panel-heading">
-              <div><h2>ИИ-резюме сотрудника</h2><p className="muted">Анализирует только историю выбранного сотрудника: выполнение, оценки и повторяющиеся слабые места.</p></div>
-              <button className="primary-button compact" disabled={insightBusy} onClick={() => void generateEmployeeInsight()}><Sparkles size={18} /> {insightBusy ? "Анализируем" : "Сформировать резюме"}</button>
-            </div>
-            {insight && (
-              <div className="ai-insight-result">
-                <div className="ai-insight-meta"><span>{insight.source === "openrouter" ? "ИИ-анализ" : "Локальный анализ"}</span><span>{insight.model}</span><span>{formatDate(insight.generatedAt)}</span></div>
-                <p className="ai-summary">{insight.summary}</p>
-                {insight.warning && <div className="task-notice">{insight.warning}</div>}
-                <div className="ai-recommendation-grid">
-                  {insight.recommendations.map((recommendation, index) => <article key={`${index}-${recommendation}`}><strong>{index + 1}</strong><p>{recommendation}</p></article>)}
-                </div>
-                {insight.employeeAdvice.find((item) => item.waiterId === selectedWaiter.id)?.advice && (
-                  <div className="employee-ai-conclusion"><strong>Персональная рекомендация</strong><p>{insight.employeeAdvice.find((item) => item.waiterId === selectedWaiter.id)?.advice}</p></div>
-                )}
-              </div>
-            )}
-            {!insight && <p className="employee-ai-hint">{performanceAiEnabled ? "Нажмите кнопку, чтобы получить актуальное персональное резюме." : "OpenRouter не настроен — будет сформировано локальное резюме по фактическим данным."}</p>}
           </section>
 
           <section className="admin-panel employee-day-control">
@@ -3438,6 +3563,8 @@ function EmployeeControl({
             </div>
           </section>
         </div>
+        </div>
+        </div>
       )}
     </div>
   );
@@ -3450,7 +3577,8 @@ function ShiftsAndRatings({
   performanceAiEnabled,
   authHeaders,
   onRefresh,
-  title
+  title,
+  mode
 }: {
   ratings: WaiterRating[];
   shifts: WaiterShift[];
@@ -3459,6 +3587,7 @@ function ShiftsAndRatings({
   authHeaders: Record<string, string>;
   onRefresh: () => Promise<void>;
   title: string;
+  mode: "ratings" | "journal" | "ai";
 }) {
   const [drafts, setDrafts] = useState<ShiftReviewDraft>({});
   const [savingShift, setSavingShift] = useState("");
@@ -3467,6 +3596,10 @@ function ShiftsAndRatings({
   const [insight, setInsight] = useState<PerformanceInsightReport | null>(null);
   const [insightBusy, setInsightBusy] = useState(false);
   const [journalDate, setJournalDate] = useState("");
+  const [journalWaiterId, setJournalWaiterId] = useState("all");
+  const [selectedInsightWaiterId, setSelectedInsightWaiterId] = useState("");
+  const [employeeInsight, setEmployeeInsight] = useState<PerformanceInsightReport | null>(null);
+  const [employeeInsightBusy, setEmployeeInsightBusy] = useState(false);
   const ratedEmployees = ratings.filter((item) => item.shiftCount > 0);
   const average = ratedEmployees.length
     ? Math.round((ratedEmployees.reduce((sum, item) => sum + item.score, 0) / ratedEmployees.length) * 100) / 100
@@ -3475,7 +3608,15 @@ function ShiftsAndRatings({
   const roleTabs = performance.roleSummaries;
   const journalShifts = shifts
     .filter((shift) => !journalDate || new Intl.DateTimeFormat("en-CA").format(new Date(shift.startedAt)) === journalDate)
+    .filter((shift) => journalWaiterId === "all" || shift.waiterId === journalWaiterId)
     .slice(0, 80);
+  const journalEmployees = Array.from(new Map(
+    shifts.map((shift) => [shift.waiterId, { id: shift.waiterId, name: shift.waiterName }])
+  ).values()).sort((left, right) => left.name.localeCompare(right.name, "ru"));
+  const visibleTaskPatterns = performance.taskPatterns
+    .filter((item) => selectedRoleId === "all" || item.roleId === selectedRoleId);
+  const visibleEmployeePatterns = performance.employeePatterns
+    .filter((item) => selectedRoleId === "all" || item.roleId === selectedRoleId);
 
   const draftFor = (shift: WaiterShift, itemId: string) => {
     const item = shift.checklist.find((entry) => entry.itemId === itemId)!;
@@ -3542,13 +3683,31 @@ function ShiftsAndRatings({
     }
   };
 
+  const generateEmployeeInsight = async () => {
+    if (!selectedInsightWaiterId) return;
+    setEmployeeInsightBusy(true);
+    setNotice("");
+    try {
+      setEmployeeInsight(await api<PerformanceInsightReport>(`/api/admin/employees/${selectedInsightWaiterId}/performance-insights`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({})
+      }));
+    } catch (requestError) {
+      setNotice(requestError instanceof Error ? requestError.message : "Не удалось сформировать резюме сотрудника");
+    } finally {
+      setEmployeeInsightBusy(false);
+    }
+  };
+
   return (
     <div className="shift-admin-layout">
+      {mode === "ratings" && <>
       <div className="admin-grid shift-metrics">
         <Metric title="Сотрудников в рейтинге" value={ratings.length} icon={<Users size={22} />} />
         <Metric title="Средний рейтинг" value={`${average} ★`} icon={<Star size={22} />} />
         <Metric title="Активные смены" value={shifts.filter((shift) => shift.status !== "ended").length} icon={<Clock size={22} />} />
-        <Metric title="Ожидают чек-лист" value={shifts.filter((shift) => shift.status === "checklist").length} icon={<ClipboardCheck size={22} />} />
+        <Metric title="Пропущенные вызовы" value={ratings.reduce((sum, rating) => sum + rating.missedCallCount, 0)} icon={<AlertTriangle size={22} />} />
       </div>
 
       <section className="admin-panel">
@@ -3561,7 +3720,7 @@ function ShiftsAndRatings({
         )}
         <div className="ops-table-wrap">
           <table className="ops-table">
-            <thead><tr><th>Место</th><th>Сотрудник</th><th>Должность</th><th>Рейтинг</th><th>Накоплено</th><th>Выполнение</th><th>Динамика</th><th>Смен</th></tr></thead>
+            <thead><tr><th>Место</th><th>Сотрудник</th><th>Должность</th><th>Рейтинг</th><th>Выполнение</th><th>Пропущено вызовов</th><th>Динамика</th><th>Смен</th></tr></thead>
             <tbody>
               {visibleRatings.map((rating) => (
                 <tr key={rating.waiterId}>
@@ -3569,8 +3728,8 @@ function ShiftsAndRatings({
                   <td><strong>{rating.waiterName}</strong></td>
                   <td>{rating.roleName}</td>
                   <td><span className="rating-value"><Star size={16} fill="currentColor" /><strong>{rating.shiftCount ? rating.score : "—"}</strong></span></td>
-                  <td>{rating.totalStars} ★</td>
                   <td>{rating.completionRate}%</td>
+                  <td>{rating.missedCallCount}</td>
                   <td><span className={rating.trend > 0 ? "trend-up" : rating.trend < 0 ? "trend-down" : "muted"}>{rating.trend > 0 ? "+" : ""}{rating.trend}</span></td>
                   <td>{rating.shiftCount}</td>
                 </tr>
@@ -3585,10 +3744,10 @@ function ShiftsAndRatings({
         <div className="panel-heading"><div><h2>Сравнение подразделений</h2><p className="muted">Средняя оценка и дисциплина выполнения задач по каждой должности.</p></div><Users size={20} /></div>
         <div className="ops-table-wrap">
           <table className="ops-table">
-            <thead><tr><th>Подразделение</th><th>Сотрудников</th><th>Оцененных смен</th><th>Средний рейтинг</th><th>Выполнение задач</th></tr></thead>
+            <thead><tr><th>Подразделение</th><th>Сотрудников</th><th>Оцененных смен</th><th>Средний рейтинг</th><th>Выполнение задач</th><th>Пропущено вызовов</th></tr></thead>
             <tbody>
-              {performance.roleSummaries.map((role) => <tr key={role.roleId}><td><strong>{role.roleName}</strong></td><td>{role.employeeCount}</td><td>{role.ratedShiftCount}</td><td>{role.ratedShiftCount ? `${role.averageStars} ★` : "—"}</td><td>{role.completionRate}%</td></tr>)}
-              {!performance.roleSummaries.length && <tr><td className="ops-table-empty" colSpan={5}>Данных по подразделениям пока нет.</td></tr>}
+              {performance.roleSummaries.map((role) => <tr key={role.roleId}><td><strong>{role.roleName}</strong></td><td>{role.employeeCount}</td><td>{role.ratedShiftCount}</td><td>{role.ratedShiftCount ? `${role.averageStars} ★` : "—"}</td><td>{role.completionRate}%</td><td>{role.missedCallCount}</td></tr>)}
+              {!performance.roleSummaries.length && <tr><td className="ops-table-empty" colSpan={6}>Данных по подразделениям пока нет.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -3600,10 +3759,10 @@ function ShiftsAndRatings({
           <table className="ops-table">
             <thead><tr><th>Подразделение</th><th>Задача</th><th>Назначено</th><th>Не выполнено</th><th>Низких оценок</th><th>Средняя оценка</th><th>Сбой</th></tr></thead>
             <tbody>
-              {performance.taskPatterns.filter((item) => item.issueRate > 0).slice(0, 12).map((item) => (
+              {visibleTaskPatterns.filter((item) => item.issueRate > 0).slice(0, 12).map((item) => (
                 <tr key={item.key}><td>{item.roleName}</td><td><strong>{item.taskTitle}</strong>{!item.countsForRating && <small className="table-note">Без влияния на рейтинг</small>}</td><td>{item.assignments}</td><td>{item.missed}</td><td>{item.lowRatings}</td><td>{item.averageStars === null ? "—" : `${item.averageStars} ★`}</td><td><strong>{item.issueRate}%</strong></td></tr>
               ))}
-              {!performance.taskPatterns.some((item) => item.issueRate > 0) && <tr><td className="ops-table-empty" colSpan={7}>Повторяющихся сбоев пока не обнаружено.</td></tr>}
+              {!visibleTaskPatterns.some((item) => item.issueRate > 0) && <tr><td className="ops-table-empty" colSpan={7}>Повторяющихся сбоев пока не обнаружено.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -3612,17 +3771,26 @@ function ShiftsAndRatings({
       <section className="admin-panel employee-patterns-panel">
         <div className="panel-heading"><div><h2>Паттерны конкретных сотрудников</h2><p className="muted">Список строится по повторяющимся пропускам и оценкам ниже 4 звезд.</p></div><UserRound size={20} /></div>
         <div className="employee-pattern-grid">
-          {performance.employeePatterns.slice(0, 12).map((item) => (
+          {visibleEmployeePatterns.slice(0, 12).map((item) => (
             <article key={item.key} className="employee-pattern-row">
               <div><strong>{item.waiterName}</strong><span>{item.roleName}</span></div>
               <div><strong>{item.taskTitle}</strong><span>{item.missed} пропусков · {item.lowRatings} низких оценок · сбой {item.issueRate}%</span></div>
               <p>{item.recommendation}</p>
             </article>
           ))}
-          {!performance.employeePatterns.length && <p className="muted">Индивидуальных повторяющихся нарушений пока нет.</p>}
+          {!visibleEmployeePatterns.length && <p className="muted">Индивидуальных повторяющихся нарушений пока нет.</p>}
         </div>
       </section>
 
+      </>}
+
+      {mode === "ai" && <>
+      <div className="admin-grid shift-metrics">
+        <Metric title="Проанализировано смен" value={performance.analyzedShiftCount} icon={<ClipboardCheck size={22} />} />
+        <Metric title="Пропущено вызовов" value={performance.totalMissedCalls} icon={<AlertTriangle size={22} />} />
+        <Metric title="Повторяющиеся сбои" value={performance.taskPatterns.filter((item) => item.issueRate > 0).length} icon={<RefreshCw size={22} />} />
+        <Metric title="Сотрудники в зоне внимания" value={new Set(performance.employeePatterns.map((item) => item.waiterId)).size} icon={<Users size={22} />} />
+      </div>
       <section className="admin-panel ai-insight-panel">
         <div className="panel-heading">
           <div><h2>ИИ-анализ эффективности</h2><p className="muted">{performanceAiEnabled ? "ИИ подключен. Анализ отделяет массовые сбои процесса от индивидуальных повторений." : "ИИ не настроен. Доступен резервный локальный анализ."}</p></div>
@@ -3649,12 +3817,37 @@ function ShiftsAndRatings({
             )}
           </div>
         )}
+        {!insight && (
+          <div className="ai-baseline-summary">
+            <h3>Текущие рекомендации по фактическим данным</h3>
+            {performance.recommendations.map((recommendation, index) => <p key={`${index}-${recommendation}`}><strong>{index + 1}.</strong> {recommendation}</p>)}
+          </div>
+        )}
       </section>
 
-      <section className="admin-panel">
+      <section className="admin-panel employee-ai-card">
+        <div className="panel-heading">
+          <div><h2>ИИ-резюме конкретного сотрудника</h2><p className="muted">Выберите сотрудника, чтобы получить персональную оценку динамики и конкретные рекомендации.</p></div>
+        </div>
+        <div className="employee-ai-toolbar">
+          <label className="field"><span>Сотрудник</span><select value={selectedInsightWaiterId} onChange={(event) => { setSelectedInsightWaiterId(event.target.value); setEmployeeInsight(null); }}><option value="">Выберите сотрудника</option>{ratings.map((rating) => <option key={rating.waiterId} value={rating.waiterId}>{rating.waiterName} · {rating.roleName}</option>)}</select></label>
+          <button className="primary-button compact" disabled={!selectedInsightWaiterId || employeeInsightBusy} onClick={() => void generateEmployeeInsight()}><Sparkles size={18} /> {employeeInsightBusy ? "Анализируем" : "Сформировать резюме"}</button>
+        </div>
+        {employeeInsight && <div className="ai-insight-result"><div className="ai-insight-meta"><span>{employeeInsight.source === "openrouter" ? "ИИ-анализ" : "Локальный анализ"}</span><span>{employeeInsight.model}</span><span>{formatDate(employeeInsight.generatedAt)}</span></div><p className="ai-summary">{employeeInsight.summary}</p><div className="ai-recommendation-grid">{employeeInsight.recommendations.map((item, index) => <article key={`${index}-${item}`}><strong>{index + 1}</strong><p>{item}</p></article>)}</div></div>}
+      </section>
+      </>}
+
+      {mode === "journal" && <section className="admin-panel">
         <div className="panel-heading shift-journal-heading">
           <div><h2>{title}: журнал</h2><p className="muted">Выберите дату, чтобы показать смены только за нужный день.</p></div>
           <div className="shift-journal-filter">
+            <label className="field">
+              <span><UserRound size={16} /> Сотрудник</span>
+              <select value={journalWaiterId} onChange={(event) => setJournalWaiterId(event.target.value)}>
+                <option value="all">Все сотрудники</option>
+                {journalEmployees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
+              </select>
+            </label>
             <label className="field">
               <span><CalendarDays size={16} /> Дата смены</span>
               <input type="date" value={journalDate} onChange={(event) => setJournalDate(event.target.value)} />
@@ -3697,7 +3890,7 @@ function ShiftsAndRatings({
           ))}
           {!journalShifts.length && <p className="muted">{journalDate ? "На выбранную дату смен нет." : "Смен по этой группе пока нет."}</p>}
         </div>
-      </section>
+      </section>}
     </div>
   );
 }
@@ -3770,11 +3963,13 @@ function ActionsEditor({
 function OffersEditor({
   offers,
   onChange,
-  onSave
+  onSave,
+  onSync
 }: {
   offers: Offer[];
   onChange: (offers: Offer[]) => void;
   onSave: () => void;
+  onSync: () => void;
 }) {
   const update = (index: number, patch: Partial<Offer>) => {
     onChange(offers.map((offer, offerIndex) => (offerIndex === index ? { ...offer, ...patch } : offer)));
@@ -3783,8 +3978,9 @@ function OffersEditor({
   return (
     <section className="admin-panel">
       <div className="panel-heading">
-        <h2>Акции и спецпредложения</h2>
+        <div><h2>Акции и спецпредложения</h2><p className="muted">Единый список хранится в CRM и автоматически передаётся в Qrnastol.</p></div>
         <div className="button-row">
+          <button className="icon-button" onClick={onSync} aria-label="Обновить акции из CRM" title="Обновить акции из CRM"><RefreshCw size={18} /></button>
           <button
             className="ghost-button"
             onClick={() =>

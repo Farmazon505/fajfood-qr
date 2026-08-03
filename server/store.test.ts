@@ -244,7 +244,8 @@ test("calls escalate after one minute without acceptance and two minutes without
 
     const adminCall = await store.startAdminEscalation(
       unanswered.id,
-      "Официант не принял вызов в течение 1 минуты."
+      "Официант не принял вызов в течение 1 минуты.",
+      []
     );
     assert.equal(adminCall?.routingStage, "admin");
     const adminStartedAt = new Date(adminCall?.adminEscalationStartedAt || "").getTime();
@@ -271,7 +272,8 @@ test("calls escalate after one minute without acceptance and two minutes without
 
     const slowCall = await store.startAdminEscalation(
       accepted.id,
-      "Официант принял вызов, но не завершил его в течение 2 минут."
+      "Официант принял вызов, но не завершил его в течение 2 минут.",
+      []
     );
     const slowAdminStartedAt = new Date(slowCall?.adminEscalationStartedAt || "").getTime();
     assert.equal(store.callsDueForOwnerEscalation(slowAdminStartedAt + ADMIN_ACK_TIMEOUT_MS).length, 1);

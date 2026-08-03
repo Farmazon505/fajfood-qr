@@ -434,6 +434,10 @@ export class Store {
       const previous = scores.slice(3, 6);
       const recentAverage = recent.length ? recent.reduce((sum, value) => sum + value, 0) / recent.length : 0;
       const previousAverage = previous.length ? previous.reduce((sum, value) => sum + value, 0) / previous.length : recentAverage;
+      const missedCallCount = this.data.calls.reduce(
+        (sum, call) => sum + call.missedByStaff.filter((event) => event.staffId === waiter.id).length,
+        0
+      );
       return {
         waiterId: waiter.id,
         waiterName: waiter.name,
@@ -447,6 +451,7 @@ export class Store {
         completionRate: ratedTaskCount ? Math.round((completedRatedTaskCount / ratedTaskCount) * 100) : 0,
         trend: roundStars(recentAverage - previousAverage),
         shiftCount: completedShifts.length,
+        missedCallCount,
         rank: 0
       };
     });
@@ -593,6 +598,7 @@ export class Store {
       const roleRatings = ratings.filter((rating) => rating.roleId === currentRoleId && rating.shiftCount > 0);
       const roleShifts = shifts.filter((shift) => shift.roleId === currentRoleId);
       const allItems = roleShifts.flatMap((shift) => shift.checklist);
+      const missedCallCount = roleRatings.reduce((sum, rating) => sum + rating.missedCallCount, 0);
       return {
         roleId: currentRoleId,
         roleName: role?.name || roleShifts[0]?.roleName || "Должность",
@@ -608,7 +614,8 @@ export class Store {
           : 0,
         completionRate: allItems.length
           ? Math.round((allItems.filter((item) => item.completedAt).length / allItems.length) * 100)
-          : 0
+          : 0,
+        missedCallCount
       };
     }).sort((left, right) => left.roleName.localeCompare(right.roleName, "ru"));
 
@@ -625,6 +632,7 @@ export class Store {
     return {
       generatedAt: now(),
       analyzedShiftCount: shifts.length,
+      totalMissedCalls: ratings.reduce((sum, rating) => sum + rating.missedCallCount, 0),
       roleSummaries,
       taskPatterns,
       employeePatterns,
@@ -847,6 +855,9 @@ export class Store {
       adminWarningSentAt: call.adminWarningSentAt ?? null,
       ownerEscalatedAt: call.ownerEscalatedAt ?? null,
       ownerAcknowledgedAt: call.ownerAcknowledgedAt ?? null,
+      waiterRecipientIds: Array.isArray(call.waiterRecipientIds) ? call.waiterRecipientIds : [],
+      adminRecipientIds: Array.isArray(call.adminRecipientIds) ? call.adminRecipientIds : [],
+      missedByStaff: Array.isArray(call.missedByStaff) ? call.missedByStaff : [],
       pressCount: Number.isFinite(call.pressCount) && call.pressCount > 0 ? call.pressCount : 1,
       reasonCounts:
         Array.isArray(call.reasonCounts) && call.reasonCounts.length
@@ -1258,6 +1269,8 @@ export class Store {
     comment: string;
     guestName: string;
     assignedWaiterId: string | null;
+    waiterRecipientIds?: string[];
+    adminRecipientIds?: string[];
     routingStage: CallRoutingStage;
     routingReason: string;
   }) {
@@ -1276,6 +1289,8 @@ export class Store {
       existing.actionId = input.action.id;
       existing.actionLabel = input.action.label;
       existing.assignedWaiterId = input.assignedWaiterId;
+      existing.waiterRecipientIds = [...new Set(input.waiterRecipientIds ?? [])];
+      existing.adminRecipientIds = [...new Set(input.adminRecipientIds ?? [])];
       existing.lastRequestedAt = timestamp;
       existing.doneAt = null;
       if (input.comment.trim()) existing.comment = input.comment.trim();
@@ -1327,6 +1342,9 @@ export class Store {
       adminWarningSentAt: null,
       ownerEscalatedAt: input.routingStage === "owner" ? timestamp : null,
       ownerAcknowledgedAt: null,
+      waiterRecipientIds: [...new Set(input.waiterRecipientIds ?? [])],
+      adminRecipientIds: [...new Set(input.adminRecipientIds ?? [])],
+      missedByStaff: [],
       pressCount: 1,
       reasonCounts: [{ actionId: input.action.id, label: input.action.label, count: 1 }],
       cycleStartedAt: timestamp,
@@ -1418,7 +1436,27 @@ export class Store {
       .map((call) => structuredClone(call));
   }
 
-  async startAdminEscalation(callId: string, reason: string, at = new Date()) {
+  async recordMissedCallRecipients(
+    callId: string,
+    role: "waiter" | "admin",
+    staffIds: string[],
+    at = new Date()
+  ) {
+    const call = this.data.calls.find((item) => item.id === callId);
+    if (!call) return null;
+    for (const staffId of new Set(staffIds.filter(Boolean))) {
+      const exists = call.missedByStaff.some(
+        (event) => event.staffId === staffId && event.role === role && event.cycleStartedAt === call.cycleStartedAt
+      );
+      if (!exists) {
+        call.missedByStaff.push({ staffId, role, at: at.toISOString(), cycleStartedAt: call.cycleStartedAt });
+      }
+    }
+    await this.persist();
+    return structuredClone(call);
+  }
+
+  async startAdminEscalation(callId: string, reason: string, adminRecipientIds: string[], at = new Date()) {
     const call = this.data.calls.find(
       (item) =>
         item.id === callId &&
@@ -1431,6 +1469,7 @@ export class Store {
     call.adminEscalationStartedAt = at.toISOString();
     call.adminAcknowledgedAt = null;
     call.adminWarningSentAt = null;
+    call.adminRecipientIds = [...new Set(adminRecipientIds)];
     await this.persist();
     return structuredClone(call);
   }
