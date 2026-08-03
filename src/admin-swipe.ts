@@ -2,6 +2,12 @@ export const ADMIN_SWIPE_THRESHOLD = 56;
 export const ADMIN_SWIPE_AXIS_LOCK = 10;
 
 export type SwipeStart = { x: number; y: number; pointerId: number };
+export type AdminSwipeAction = "previous" | "sidebar" | "none";
+
+export function adminSwipeAction(activeTab: string, historyDepth: number): AdminSwipeAction {
+  if (activeTab === "dashboard") return "sidebar";
+  return historyDepth > 1 ? "previous" : "none";
+}
 
 export function swipeProgress(start: SwipeStart, x: number, y: number) {
   const dx = x - start.x;

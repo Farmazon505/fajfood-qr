@@ -16,6 +16,16 @@ test("admin and owner receive different authorization roles", () => {
   assert.equal(authenticateAdmin(config.ADMIN_USERNAME, "wrong-password"), null);
 });
 
+test("admin sessions use the configured long-lived expiration", () => {
+  const admin = authenticateAdmin(config.ADMIN_USERNAME, config.ADMIN_PASSWORD);
+  const issuedAt = Date.now();
+  const token = verifyAdminToken(createAdminToken(admin!));
+  assert.ok(token);
+  const expectedLifetime = config.ADMIN_TOKEN_TTL_HOURS * 60 * 60 * 1000;
+  assert.ok(token.exp >= issuedAt + expectedLifetime - 1_000);
+  assert.ok(token.exp <= issuedAt + expectedLifetime + 1_000);
+});
+
 test("administrator credentials are hashed, persisted and replace previous access", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-admin-auth-"));
   try {

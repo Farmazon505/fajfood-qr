@@ -744,6 +744,20 @@ app.post("/api/admin/login", adminLoginLimiter, (request, response) => {
 
 app.use("/api/admin", requireAdmin);
 
+app.post("/api/admin/session/refresh", (request, response) => {
+  const auth = getAdminAuth(request);
+  if (!auth) {
+    response.status(401).json({ error: "Сессия истекла" });
+    return;
+  }
+  const { exp: _expiredAt, ...renewedAuth } = auth;
+  response.json({
+    token: createAdminToken(renewedAuth),
+    role: renewedAuth.role,
+    username: renewedAuth.username
+  });
+});
+
 const adminAccountUpdateSchema = z.object({
   username: z.string().trim().min(3).max(64).regex(/^[A-Za-z0-9._-]+$/),
   password: z.string().min(8).max(128)

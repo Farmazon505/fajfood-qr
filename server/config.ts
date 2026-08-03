@@ -22,7 +22,7 @@ const envSchema = z.object({
   OWNER_USERNAME: z.string().min(1).default("owner"),
   OWNER_PASSWORD: z.string().optional().default(""),
   ADMIN_SECRET: z.string().min(16).default("change-this-secret"),
-  ADMIN_TOKEN_TTL_HOURS: z.coerce.number().min(1).max(168).default(12),
+  ADMIN_TOKEN_TTL_HOURS: z.coerce.number().min(1).max(720).default(168),
   APP_DATA_DIR: z.string().default(path.resolve(process.cwd(), "data")),
   TELEGRAM_BOT_TOKEN: z.string().optional().default(""),
   TELEGRAM_BOT_USERNAME: z.string().trim().regex(/^@?[A-Za-z0-9_]{5,}$/).default("QROFFICBOT"),

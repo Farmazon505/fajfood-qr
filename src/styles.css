@@ -1746,7 +1746,25 @@ fieldset.field {
 }
 
 .employee-editor-row {
-  grid-template-columns: 1fr 0.8fr 1fr 1fr auto 42px;
+  grid-template-columns:
+    minmax(150px, 1fr)
+    minmax(150px, 0.82fr)
+    minmax(140px, 0.68fr)
+    minmax(150px, 0.72fr)
+    minmax(190px, 1.08fr)
+    auto
+    42px;
+  align-items: end;
+}
+
+.employee-editor-row > .toggle-row {
+  min-height: 44px;
+  justify-self: end;
+  white-space: nowrap;
+}
+
+.employee-editor-row > .icon-button {
+  justify-self: end;
 }
 
 .management-editor-row {
@@ -1870,19 +1888,27 @@ fieldset.field {
 
 .checklist-phase-tabs button {
   min-height: 46px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--card);
-  color: var(--muted);
+  border: 1px solid #d4cabb;
+  border-radius: 8px;
+  background: #fffdfa;
+  color: #485247;
   font: inherit;
   font-weight: 800;
   cursor: pointer;
+  box-shadow: 0 2px 5px rgba(44, 32, 36, 0.06);
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+
+.checklist-phase-tabs button:hover {
+  border-color: var(--brand-primary);
+  box-shadow: 0 4px 12px rgba(44, 32, 36, 0.1);
 }
 
 .checklist-phase-tabs button.active {
-  border-color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 10%, var(--card));
-  color: var(--primary);
+  border-color: var(--brand-primary);
+  color: #fffdfa;
+  background: var(--brand-primary);
+  box-shadow: 0 5px 14px color-mix(in srgb, var(--brand-primary) 24%, transparent);
 }
 
 .owner-sber-card-field {
@@ -1916,13 +1942,31 @@ fieldset.field {
 
 .checklist-template-row {
   display: grid;
-  grid-template-columns: 82px minmax(190px, 1fr) minmax(220px, 1.25fr) auto auto auto 42px;
+  grid-template-columns: 82px minmax(220px, 0.85fr) minmax(360px, 1.75fr) minmax(210px, auto) 42px;
   gap: 12px;
-  align-items: end;
+  align-items: start;
   border: 1px solid #ded6c8;
   border-radius: 8px;
   padding: 14px;
   background: #fffdfa;
+}
+
+.checklist-template-options {
+  min-height: 100%;
+  display: grid;
+  align-content: center;
+  gap: 10px;
+  border-left: 1px solid #e1d9cc;
+  padding-left: 16px;
+}
+
+.checklist-template-options .toggle-row {
+  min-height: 28px;
+  white-space: nowrap;
+}
+
+.checklist-template-row > .icon-button {
+  align-self: center;
 }
 
 .reorder-buttons {
@@ -4065,6 +4109,13 @@ button:disabled {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .checklist-template-options {
+    border-top: 1px solid #e1d9cc;
+    border-left: 0;
+    padding-top: 12px;
+    padding-left: 0;
+  }
+
   .shift-task-row .icon-button,
   .checklist-template-row > .icon-button {
     justify-self: end;
@@ -4092,6 +4143,10 @@ button:disabled {
   .shift-task-row,
   .shift-metrics {
     grid-template-columns: 1fr;
+  }
+
+  .checklist-template-options .toggle-row {
+    white-space: normal;
   }
 
   .reorder-buttons {

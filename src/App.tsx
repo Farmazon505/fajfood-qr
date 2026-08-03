@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, FormEvent, ReactNode } from "react";
 import { TableTentDesigner } from "./TableTentDesigner";
-import { swipeAllowedTarget, swipeProgress, type SwipeStart } from "./admin-swipe";
+import {
+  adminSwipeAction,
+  swipeAllowedTarget,
+  swipeProgress,
+  type AdminSwipeAction,
+  type SwipeStart
+} from "./admin-swipe";
 import {
   BellRing,
   ArrowDown,
@@ -161,6 +167,35 @@ const isStandaloneWebApp = () =>
   window.matchMedia("(display-mode: standalone)").matches ||
   Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
 
+class ApiRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
+
+const ADMIN_SESSION_REFRESH_WINDOW_MS = 24 * 60 * 60 * 1000;
+const ADMIN_SESSION_REFRESH_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+
+const adminTokenExpiresAt = (token: string) => {
+  try {
+    const payload = token.split(".")[0];
+    if (!payload) return null;
+    const padded = `${payload}${"=".repeat((4 - (payload.length % 4)) % 4)}`.replace(/-/g, "+").replace(/_/g, "/");
+    const binary = window.atob(padded);
+    const decoded = new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
+    const parsed = JSON.parse(decoded) as { exp?: unknown };
+    return typeof parsed.exp === "number" ? parsed.exp : null;
+  } catch {
+    return null;
+  }
+};
+
+const adminSessionNeedsRefresh = (token: string, at = Date.now()) => {
+  const expiresAt = adminTokenExpiresAt(token);
+  return expiresAt !== null && expiresAt > at && expiresAt - at <= ADMIN_SESSION_REFRESH_WINDOW_MS;
+};
+
 const api = async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
   const response = await fetch(path, {
     ...options,
@@ -171,7 +206,7 @@ const api = async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
   });
 
   const json = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(json.error || "Ошибка запроса");
+  if (!response.ok) throw new ApiRequestError(json.error || "Ошибка запроса", response.status);
   return json as T;
 };
 
@@ -1057,6 +1092,8 @@ function AdminPage() {
   const tabHistoryRef = useRef<string[]>(["dashboard"]);
   const swipeStartRef = useRef<SwipeStart | null>(null);
   const swipeActiveRef = useRef(false);
+  const swipeActionRef = useRef<AdminSwipeAction>("none");
+  const lastSessionRefreshAtRef = useRef(0);
 
   const selectAdminTab = useCallback((tabId: string, remember = true) => {
     setActiveTab((current) => {
@@ -1077,6 +1114,12 @@ function AdminPage() {
 
   const authHeaders = useMemo(() => ({ authorization: `Bearer ${token}` }), [token]);
 
+  const clearAdminSession = useCallback(() => {
+    localStorage.removeItem("adminToken");
+    setData(null);
+    setToken("");
+  }, []);
+
   const loadAdmin = useCallback(async () => {
     if (!token) return;
     try {
@@ -1088,11 +1131,14 @@ function AdminPage() {
         : overview);
       setError("");
     } catch (requestError) {
-      localStorage.removeItem("adminToken");
-      setToken("");
-      setError(requestError instanceof Error ? requestError.message : "Сессия истекла");
+      if (requestError instanceof ApiRequestError && requestError.status === 401) {
+        clearAdminSession();
+        setError("Сессия истекла. Войдите ещё раз.");
+        return;
+      }
+      setError("Не удалось обновить данные. Сессия сохранена — проверьте подключение к интернету.");
     }
-  }, [authHeaders, token]);
+  }, [authHeaders, clearAdminSession, token]);
 
   useEffect(() => {
     void loadAdmin();
@@ -1105,6 +1151,32 @@ function AdminPage() {
     }, 10_000);
     return () => window.clearInterval(interval);
   }, [loadAdmin, token]);
+
+  useEffect(() => {
+    if (!token) return;
+    const refreshSession = async () => {
+      if (!adminSessionNeedsRefresh(token)) return;
+      if (Date.now() - lastSessionRefreshAtRef.current < ADMIN_SESSION_REFRESH_COOLDOWN_MS) return;
+      try {
+        const result = await api<{ token: string; username: string }>("/api/admin/session/refresh", {
+          method: "POST",
+          headers: authHeaders
+        });
+        localStorage.setItem("adminToken", result.token);
+        localStorage.setItem("adminUsername", result.username);
+        lastSessionRefreshAtRef.current = Date.now();
+        setToken(result.token);
+      } catch (requestError) {
+        if (requestError instanceof ApiRequestError && requestError.status === 401) {
+          clearAdminSession();
+          setError("Сессия истекла. Войдите ещё раз.");
+        }
+      }
+    };
+    void refreshSession();
+    const interval = window.setInterval(() => void refreshSession(), 60 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [authHeaders, clearAdminSession, token]);
 
   useEffect(() => {
     if (!sidebarOpen) return;
@@ -1133,10 +1205,12 @@ function AdminPage() {
     const panel = contentRef.current;
     if (!panel) return;
     const onPointerDown = (event: PointerEvent) => {
-      if (window.innerWidth > 1040 || sidebarOpen || tabHistoryRef.current.length <= 1 || !swipeAllowedTarget(event.target)) return;
+      const action = adminSwipeAction(activeTab, tabHistoryRef.current.length);
+      if (window.innerWidth > 1040 || sidebarOpen || action === "none" || !swipeAllowedTarget(event.target)) return;
       if (event.clientX > Math.min(44, window.innerWidth * 0.12)) return;
       swipeStartRef.current = { x: event.clientX, y: event.clientY, pointerId: event.pointerId };
       swipeActiveRef.current = false;
+      swipeActionRef.current = action;
       panel.classList.remove("admin-content--snap");
     };
     const onPointerMove = (event: PointerEvent) => {
@@ -1146,17 +1220,24 @@ function AdminPage() {
       if (!swipeActiveRef.current && !progress.horizontal) return;
       swipeActiveRef.current = true;
       event.preventDefault();
-      panel.style.setProperty("--admin-swipe-x", `${Math.min(progress.dx, window.innerWidth)}px`);
+      const maximumOffset = swipeActionRef.current === "sidebar" ? 96 : window.innerWidth;
+      panel.style.setProperty("--admin-swipe-x", `${Math.min(progress.dx, maximumOffset)}px`);
     };
     const finish = (event: PointerEvent) => {
       const start = swipeStartRef.current;
       if (!start || event.pointerId !== start.pointerId) return;
       const progress = swipeProgress(start, event.clientX, event.clientY);
       swipeStartRef.current = null;
+      const action = swipeActionRef.current;
+      swipeActionRef.current = "none";
       if (!swipeActiveRef.current) return;
       swipeActiveRef.current = false;
       panel.classList.add("admin-content--snap");
-      if (progress.complete) {
+      if (progress.complete && action === "sidebar") {
+        panel.style.setProperty("--admin-swipe-x", "0px");
+        setSidebarOpen(true);
+        window.setTimeout(() => panel.classList.remove("admin-content--snap"), 270);
+      } else if (progress.complete && action === "previous") {
         panel.style.setProperty("--admin-swipe-x", `${window.innerWidth}px`);
         window.setTimeout(() => {
           returnToPreviousTab();
@@ -1170,6 +1251,7 @@ function AdminPage() {
     const cancel = () => {
       swipeStartRef.current = null;
       swipeActiveRef.current = false;
+      swipeActionRef.current = "none";
       panel.classList.add("admin-content--snap");
       panel.style.setProperty("--admin-swipe-x", "0px");
     };
@@ -1183,7 +1265,7 @@ function AdminPage() {
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", cancel);
     };
-  }, [returnToPreviousTab, sidebarOpen]);
+  }, [activeTab, returnToPreviousTab, sidebarOpen]);
 
   const login = async (event: FormEvent) => {
     event.preventDefault();
@@ -3112,18 +3194,20 @@ function ChecklistEditor({
                 </div>
                 <Field label="Задача" value={item.title} onChange={(value) => updateItem(globalIndex, { title: value })} textarea autoGrow />
                 <Field label="Пояснение" value={item.description} onChange={(value) => updateItem(globalIndex, { description: value })} textarea autoGrow />
-                {templatePhase === "opening" && <label className="toggle-row">
-                  <input type="checkbox" checked={item.requiredForCalls} onChange={(event) => updateItem(globalIndex, { requiredForCalls: event.target.checked })} />
-                  Обязателен для допуска
-                </label>}
-                <label className="toggle-row">
-                  <input type="checkbox" checked={item.countsForRating !== false} onChange={(event) => updateItem(globalIndex, { countsForRating: event.target.checked })} />
-                  Учитывать в рейтинге
-                </label>
-                <label className="toggle-row">
-                  <input type="checkbox" checked={item.active} onChange={(event) => updateItem(globalIndex, { active: event.target.checked })} />
-                  Активен
-                </label>
+                <div className="checklist-template-options">
+                  {templatePhase === "opening" && <label className="toggle-row">
+                    <input type="checkbox" checked={item.requiredForCalls} onChange={(event) => updateItem(globalIndex, { requiredForCalls: event.target.checked })} />
+                    Обязателен для допуска
+                  </label>}
+                  <label className="toggle-row">
+                    <input type="checkbox" checked={item.countsForRating !== false} onChange={(event) => updateItem(globalIndex, { countsForRating: event.target.checked })} />
+                    Учитывать в рейтинге
+                  </label>
+                  <label className="toggle-row">
+                    <input type="checkbox" checked={item.active} onChange={(event) => updateItem(globalIndex, { active: event.target.checked })} />
+                    Активен
+                  </label>
+                </div>
                 <button className="icon-button" onClick={() => onChange(items.filter((_, index) => index !== globalIndex))} aria-label="Удалить пункт">
                   <Trash2 size={18} />
                 </button>
