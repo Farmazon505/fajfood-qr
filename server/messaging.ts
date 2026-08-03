@@ -1,7 +1,7 @@
 import type { MaxService } from "./max";
-import type { Store } from "./store";
+import { venueOperationalDateKey, type Store } from "./store";
 import type { TelegramService } from "./telegram";
-import type { DiningTable, ServiceCall, ShiftTask, VenueSettings, Waiter } from "./types";
+import type { DiningTable, ServiceCall, ShiftTask, VenueSettings, Waiter, WaiterShift } from "./types";
 import { config } from "./config";
 import type { OwnerWebPushService } from "./web-push";
 
@@ -11,9 +11,6 @@ type CallNotification = {
   waiters: Waiter[];
   settings: VenueSettings;
 };
-
-const venueDateKey = (value = new Date()) =>
-  new Intl.DateTimeFormat("en-CA", { timeZone: config.VENUE_TIME_ZONE }).format(value);
 
 export class MessagingService {
   private escalationTimer: ReturnType<typeof setInterval> | null = null;
@@ -33,6 +30,12 @@ export class MessagingService {
       },
       closeCall: async (call: ServiceCall) => {
         await this.closeCallMessages(call);
+      },
+      notifyClosingChecklistIncomplete: async (shift: WaiterShift) => {
+        await this.notifyClosingChecklistIncomplete(shift);
+      },
+      notifyAdminShiftSummary: async (shift: WaiterShift) => {
+        await this.notifyAdminShiftSummary(shift);
       }
     };
     this.telegram.setCallCoordinator(coordinator);
@@ -107,6 +110,26 @@ export class MessagingService {
     return results.some((result) => result.status === "fulfilled" && result.value);
   }
 
+  async notifyClosingChecklistIncomplete(shift: WaiterShift) {
+    const results = await Promise.allSettled([
+      this.telegram.notifyClosingChecklistIncomplete(shift),
+      this.max.notifyClosingChecklistIncomplete(shift)
+    ]);
+    for (const result of results) {
+      if (result.status === "rejected") console.error("[messaging] Ошибка уведомления о чек-листе закрытия:", result.reason);
+    }
+  }
+
+  async notifyAdminShiftSummary(shift: WaiterShift) {
+    const results = await Promise.allSettled([
+      this.telegram.notifyAdminShiftSummary(shift),
+      this.max.notifyAdminShiftSummary(shift)
+    ]);
+    for (const result of results) {
+      if (result.status === "rejected") console.error("[messaging] Ошибка доставки итогов смены администратора:", result.reason);
+    }
+  }
+
   start() {
     this.telegram.startPolling(false);
     void this.max.start().catch((error) => console.error("[max start]", error));
@@ -129,8 +152,17 @@ export class MessagingService {
     this.dailyMaintenanceRunning = true;
     try {
       const currentTime = new Date(at);
-      const currentDateKey = venueDateKey(currentTime);
-      await this.store.endOpenShiftsBeforeDate(currentDateKey, currentTime);
+      const currentDateKey = venueOperationalDateKey(currentTime);
+      const endedShifts = await this.store.endOpenShiftsBeforeDate(currentDateKey, currentTime);
+      for (const shift of endedShifts) {
+        const incompleteClosing = shift.checklist.some((item) => item.phase === "closing" && !item.completedAt);
+        if (incompleteClosing && (shift.roleKind === "waiter" || shift.roleId === "barista")) {
+          await this.notifyClosingChecklistIncomplete(shift);
+        }
+      }
+      for (const shift of endedShifts.filter((item) => item.roleKind === "admin")) {
+        await this.notifyAdminShiftSummary(shift);
+      }
       await this.store.rolloverIncompleteShiftTasks(currentDateKey, currentTime);
     } catch (error) {
       console.error("[messaging] Ошибка ежедневного обслуживания:", error);
@@ -236,7 +268,7 @@ export class MessagingService {
         }
       }
 
-      for (const task of this.store.getShiftTasksForNotification(venueDateKey(new Date(at)))) {
+      for (const task of this.store.getShiftTasksForNotification(venueOperationalDateKey(new Date(at)))) {
         if (await this.notifyShiftTask(task)) await this.store.markShiftTaskNotified(task.id);
       }
     } finally {

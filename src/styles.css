@@ -1861,6 +1861,34 @@ fieldset.field {
   background: var(--brand-primary);
 }
 
+.checklist-phase-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.checklist-phase-tabs button {
+  min-height: 46px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--muted);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.checklist-phase-tabs button.active {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, var(--card));
+  color: var(--primary);
+}
+
+.owner-sber-card-field {
+  margin-top: 16px;
+}
+
 .checklist-section-tabs {
   margin-top: 14px;
 }
@@ -2955,6 +2983,36 @@ button:disabled {
   background: #fbf8f1;
 }
 
+.admin-closing-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.admin-closing-summary > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+}
+
+.admin-closing-summary span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.admin-closing-summary .admin-penalty-receipt {
+  grid-column: 1 / -1;
+}
+
+.admin-penalty-receipt .review-photo-preview {
+  max-width: 320px;
+}
+
 .employee-checklist-item > p {
   margin: 10px 0 0 46px;
   color: #5e685f;
@@ -3586,7 +3644,8 @@ button:disabled {
 
   .employee-directory-list,
   .employee-profile-metrics,
-  .employee-item-review-form {
+  .employee-item-review-form,
+  .admin-closing-summary {
     grid-template-columns: 1fr;
   }
 

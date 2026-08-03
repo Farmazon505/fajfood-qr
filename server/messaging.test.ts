@@ -13,12 +13,14 @@ import {
   WAITER_COMPLETE_TIMEOUT_MS
 } from "./store";
 import type { TelegramService } from "./telegram";
-import type { ServiceCall } from "./types";
+import type { ServiceCall, WaiterShift } from "./types";
 import type { OwnerWebPushService } from "./web-push";
 
 class FakeTransport {
   notifications: ServiceCall[] = [];
   ownerAlerts: string[] = [];
+  closingAlerts: WaiterShift[] = [];
+  adminSummaries: WaiterShift[] = [];
 
   enabled() {
     return true;
@@ -43,6 +45,16 @@ class FakeTransport {
 
   async notifyOwnerAlert(text: string) {
     this.ownerAlerts.push(text);
+    return 1;
+  }
+
+  async notifyClosingChecklistIncomplete(shift: WaiterShift) {
+    this.closingAlerts.push(structuredClone(shift));
+    return 1;
+  }
+
+  async notifyAdminShiftSummary(shift: WaiterShift) {
+    this.adminSummaries.push(structuredClone(shift));
     return 1;
   }
 }
@@ -224,6 +236,68 @@ test("messaging daily maintenance closes a shift from the previous venue date", 
     assert.equal(store.currentShiftForWaiter(waiter.id), null);
     assert.ok(store.snapshot().tables.every((table) => !table.waiterIds.includes(waiter.id)));
     assert.equal(telegram.ownerAlerts.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("messaging keeps shifts open until 02:00 and then alerts admin about incomplete closing", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-two-am-shift-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const waiter = { ...store.snapshot().waiters[0], telegramChatId: "10001" };
+    const admin = {
+      id: "admin-two-am",
+      name: "Администратор 02:00",
+      roleId: "admin",
+      telegramChatId: "20001",
+      maxUserId: "",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([waiter, admin]);
+    await store.replaceChecklistItems([{
+      id: "closing-two-am",
+      roleId: "waiter",
+      phase: "closing",
+      title: "Закрыть зал",
+      description: "",
+      requiredForCalls: false,
+      countsForRating: true,
+      active: true,
+      sort: 10
+    }]);
+    const zone = store.listZones()[0];
+    const waiterShift = await store.startWaiterShift(waiter.id, [zone]);
+    const adminShift = await store.startWaiterShift(admin.id, [zone]);
+    assert.ok(waiterShift);
+    assert.ok(adminShift);
+
+    const telegram = new FakeTransport();
+    const max = new FakeTransport();
+    const messaging = new MessagingService(
+      store,
+      telegram as unknown as TelegramService,
+      max as unknown as MaxService
+    );
+    const [year, month, day] = waiterShift.shift.morningGreetingDate.split("-").map(Number);
+    const nextDate = new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+    const beforeClose = new Date(`${nextDate}T01:59:59+04:00`).getTime();
+    const atClose = new Date(`${nextDate}T02:00:00+04:00`).getTime();
+
+    await messaging.processEscalations(beforeClose);
+    assert.ok(store.currentShiftForWaiter(waiter.id));
+    assert.ok(store.currentShiftForWaiter(admin.id));
+    assert.equal(telegram.closingAlerts.length, 0);
+
+    await messaging.processEscalations(atClose);
+    assert.equal(store.currentShiftForWaiter(waiter.id), null);
+    assert.equal(store.currentShiftForWaiter(admin.id), null);
+    assert.equal(telegram.closingAlerts.length, 1);
+    assert.equal(max.closingAlerts.length, 1);
+    assert.equal(telegram.adminSummaries.length, 1);
+    assert.equal(telegram.adminSummaries[0].adminPenaltyAmount, 20);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

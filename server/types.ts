@@ -8,6 +8,7 @@ export type AdminAccountSummary = {
 export type OwnerNotificationSettings = {
   telegramChatId: string;
   maxUserId: string;
+  sberCardNumber: string;
   telegramEnabled: boolean;
   maxEnabled: boolean;
   configured: boolean;
@@ -20,6 +21,7 @@ export type OwnerWebPushStatus = {
 };
 export type StaffRoleKind = "owner" | "admin" | "waiter" | "staff";
 export type CallRoutingStage = "waiter" | "admin" | "owner";
+export type ChecklistPhase = "opening" | "closing";
 
 export type StaffRoleDefinition = {
   id: string;
@@ -90,6 +92,7 @@ export type Waiter = {
 export type ChecklistItem = {
   id: string;
   roleId: string;
+  phase?: ChecklistPhase;
   title: string;
   description: string;
   requiredForCalls: boolean;
@@ -117,6 +120,7 @@ export type ShiftTask = {
 
 export type ShiftChecklistEntry = {
   itemId: string;
+  phase: ChecklistPhase;
   title: string;
   description: string;
   requiredForCalls: boolean;
@@ -147,6 +151,16 @@ export type WaiterShift = {
   endedAt: string | null;
   morningGreetingDate: string;
   checklistOverdueNotifiedAt: string | null;
+  closingChecklistIncompleteNotifiedAt: string | null;
+  endedAutomatically: boolean;
+  adminReviewRequiredCount: number;
+  adminReviewMissingCount: number;
+  adminRatingPenaltyStars: number;
+  adminPenaltyItemCount: number;
+  adminPenaltyAmount: number;
+  adminPenaltyReceiptUrl: string;
+  adminPenaltyReceiptAt: string | null;
+  adminPenaltyReceiptMessenger: "telegram" | "max" | "web" | null;
 };
 
 export type WaiterRating = {

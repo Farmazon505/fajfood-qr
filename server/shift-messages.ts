@@ -14,19 +14,24 @@ export const shiftTaskText = (task: ShiftTask, roleLabel: string) => {
 };
 
 export const shiftChecklistText = (shift: WaiterShift) => {
-  const required = shift.checklist.filter((item) => item.requiredForCalls);
+  const required = shift.checklist.filter((item) => item.phase === "opening" && item.requiredForCalls);
   const requiredDone = required.filter((item) => item.completedAt).length;
-  const rows = shift.checklist.length
-    ? shift.checklist.map((item, index) => {
+  const rowsForPhase = (phase: "opening" | "closing") => {
+    const entries = shift.checklist.map((item, index) => ({ item, index })).filter(({ item }) => item.phase === phase);
+    if (!entries.length) return [];
+    return [phase === "opening" ? "🌅 ЧЕК-ЛИСТ ОТКРЫТИЯ" : "🌙 ЧЕК-ЛИСТ ЗАКРЫТИЯ", ...entries.map(({ item, index }) => {
         const marker = item.completedAt ? "✅" : "⬜";
-        const requiredLabel = item.requiredForCalls ? " · обязательно" : "";
+        const requiredLabel = phase === "opening" && item.requiredForCalls ? " · обязательно" : "";
         const ratingLabel = item.countsForRating === false ? " · без рейтинга" : "";
         const description = item.description.trim();
         return [
           `${marker} ${index + 1}. ${item.title}${requiredLabel}${ratingLabel}`,
           description ? `   Выполнить: ${description}` : ""
         ].filter(Boolean).join("\n");
-      })
+      })];
+  };
+  const rows = shift.checklist.length
+    ? [...rowsForPhase("opening"), "", ...rowsForPhase("closing")]
     : ["Чек-лист на сегодня пуст."];
   const admission = shift.status === "active"
     ? "Обязательные пункты выполнены"
@@ -41,11 +46,21 @@ export const shiftChecklistText = (shift: WaiterShift) => {
     ...rows,
     "",
     admission,
-    shift.checklist.length > 1 ? "Следующий пункт можно отметить через 1 минуту после предыдущего." : "",
+    shift.checklist.length > 1 ? "Интервал между пунктами одного чек-листа — 1 минута." : "",
+    closingItemsPendingText(shift),
     criticalNote
   ]
     .filter(Boolean)
     .join("\n");
+};
+
+const closingItemsPendingText = (shift: WaiterShift) => {
+  const closing = shift.checklist.filter((item) => item.phase === "closing");
+  const pending = closing.filter((item) => !item.completedAt).length;
+  if (!closing.length) return "";
+  return pending
+    ? `До завершения смены осталось выполнить пунктов закрытия: ${pending}.`
+    : "Чек-лист закрытия выполнен.";
 };
 
 export const shiftStartedText = (shift: WaiterShift) => {

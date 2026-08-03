@@ -20,7 +20,7 @@ import {
   updateAdminAccount
 } from "./auth";
 import { config, publicBaseUrl } from "./config";
-import { Store } from "./store";
+import { Store, venueOperationalDateKey } from "./store";
 import { TelegramService } from "./telegram";
 import { MaxService } from "./max";
 import { MessagingService } from "./messaging";
@@ -752,6 +752,7 @@ const adminAccountUpdateSchema = z.object({
 const ownerNotificationUpdateSchema = z.object({
   telegramChatId: z.string().trim().max(32).regex(/^$|^-?\d+$/),
   maxUserId: z.string().trim().max(32).regex(/^$|^\d+$/),
+  sberCardNumber: z.string().trim().max(32).regex(/^$|^[\d\s-]{12,32}$/).default(""),
   telegramEnabled: z.boolean(),
   maxEnabled: z.boolean()
 }).superRefine((value, context) => {
@@ -896,7 +897,7 @@ app.post("/api/admin/review-media", reviewImageUploadParser, async (request, res
 
 app.get("/api/admin/review-media/:filename", (request, response) => {
   const filename = String(request.params.filename || "");
-  if (!/^review-\d+-[0-9a-f-]+\.(?:png|jpg|webp)$/.test(filename)) {
+  if (!/^(?:review|penalty)-\d+-[0-9a-f-]+\.(?:png|jpg|webp)$/.test(filename)) {
     response.status(404).json({ error: "Фото не найдено" });
     return;
   }
@@ -966,6 +967,7 @@ app.get("/api/admin/overview", (request, response) => {
       : {
           telegramChatId: "",
           maxUserId: "",
+          sberCardNumber: "",
           telegramEnabled: false,
           maxEnabled: false,
           configured: true
@@ -1136,6 +1138,26 @@ app.put("/api/admin/waiters", async (request, response) => {
   response.json(await store.replaceWaiters(merged));
 });
 
+app.delete("/api/admin/waiters/:id", async (request, response) => {
+  const result = await store.deleteWaiter(String(request.params.id || ""));
+  if (result.status === "not_found") {
+    response.status(404).json({ error: "Сотрудник не найден" });
+    return;
+  }
+  if (result.status === "owner_forbidden") {
+    response.status(403).json({ error: "Владельца нельзя удалить из списка сотрудников" });
+    return;
+  }
+  if (result.status === "active_shift") {
+    response.status(409).json({
+      error: `Сначала завершите активную смену сотрудника «${result.shift.waiterName}»`,
+      shiftId: result.shift.id
+    });
+    return;
+  }
+  response.json({ ok: true, waiter: result.waiter });
+});
+
 app.get("/api/admin/shift-tasks", (request, response) => {
   const auth = getAdminAuth(request);
   response.json(
@@ -1186,7 +1208,7 @@ app.post("/api/admin/shift-tasks", async (request, response) => {
     countsForRating: parsed.data.countsForRating
   });
   // Если задание на сегодня и для конкретного сотрудника — отправить уведомление немедленно
-  const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: config.VENUE_TIME_ZONE }).format(new Date());
+  const todayKey = venueOperationalDateKey();
   if (task.date === todayKey && task.waiterId) {
     if (await messaging.notifyShiftTask(task)) {
       await store.markShiftTaskNotified(task.id);
@@ -1230,6 +1252,13 @@ app.post("/api/admin/shifts/:id/end", async (request, response) => {
     });
     return;
   }
+  if (result.status === "closing_checklist_incomplete") {
+    response.status(409).json({
+      error: `Сначала завершите чек-лист закрытия: осталось пунктов — ${result.pendingCount}`,
+      pendingCount: result.pendingCount
+    });
+    return;
+  }
   response.json(result.shift);
 });
 
@@ -1246,12 +1275,18 @@ app.put("/api/admin/shifts/:id/review", async (request, response) => {
     response.status(403).json({ error: "Оценка администраторов доступна только владельцу" });
     return;
   }
-  const shift = await store.reviewShiftChecklist(
-    request.params.id,
-    parsed.data.reviews,
-    auth?.role ?? null,
-    auth?.username ?? ""
-  );
+  let shift;
+  try {
+    shift = await store.reviewShiftChecklist(
+      request.params.id,
+      parsed.data.reviews,
+      auth?.role ?? null,
+      auth?.username ?? ""
+    );
+  } catch (error) {
+    response.status(409).json({ error: error instanceof Error ? error.message : "Оценка не сохранена" });
+    return;
+  }
   if (!shift) {
     response.status(404).json({ error: "Смена не найдена" });
     return;

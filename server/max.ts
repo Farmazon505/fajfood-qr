@@ -1,10 +1,11 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { Agent as HttpsAgent } from "node:https";
 import path from "node:path";
 import fetch from "node-fetch";
 import { config, publicBaseUrl } from "./config";
-import type { Store } from "./store";
+import type { ShiftEndResult, Store } from "./store";
 import type {
   DiningTable,
   MaxMessageRef,
@@ -25,7 +26,11 @@ type MaxUser = {
 type MaxMessage = {
   sender?: MaxUser | null;
   recipient: { chat_id: number | null; chat_type: string };
-  body: { mid: string; text?: string | null };
+  body: {
+    mid: string;
+    text?: string | null;
+    attachments?: Array<{ type?: string; payload?: { url?: string; token?: string } }>;
+  };
 };
 
 type MaxUpdate = {
@@ -60,6 +65,8 @@ type MaxMessageBody = {
 type MaxCallCoordinator = {
   syncCall(call: ServiceCall): Promise<void>;
   closeCall(call: ServiceCall): Promise<void>;
+  notifyClosingChecklistIncomplete?(shift: WaiterShift): Promise<void>;
+  notifyAdminShiftSummary?(shift: WaiterShift): Promise<void>;
 };
 
 type MaxApiRequest = {
@@ -170,6 +177,11 @@ export class MaxService {
     if (update.update_type === "message_created" && update.message) {
       const message = update.message;
       const userId = message.sender?.user_id;
+      const image = message.body.attachments?.find((attachment) => attachment.type === "image");
+      if (userId && image) {
+        await this.handlePenaltyReceiptImage(userId, image.payload?.url || "");
+        return;
+      }
       const text = message.body.text?.trim().toLocaleLowerCase("ru-RU");
       if (!userId || !text) return;
       if (["/start", "start", "/id", "id", "мой id", "помощь", "/help"].includes(text)) {
@@ -225,6 +237,60 @@ export class MaxService {
     }
   }
 
+  private async handlePenaltyReceiptImage(userId: number, imageUrl: string) {
+    const waiter = this.store.findWaiterByMaxUserId(userId);
+    const shift = waiter ? this.store.latestUnpaidAdminPenaltyShift(waiter.id) : null;
+    if (!waiter || !shift) {
+      await this.sendMessage(String(userId), { text: "Фото получено, но у вас нет неоплаченного штрафа по завершённой смене администратора." });
+      return;
+    }
+    let url: URL;
+    try {
+      url = new URL(imageUrl);
+    } catch {
+      await this.sendMessage(String(userId), { text: "MAX не передал ссылку на изображение. Отправьте чек в Telegram-бот или загрузите его в CRM." });
+      return;
+    }
+    if (url.protocol !== "https:" || (url.hostname !== "max.ru" && !url.hostname.endsWith(".max.ru"))) {
+      await this.sendMessage(String(userId), { text: "Не удалось безопасно получить изображение. Отправьте чек в Telegram-бот или загрузите его в CRM." });
+      return;
+    }
+    const response = await fetch(url, { agent: this.httpsAgent });
+    if (!response.ok) {
+      await this.sendMessage(String(userId), { text: "Не удалось скачать скриншот. Отправьте фото ещё раз или используйте Telegram-бот." });
+      return;
+    }
+    const body = Buffer.from(await response.arrayBuffer());
+    if (body.length < 100 || body.length > 8 * 1024 * 1024) {
+      await this.sendMessage(String(userId), { text: "Скриншот чека повреждён или превышает 8 МБ." });
+      return;
+    }
+    const extension = body.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
+      ? "jpg"
+      : body.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+        ? "png"
+        : body.subarray(0, 4).toString("ascii") === "RIFF" && body.subarray(8, 12).toString("ascii") === "WEBP"
+          ? "webp"
+          : "";
+    if (!extension) {
+      await this.sendMessage(String(userId), { text: "Отправьте чек как JPG, PNG или WEBP фото." });
+      return;
+    }
+    const mediaDir = this.store.reviewMediaDirectory();
+    await mkdir(mediaDir, { recursive: true });
+    const filename = `penalty-${Date.now()}-${randomUUID()}.${extension}`;
+    await writeFile(path.join(mediaDir, filename), body);
+    await this.store.attachAdminPenaltyReceipt(
+      shift.id,
+      waiter.id,
+      `/api/admin/review-media/${filename}`,
+      "max"
+    );
+    await this.sendMessage(String(userId), {
+      text: `✅ Чек по штрафу ${shift.adminPenaltyAmount} ₽ сохранён в смене за ${shift.morningGreetingDate}.`
+    });
+  }
+
   async notifyCall(options: {
     call: ServiceCall;
     table: DiningTable;
@@ -277,6 +343,53 @@ export class MaxService {
     if (!userId) return false;
     const sent = await this.sendMessage(userId, this.shiftTaskBody(task));
     return Boolean(sent);
+  }
+
+  async notifyClosingChecklistIncomplete(shift: WaiterShift) {
+    if (!this.enabled()) return 0;
+    const pending = shift.checklist.filter((item) => item.phase === "closing" && !item.completedAt);
+    if (!pending.length) return 0;
+    let delivered = 0;
+    for (const admin of this.store.adminsForClosingShift(shift)) {
+      const userId = admin.maxUserId.trim();
+      if (!userId) continue;
+      const sent = await this.sendMessage(userId, {
+        text: [
+          "⚠️ Не выполнен чек-лист закрытия",
+          `Сотрудник: ${shift.waiterName} · ${shift.roleName}`,
+          `Смена: ${shift.morningGreetingDate}`,
+          `Не выполнено: ${pending.length}`,
+          ...pending.slice(0, 8).map((item) => `• ${item.title}`),
+          pending.length > 8 ? `• и ещё ${pending.length - 8}` : "",
+          "Проверьте каждый пункт, добавьте фото и оценку в разделе «Контроль сотрудников»."
+        ].filter(Boolean).join("\n")
+      });
+      if (sent) delivered += 1;
+    }
+    return delivered;
+  }
+
+  async notifyAdminShiftSummary(shift: WaiterShift) {
+    if (!this.enabled() || shift.roleKind !== "admin") return 0;
+    const admin = this.store.findWaiterById(shift.waiterId);
+    const userId = admin?.maxUserId.trim();
+    if (!userId) return 0;
+    const card = this.store.snapshot().ownerNotifications.sberCardNumber.trim();
+    const sent = await this.sendMessage(userId, {
+      text: [
+        "📊 Итоги смены администратора",
+        `Дата: ${shift.morningGreetingDate}`,
+        `Оценка: ${shift.score} из 5 ★`,
+        shift.adminRatingPenaltyStars > 0 ? `Снижение за неподтверждённые пункты: −${shift.adminRatingPenaltyStars} ★` : "Неподтверждённых пунктов нет.",
+        `Невыполненных пунктов сотрудников: ${shift.adminPenaltyItemCount}`,
+        `Штраф: ${shift.adminPenaltyAmount} ₽`,
+        shift.adminPenaltyAmount > 0
+          ? card ? `Переведите штраф на карту СберБанка владельца: ${card}` : "Карта СберБанка владельца не указана. Обратитесь к владельцу."
+          : "Штраф не начислен.",
+        shift.adminPenaltyAmount > 0 ? "После перевода отправьте скриншот чека в Telegram-бот или загрузите его в CRM." : ""
+      ].filter(Boolean).join("\n")
+    });
+    return sent ? 1 : 0;
   }
 
   private shiftTaskBody(task: ShiftTask): MaxMessageBody {
@@ -617,14 +730,37 @@ export class MaxService {
   private async finishShift(userId: number, callbackId?: string) {
     const waiter = await this.requireWaiter(userId, callbackId);
     if (!waiter) return;
-    const shift = await this.store.endWaiterShift(waiter.id);
-    if (!shift) {
+    const result: ShiftEndResult = await this.store.requestEndWaiterShift(waiter.id);
+    if (result.status === "not_found") {
       await this.respond(userId, callbackId, {
         text: "У вас нет активной смены.",
         attachments: this.menuKeyboard(false)
       });
       return;
     }
+    if (result.status === "closing_checklist_incomplete") {
+      await this.sendChecklist(userId, result.shift, callbackId, `Смена не завершена: выполните чек-лист закрытия (${result.pendingCount} пунктов).`);
+      if (result.shift.roleKind === "waiter" || result.shift.roleId === "barista") {
+        if (this.coordinator?.notifyClosingChecklistIncomplete) await this.coordinator.notifyClosingChecklistIncomplete(result.shift);
+        else await this.notifyClosingChecklistIncomplete(result.shift);
+      }
+      return;
+    }
+    if (result.status === "employee_shifts_active") {
+      await this.respond(userId, callbackId, {
+        text: `Смена не завершена: сначала дождитесь завершения ${result.activeCount} смен официантов или бариста.`,
+        attachments: this.menuKeyboard(true)
+      });
+      return;
+    }
+    if (result.status === "admin_reviews_incomplete") {
+      await this.respond(userId, callbackId, {
+        text: `Смена не завершена. В разделе «Контроль сотрудников» добавьте фото и оценку ещё к ${result.missingCount} пунктам чек-листов закрытия официантов и бариста.`,
+        attachments: this.menuKeyboard(true)
+      });
+      return;
+    }
+    const shift = result.shift;
 
     await this.clearWaiterCallMessages(waiter);
     await this.respond(userId, callbackId, {
@@ -633,6 +769,10 @@ export class MaxService {
         : "Смена завершена. Столы сняты, уведомления отключены.\nВ этой смене не было заданий, влияющих на рейтинг.",
       attachments: this.menuKeyboard(false)
     });
+    if (shift.roleKind === "admin") {
+      if (this.coordinator?.notifyAdminShiftSummary) await this.coordinator.notifyAdminShiftSummary(shift);
+      else await this.notifyAdminShiftSummary(shift);
+    }
   }
 
   private recipientsForCall(call: ServiceCall, table: DiningTable) {

@@ -1253,6 +1253,24 @@ function AdminPage() {
     await loadAdmin();
   };
 
+  const deleteStaffMember = async (waiter: Waiter) => {
+    setSaved("");
+    setError("");
+    try {
+      await api(`/api/admin/waiters/${encodeURIComponent(waiter.id)}`, {
+        method: "DELETE",
+        headers: authHeaders
+      });
+      setSaved(`Сотрудник «${waiter.name}» удалён`);
+      setTimeout(() => setSaved(""), 3000);
+      await loadAdmin();
+      return true;
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось удалить сотрудника");
+      return false;
+    }
+  };
+
   const acknowledgeCall = async (callId: string) => {
     await api(`/api/admin/calls/${callId}/acknowledge`, {
       method: "POST",
@@ -1472,6 +1490,7 @@ function AdminPage() {
             onRolesChange={(staffRoles) => setData({ ...data, staffRoles })}
             onSaveWaiters={() => void saveResource("waiters", data.waiters, "Сотрудники сохранены")}
             onSaveRoles={() => void saveResource("staff-roles", data.staffRoles, "Должности сохранены")}
+            onDeleteWaiter={deleteStaffMember}
           />
         )}
 
@@ -1816,6 +1835,7 @@ function OwnerProfile({
         body: JSON.stringify({
           telegramChatId,
           maxUserId,
+          sberCardNumber: notificationSettings.sberCardNumber,
           telegramEnabled: notificationSettings.telegramEnabled,
           maxEnabled: notificationSettings.maxEnabled
         })
@@ -2032,6 +2052,25 @@ function OwnerProfile({
             </label>
           </article>
         </div>
+
+        <label className="field owner-sber-card-field">
+          <span>Карта СберБанка владельца для перевода штрафов</span>
+          <input
+            inputMode="numeric"
+            value={notificationSettings.sberCardNumber}
+            onChange={(event) => {
+              setNotificationSettings({
+                ...notificationSettings,
+                sberCardNumber: event.target.value
+              });
+              setNotificationMessage("");
+              setNotificationError("");
+            }}
+            placeholder="Например: 2202 0000 0000 0000"
+            maxLength={32}
+          />
+          <small>Номер будет показан администратору только при начисленном штрафе.</small>
+        </label>
 
         <div className="owner-crm-channel">
           <CheckCircle2 size={18} />
@@ -2632,7 +2671,8 @@ function StaffEditor({
   onWaitersChange,
   onRolesChange,
   onSaveWaiters,
-  onSaveRoles
+  onSaveRoles,
+  onDeleteWaiter
 }: {
   waiters: Waiter[];
   roles: StaffRoleDefinition[];
@@ -2641,8 +2681,10 @@ function StaffEditor({
   onRolesChange: (roles: StaffRoleDefinition[]) => void;
   onSaveWaiters: () => void;
   onSaveRoles: () => void;
+  onDeleteWaiter: (waiter: Waiter) => Promise<boolean>;
 }) {
   const [roleFilter, setRoleFilter] = useState("all");
+  const [deletingWaiterId, setDeletingWaiterId] = useState("");
   const updateWaiter = (index: number, patch: Partial<Waiter>) => {
     onWaitersChange(waiters.map((waiter, waiterIndex) => (waiterIndex === index ? { ...waiter, ...patch } : waiter)));
   };
@@ -2654,6 +2696,19 @@ function StaffEditor({
     if (role.kind === "admin") return "Администратор";
     if (role.kind === "waiter") return "Официант";
     return "Сотрудник";
+  };
+  const deleteWaiter = async (waiter: Waiter, index: number) => {
+    if (!waiter.id) {
+      onWaitersChange(waiters.filter((_, waiterIndex) => waiterIndex !== index));
+      return;
+    }
+    if (!window.confirm(`Удалить сотрудника «${waiter.name}»? История завершённых смен сохранится.`)) return;
+    setDeletingWaiterId(waiter.id);
+    try {
+      await onDeleteWaiter(waiter);
+    } finally {
+      setDeletingWaiterId("");
+    }
   };
 
   return (
@@ -2770,9 +2825,9 @@ function StaffEditor({
                 <button
                   className="icon-button"
                   aria-label="Удалить сотрудника"
-                  disabled={role?.kind === "owner"}
-                  title={role?.kind === "owner" ? "Владельца нельзя удалить из этого списка" : "Удалить"}
-                  onClick={() => onWaitersChange(waiters.filter((_, waiterIndex) => waiterIndex !== index))}
+                  disabled={role?.kind === "owner" || deletingWaiterId === waiter.id}
+                  title={role?.kind === "owner" ? "Владельца нельзя удалить из этого списка" : "Удалить сразу"}
+                  onClick={() => void deleteWaiter(waiter, index)}
                 >
                   <Trash2 size={18} />
                 </button>
@@ -2898,6 +2953,7 @@ function ChecklistEditor({
   const preferredRoleId = availableRoles.find((role) => role.kind === "waiter")?.id || availableRoles[0]?.id || "";
   const [roleId, setRoleId] = useState(preferredRoleId);
   const [section, setSection] = useState<"template" | "tasks">("template");
+  const [templatePhase, setTemplatePhase] = useState<"opening" | "closing">("opening");
   const [taskDate, setTaskDate] = useState(() => new Intl.DateTimeFormat("en-CA").format(new Date()));
   const [taskWaiterId, setTaskWaiterId] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
@@ -2915,7 +2971,7 @@ function ChecklistEditor({
 
   const roleEntries = items
     .map((item, globalIndex) => ({ item, globalIndex }))
-    .filter(({ item }) => item.roleId === roleId)
+    .filter(({ item }) => item.roleId === roleId && (item.phase || "opening") === templatePhase)
     .sort((left, right) => left.item.sort - right.item.sort);
   const roleTasks = shiftTasks
     .filter((task) => task.roleId === roleId)
@@ -3012,14 +3068,25 @@ function ChecklistEditor({
 
       {section === "template" ? (
         <div className="checklist-section-body">
+          <div className="checklist-phase-tabs" role="tablist" aria-label="Этап смены">
+            <button className={templatePhase === "opening" ? "active" : ""} onClick={() => setTemplatePhase("opening")}>
+              🌅 Чек-лист открытия
+            </button>
+            <button className={templatePhase === "closing" ? "active" : ""} onClick={() => setTemplatePhase("closing")}>
+              🌙 Чек-лист закрытия
+            </button>
+          </div>
           <div className="section-toolbar">
-            <p className="muted">Обязательные пункты блокируют рабочие уведомления официанта до выполнения.</p>
+            <p className="muted">{templatePhase === "opening"
+              ? "Обязательные пункты блокируют рабочие уведомления официанта до выполнения."
+              : "Все пункты закрытия необходимо выполнить до ручного завершения смены. Автозакрытие выполняется в 02:00."}</p>
             <div className="button-row">
               <button
                 className="ghost-button"
                 onClick={() => onChange([...items, {
                   id: crypto.randomUUID(),
                   roleId,
+                  phase: templatePhase,
                   title: "Новый пункт",
                    description: "",
                    requiredForCalls: false,
@@ -3045,10 +3112,10 @@ function ChecklistEditor({
                 </div>
                 <Field label="Задача" value={item.title} onChange={(value) => updateItem(globalIndex, { title: value })} textarea autoGrow />
                 <Field label="Пояснение" value={item.description} onChange={(value) => updateItem(globalIndex, { description: value })} textarea autoGrow />
-                <label className="toggle-row">
+                {templatePhase === "opening" && <label className="toggle-row">
                   <input type="checkbox" checked={item.requiredForCalls} onChange={(event) => updateItem(globalIndex, { requiredForCalls: event.target.checked })} />
                   Обязателен для допуска
-                </label>
+                </label>}
                 <label className="toggle-row">
                   <input type="checkbox" checked={item.countsForRating !== false} onChange={(event) => updateItem(globalIndex, { countsForRating: event.target.checked })} />
                   Учитывать в рейтинге
@@ -3062,7 +3129,7 @@ function ChecklistEditor({
                 </button>
               </article>
             ))}
-            {!roleEntries.length && <p className="muted">Для этой должности шаблон пока пуст.</p>}
+            {!roleEntries.length && <p className="muted">Для этой должности чек-лист {templatePhase === "opening" ? "открытия" : "закрытия"} пока пуст.</p>}
           </div>
         </div>
       ) : (
@@ -3265,7 +3332,7 @@ function EmployeeControl({
   onRefresh: () => Promise<void>;
 }) {
   const todayKey = useMemo(
-    () => new Intl.DateTimeFormat("en-CA", { timeZone: venueTimeZone || "Europe/Astrakhan" }).format(new Date()),
+    () => new Intl.DateTimeFormat("en-CA", { timeZone: venueTimeZone || "Europe/Astrakhan" }).format(new Date(Date.now() - 2 * 60 * 60 * 1000)),
     [venueTimeZone]
   );
   const roleMap = useMemo(() => new Map(roles.map((role) => [role.id, role])), [roles]);
@@ -3344,7 +3411,7 @@ function EmployeeControl({
   const draftKey = (shiftId: string, itemId: string) => `${shiftId}:${itemId}`;
   const draftFor = (shift: WaiterShift, item: WaiterShift["checklist"][number]) =>
     drafts[draftKey(shift.id, item.itemId)] || {
-      score: item.adminScore ?? 5,
+      score: item.adminScore ?? (!item.completedAt && item.phase === "closing" ? 4 : 5),
       comment: item.adminComment,
       photoUrl: item.adminPhotoUrl,
       photoFile: null
@@ -3374,6 +3441,13 @@ function EmployeeControl({
     setSavingItem(key);
     setNotice("");
     try {
+      if (!item.completedAt && item.phase === "closing" && draft.score > 4) {
+        window.alert("Оценка свыше 4 не может быть назначена, так как пункт чек-листа закрытия выполнен не вовремя.");
+        return;
+      }
+      if (item.phase === "closing" && !draft.photoFile && !draft.photoUrl) {
+        throw new Error("Для пункта чек-листа закрытия обязательно добавьте фото подтверждение");
+      }
       let photoUrl = draft.photoUrl;
       if (draft.photoFile) {
         const uploadResponse = await fetch("/api/admin/review-media", {
@@ -3526,21 +3600,46 @@ function EmployeeControl({
                           : `Сотрудник ещё не выполнил первый пункт: «${nextPending.title}».`
                         : "Все пункты чек-листа выполнены."}
                     </div>
+                    {shift.roleKind === "admin" && (
+                      <div className="admin-closing-summary">
+                        <div><span>Пунктов под контролем</span><strong>{shift.adminReviewRequiredCount}</strong></div>
+                        <div><span>Без отчёта</span><strong>{shift.adminReviewMissingCount}</strong></div>
+                        <div><span>Снижение рейтинга</span><strong>{shift.adminRatingPenaltyStars ? `−${shift.adminRatingPenaltyStars} ★` : "—"}</strong></div>
+                        <div><span>Штраф</span><strong>{shift.adminPenaltyAmount} ₽</strong></div>
+                        {shift.adminPenaltyAmount > 0 && (
+                          <div className="admin-penalty-receipt">
+                            <span>Подтверждение перевода</span>
+                            {shift.adminPenaltyReceiptUrl
+                              ? <ReviewImagePreview photoFile={null} photoUrl={shift.adminPenaltyReceiptUrl} authHeaders={authHeaders} alt={`Чек штрафа за ${shift.morningGreetingDate}`} />
+                              : <strong>Чек ещё не загружен</strong>}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     <div className="employee-checklist-review">
                       {shift.checklist.map((item, index) => {
                         const draft = draftFor(shift, item);
                         const key = draftKey(shift.id, item.itemId);
+                        const closingReviewRequired = item.phase === "closing" && (shift.roleKind === "waiter" || shift.roleId === "barista");
+                        const reviewAvailable = Boolean(item.completedAt) || closingReviewRequired;
                         return (
                           <article className={`employee-checklist-item ${item.completedAt ? "is-completed" : "is-pending"}`} key={item.itemId}>
                             <div className="employee-checklist-item-heading">
                               <span className="employee-checklist-index">{index + 1}</span>
-                              <div><strong>{item.title}</strong><small>{item.completedAt ? `Выполнено ${formatDate(item.completedAt)}` : "Не выполнено"}{item.countsForRating === false ? " · оценка не влияет на общий рейтинг" : ""}</small></div>
+                              <div><strong>{item.title}</strong><small>{item.phase === "closing" ? "Закрытие · " : "Открытие · "}{item.completedAt ? `выполнено ${formatDate(item.completedAt)}` : "не выполнено"}{item.countsForRating === false ? " · оценка не влияет на общий рейтинг" : ""}</small></div>
                               {item.completedAt ? <CheckCircle2 size={22} /> : <Clock size={22} />}
                             </div>
                             {item.description && <p>{item.description}</p>}
-                            {item.completedAt && (
+                            {reviewAvailable && (
                               <div className="employee-item-review-form">
-                                <div className="field star-review-field"><span>Оценка пункта</span><StarScore value={draft.score} onChange={(score) => updateDraft(shift, item, { score })} /></div>
+                                <div className="field star-review-field"><span>Оценка пункта</span><StarScore value={draft.score} onChange={(score) => {
+                                  if (!item.completedAt && item.phase === "closing" && score > 4) {
+                                    window.alert("Оценка свыше 4 не может быть назначена, так как пункт чек-листа закрытия выполнен не вовремя.");
+                                    return;
+                                  }
+                                  updateDraft(shift, item, { score });
+                                }} /></div>
+                                {!item.completedAt && item.phase === "closing" && <div className="task-notice">Пункт выполнен не вовремя: максимальная оценка — 4 звезды. Фото обязательно.</div>}
                                 <label className="field employee-review-comment"><span>Комментарий руководителя</span><textarea rows={3} maxLength={500} value={draft.comment} onChange={(event) => updateDraft(shift, item, { comment: event.target.value })} placeholder="Что выполнено хорошо и что нужно улучшить" /></label>
                                 <div className="employee-review-photo">
                                   <span className="employee-review-photo-label">Фото к комментарию</span>

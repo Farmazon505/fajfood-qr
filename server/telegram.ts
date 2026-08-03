@@ -1,4 +1,7 @@
-import type { Store } from "./store";
+import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { venueOperationalDateKey, type ShiftEndResult, type Store } from "./store";
 import type {
   DiningTable,
   ServiceCall,
@@ -23,6 +26,7 @@ type TelegramMessage = {
   message_id: number;
   chat: { id: number | string };
   text?: string;
+  photo?: Array<{ file_id: string; file_size?: number; width: number; height: number }>;
 };
 
 type TelegramUpdate = {
@@ -38,6 +42,8 @@ type TelegramUpdate = {
 type TelegramCallCoordinator = {
   syncCall(call: ServiceCall): Promise<void>;
   closeCall(call: ServiceCall): Promise<void>;
+  notifyClosingChecklistIncomplete?(shift: WaiterShift): Promise<void>;
+  notifyAdminShiftSummary?(shift: WaiterShift): Promise<void>;
 };
 
 const formatTime = (value: string) =>
@@ -48,9 +54,6 @@ const formatTime = (value: string) =>
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
-
-const venueDateKey = (value = new Date()) =>
-  new Intl.DateTimeFormat("en-CA", { timeZone: config.VENUE_TIME_ZONE }).format(value);
 
 const callReasonIcon = (label: string) => {
   const normalized = label.toLocaleLowerCase("ru-RU");
@@ -220,7 +223,7 @@ export class TelegramService {
         });
       }
 
-      for (const task of this.store.getShiftTasksForNotification(venueDateKey(new Date(at)))) {
+      for (const task of this.store.getShiftTasksForNotification(venueOperationalDateKey(new Date(at)))) {
         if (await this.notifyShiftTask(task)) {
           await this.store.markShiftTaskNotified(task.id);
         }
@@ -270,7 +273,59 @@ export class TelegramService {
     return delivered;
   }
 
+  async notifyClosingChecklistIncomplete(shift: WaiterShift) {
+    if (!this.enabled()) return 0;
+    const pending = shift.checklist.filter((item) => item.phase === "closing" && !item.completedAt);
+    if (!pending.length) return 0;
+    let delivered = 0;
+    for (const admin of this.store.adminsForClosingShift(shift)) {
+      const chatId = admin.telegramChatId.trim();
+      if (!chatId) continue;
+      const sent = await this.request<TelegramMessage>("sendMessage", {
+        chat_id: chatId,
+        text: [
+          "⚠️ Не выполнен чек-лист закрытия",
+          `Сотрудник: ${shift.waiterName} · ${shift.roleName}`,
+          `Смена: ${shift.morningGreetingDate}`,
+          `Не выполнено: ${pending.length}`,
+          ...pending.slice(0, 8).map((item) => `• ${item.title}`),
+          pending.length > 8 ? `• и ещё ${pending.length - 8}` : "",
+          "Проверьте каждый пункт, добавьте фото и оценку в разделе «Контроль сотрудников»."
+        ].filter(Boolean).join("\n"),
+        disable_notification: false
+      });
+      if (sent?.message_id) delivered += 1;
+    }
+    return delivered;
+  }
+
+  async notifyAdminShiftSummary(shift: WaiterShift) {
+    if (!this.enabled() || shift.roleKind !== "admin") return 0;
+    const admin = this.store.findWaiterById(shift.waiterId);
+    const chatId = admin?.telegramChatId.trim();
+    if (!chatId) return 0;
+    const card = this.store.snapshot().ownerNotifications.sberCardNumber.trim();
+    const text = [
+      "📊 Итоги смены администратора",
+      `Дата: ${shift.morningGreetingDate}`,
+      `Оценка: ${shift.score} из 5 ★`,
+      shift.adminRatingPenaltyStars > 0 ? `Снижение за неподтверждённые пункты: −${shift.adminRatingPenaltyStars} ★` : "Неподтверждённых пунктов нет.",
+      `Невыполненных пунктов сотрудников: ${shift.adminPenaltyItemCount}`,
+      `Штраф: ${shift.adminPenaltyAmount} ₽`,
+      shift.adminPenaltyAmount > 0
+        ? card ? `Переведите штраф на карту СберБанка владельца: ${card}` : "Карта СберБанка владельца не указана. Обратитесь к владельцу."
+        : "Штраф не начислен.",
+      shift.adminPenaltyAmount > 0 ? "После перевода отправьте сюда скриншот чека одним фото." : ""
+    ].filter(Boolean).join("\n");
+    const sent = await this.request<TelegramMessage>("sendMessage", { chat_id: chatId, text, disable_notification: false });
+    return sent?.message_id ? 1 : 0;
+  }
+
   async handleUpdate(update: TelegramUpdate) {
+    if (update.message?.photo?.length) {
+      await this.handlePenaltyReceiptPhoto(update.message);
+      return;
+    }
     const text = update.message?.text?.trim();
     if (text) {
       await this.handleMessage(update.message as TelegramMessage, text);
@@ -310,6 +365,60 @@ export class TelegramService {
     if (query.data.startsWith("call:")) {
       await this.handleCallCallback(query.id, query.message, query.data);
     }
+  }
+
+  private async handlePenaltyReceiptPhoto(message: TelegramMessage) {
+    const waiter = this.store.findWaiterByChatId(message.chat.id);
+    const shift = waiter ? this.store.latestUnpaidAdminPenaltyShift(waiter.id) : null;
+    if (!waiter || !shift) {
+      await this.sendText(message.chat.id, "Фото получено, но у вас нет неоплаченного штрафа по завершённой смене администратора.");
+      return;
+    }
+    const photo = [...(message.photo || [])].sort((left, right) => (right.file_size || 0) - (left.file_size || 0))[0];
+    if (!photo || (photo.file_size || 0) > 8 * 1024 * 1024) {
+      await this.sendText(message.chat.id, "Скриншот чека должен быть не больше 8 МБ.");
+      return;
+    }
+    const file = await this.request<{ file_path?: string }>("getFile", { file_id: photo.file_id });
+    if (!file?.file_path) {
+      await this.sendText(message.chat.id, "Не удалось получить скриншот из Telegram. Отправьте фото ещё раз.");
+      return;
+    }
+    const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${file.file_path}`);
+    if (!response.ok) {
+      await this.sendText(message.chat.id, "Не удалось скачать скриншот из Telegram. Отправьте фото ещё раз.");
+      return;
+    }
+    const body = Buffer.from(await response.arrayBuffer());
+    if (body.length < 100 || body.length > 8 * 1024 * 1024) {
+      await this.sendText(message.chat.id, "Скриншот чека повреждён или превышает 8 МБ.");
+      return;
+    }
+    const extension = body.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
+      ? "jpg"
+      : body.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+        ? "png"
+        : body.subarray(0, 4).toString("ascii") === "RIFF" && body.subarray(8, 12).toString("ascii") === "WEBP"
+          ? "webp"
+          : "";
+    if (!extension) {
+      await this.sendText(message.chat.id, "Отправьте чек как настоящее JPG, PNG или WEBP фото.");
+      return;
+    }
+    const mediaDir = this.store.reviewMediaDirectory();
+    await mkdir(mediaDir, { recursive: true });
+    const filename = `penalty-${Date.now()}-${randomUUID()}.${extension}`;
+    await writeFile(path.join(mediaDir, filename), body);
+    await this.store.attachAdminPenaltyReceipt(
+      shift.id,
+      waiter.id,
+      `/api/admin/review-media/${filename}`,
+      "telegram"
+    );
+    await this.sendText(
+      message.chat.id,
+      `✅ Чек по штрафу ${shift.adminPenaltyAmount} ₽ сохранён в смене за ${shift.morningGreetingDate}.`
+    );
   }
 
   private async handleMessage(message: TelegramMessage, text: string) {
@@ -603,11 +712,28 @@ export class TelegramService {
   private async finishShift(chatId: string | number) {
     const waiter = await this.requireWaiter(chatId);
     if (!waiter) return;
-    const shift = await this.store.endWaiterShift(waiter.id);
-    if (!shift) {
+    const result: ShiftEndResult = await this.store.requestEndWaiterShift(waiter.id);
+    if (result.status === "not_found") {
       await this.sendText(chatId, "У вас нет активной смены.");
       return;
     }
+    if (result.status === "closing_checklist_incomplete") {
+      await this.sendChecklist(chatId, result.shift, `Смена не завершена: выполните чек-лист закрытия (${result.pendingCount} пунктов).`);
+      if (result.shift.roleKind === "waiter" || result.shift.roleId === "barista") {
+        if (this.coordinator?.notifyClosingChecklistIncomplete) await this.coordinator.notifyClosingChecklistIncomplete(result.shift);
+        else await this.notifyClosingChecklistIncomplete(result.shift);
+      }
+      return;
+    }
+    if (result.status === "employee_shifts_active") {
+      await this.sendText(chatId, `Смена не завершена: сначала дождитесь завершения ${result.activeCount} смен официантов или бариста.`);
+      return;
+    }
+    if (result.status === "admin_reviews_incomplete") {
+      await this.sendText(chatId, `Смена не завершена. В разделе «Контроль сотрудников» добавьте фото и оценку ещё к ${result.missingCount} пунктам чек-листов закрытия официантов и бариста.`);
+      return;
+    }
+    const shift = result.shift;
 
     await this.clearWaiterCallMessages(waiter);
     await this.request("sendMessage", {
@@ -617,6 +743,10 @@ export class TelegramService {
         : "Смена завершена. Столы сняты, уведомления отключены.\nВ этой смене не было заданий, влияющих на рейтинг.",
       reply_markup: menuKeyboard
     });
+    if (shift.roleKind === "admin") {
+      if (this.coordinator?.notifyAdminShiftSummary) await this.coordinator.notifyAdminShiftSummary(shift);
+      else await this.notifyAdminShiftSummary(shift);
+    }
   }
 
   private async handleCallCallback(callbackId: string, message: TelegramMessage, data: string) {

@@ -8,7 +8,8 @@ import {
   CHECKLIST_ITEM_COOLDOWN_MS,
   Store,
   WAITER_ACCEPT_TIMEOUT_MS,
-  WAITER_COMPLETE_TIMEOUT_MS
+  WAITER_COMPLETE_TIMEOUT_MS,
+  venueOperationalDateKey
 } from "./store";
 import type { WaiterShift } from "./types";
 
@@ -128,6 +129,37 @@ test("a supervisor can end only an unassigned waiter shift", async () => {
   });
 });
 
+test("employee deletion is immediate, preserves history and explains an active-shift block", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const zone = store.listZones()[0];
+    const started = await store.startWaiterShift(waiter.id, [zone]);
+    assert.ok(started);
+
+    const blocked = await store.deleteWaiter(waiter.id);
+    assert.equal(blocked.status, "active_shift");
+    assert.ok(store.findWaiterById(waiter.id));
+
+    const ended = await store.requestEndWaiterShift(waiter.id, { automatic: true });
+    assert.equal(ended.status, "ended");
+    const task = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date: "2099-01-01",
+      title: "Будущее задание",
+      description: "",
+      requiredForCalls: false,
+      countsForRating: true
+    });
+    const deleted = await store.deleteWaiter(waiter.id);
+    assert.equal(deleted.status, "deleted");
+    assert.equal(store.findWaiterById(waiter.id), null);
+    assert.equal(store.findShiftTask(task.id), null);
+    assert.ok(store.findShiftById(started.shift.id));
+    assert.ok(store.snapshot().tables.every((table) => !table.waiterIds.includes(waiter.id)));
+  });
+});
+
 test("open employee shifts end automatically when the venue date changes", async () => {
   await withStore(async (store) => {
     const waiter = store.snapshot().waiters[0];
@@ -197,6 +229,230 @@ test("checklist items require one minute between distinct completions", async ()
     );
     assert.equal(allowed.status, "completed");
     assert.ok(allowed.shift.checklist[1].completedAt);
+  });
+});
+
+test("operational shift date changes at 02:00 venue time", () => {
+  assert.equal(venueOperationalDateKey(new Date("2026-08-03T21:59:59.000Z")), "2026-08-03");
+  assert.equal(venueOperationalDateKey(new Date("2026-08-03T22:00:00.000Z")), "2026-08-04");
+});
+
+test("closing checklist blocks manual shift end and keeps its own one-minute interval", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    await store.replaceChecklistItems([
+      {
+        id: "opening-one",
+        roleId: "waiter",
+        phase: "opening",
+        title: "Открыть зал",
+        description: "",
+        requiredForCalls: true,
+        countsForRating: true,
+        active: true,
+        sort: 10
+      },
+      ...[1, 2].map((number) => ({
+        id: `closing-${number}`,
+        roleId: "waiter",
+        phase: "closing" as const,
+        title: `Закрыть пункт ${number}`,
+        description: "",
+        requiredForCalls: false,
+        countsForRating: true,
+        active: true,
+        sort: 100 + number * 10
+      }))
+    ]);
+    const started = await store.startWaiterShift(waiter.id, [store.listZones()[0]]);
+    assert.ok(started);
+    assert.equal(started.shift.status, "checklist");
+
+    const openingAt = new Date(new Date(started.shift.startedAt).getTime() + 1_000);
+    const opening = await store.completeShiftChecklistItem(started.shift.id, waiter.id, 0, openingAt);
+    assert.equal(opening.status, "completed");
+    assert.equal(opening.shift.status, "active");
+
+    const blockedEnd = await store.requestEndWaiterShift(waiter.id);
+    assert.equal(blockedEnd.status, "closing_checklist_incomplete");
+    if (blockedEnd.status === "closing_checklist_incomplete") assert.equal(blockedEnd.pendingCount, 2);
+
+    const firstClosing = await store.completeShiftChecklistItem(started.shift.id, waiter.id, 1, openingAt);
+    assert.equal(firstClosing.status, "completed");
+    const cooldown = await store.completeShiftChecklistItem(
+      started.shift.id,
+      waiter.id,
+      2,
+      new Date(openingAt.getTime() + CHECKLIST_ITEM_COOLDOWN_MS - 1)
+    );
+    assert.equal(cooldown.status, "cooldown");
+    const secondClosing = await store.completeShiftChecklistItem(
+      started.shift.id,
+      waiter.id,
+      2,
+      new Date(openingAt.getTime() + CHECKLIST_ITEM_COOLDOWN_MS)
+    );
+    assert.equal(secondClosing.status, "completed");
+    const ended = await store.requestEndWaiterShift(waiter.id);
+    assert.equal(ended.status, "ended");
+  });
+});
+
+test("late closing item cannot receive more than four stars", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    await store.replaceChecklistItems([{
+      id: "closing-late",
+      roleId: "waiter",
+      phase: "closing",
+      title: "Закрыть станцию",
+      description: "",
+      requiredForCalls: false,
+      countsForRating: true,
+      active: true,
+      sort: 10
+    }]);
+    const started = await store.startWaiterShift(waiter.id, [store.listZones()[0]]);
+    assert.ok(started);
+    await assert.rejects(
+      store.reviewShiftChecklist(started.shift.id, [{ itemId: "closing-late", score: 5, comment: "", photoUrl: "/api/admin/review-media/review-1-00000000-0000-0000-0000-000000000001.jpg" }]),
+      /Оценка свыше 4/
+    );
+    const reviewed = await store.reviewShiftChecklist(started.shift.id, [{
+      itemId: "closing-late",
+      score: 4,
+      comment: "Выполнено после установленного времени",
+      photoUrl: "/api/admin/review-media/review-1-00000000-0000-0000-0000-000000000001.jpg"
+    }]);
+    assert.equal(reviewed?.checklist[0].adminScore, 4);
+  });
+});
+
+test("admin cannot end shift until every waiter closing item has a photo and score", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const admin = {
+      id: "admin-manual-closing",
+      name: "Администратор ручного закрытия",
+      roleId: "admin",
+      telegramChatId: "20002",
+      maxUserId: "",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([...store.snapshot().waiters, admin]);
+    await store.replaceChecklistItems([1, 2].map((number) => ({
+      id: `manual-closing-${number}`,
+      roleId: "waiter",
+      phase: "closing" as const,
+      title: `Закрытие ${number}`,
+      description: "",
+      requiredForCalls: false,
+      countsForRating: true,
+      active: true,
+      sort: number * 10
+    })));
+    const zone = store.listZones()[0];
+    const waiterStarted = await store.startWaiterShift(waiter.id, [zone]);
+    const adminStarted = await store.startWaiterShift(admin.id, [zone]);
+    assert.ok(waiterStarted);
+    assert.ok(adminStarted);
+    const firstCompleted = await store.completeShiftChecklistItem(
+      waiterStarted.shift.id,
+      waiter.id,
+      0,
+      new Date(new Date(waiterStarted.shift.startedAt).getTime() + 1_000)
+    );
+    assert.equal(firstCompleted.status, "completed");
+
+    const activeBlocked = await store.requestEndWaiterShift(admin.id);
+    assert.equal(activeBlocked.status, "employee_shifts_active");
+    const waiterEnded = await store.requestEndWaiterShift(waiter.id, { automatic: true });
+    assert.equal(waiterEnded.status, "ended");
+    const blocked = await store.requestEndWaiterShift(admin.id);
+    assert.equal(blocked.status, "admin_reviews_incomplete");
+    if (blocked.status === "admin_reviews_incomplete") assert.equal(blocked.missingCount, 2);
+
+    await store.reviewShiftChecklist(waiterStarted.shift.id, [
+      {
+        itemId: "manual-closing-1",
+        score: 5,
+        comment: "Выполнено вовремя",
+        photoUrl: "/api/admin/review-media/review-1-00000000-0000-0000-0000-000000000001.jpg"
+      },
+      {
+        itemId: "manual-closing-2",
+        score: 4,
+        comment: "Закрыто администратором",
+        photoUrl: "/api/admin/review-media/review-2-00000000-0000-0000-0000-000000000002.jpg"
+      }
+    ], "admin", "admin");
+    const ended = await store.requestEndWaiterShift(admin.id);
+    assert.equal(ended.status, "ended");
+    if (ended.status === "ended") {
+      assert.equal(ended.shift.adminReviewRequiredCount, 2);
+      assert.equal(ended.shift.adminReviewMissingCount, 0);
+      assert.equal(ended.shift.adminPenaltyAmount, 20);
+      assert.equal(ended.shift.score, 5);
+    }
+  });
+});
+
+test("automatic close fines admin and removes one star for two missing reports out of ten", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const admin = {
+      id: "admin-closing-control",
+      name: "Администратор закрытия",
+      roleId: "admin",
+      telegramChatId: "20001",
+      maxUserId: "",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([...store.snapshot().waiters, admin]);
+    await store.replaceChecklistItems(Array.from({ length: 10 }, (_, index) => ({
+      id: `waiter-closing-${index + 1}`,
+      roleId: "waiter",
+      phase: "closing" as const,
+      title: `Закрытие ${index + 1}`,
+      description: "",
+      requiredForCalls: false,
+      countsForRating: true,
+      active: true,
+      sort: (index + 1) * 10
+    })));
+    const zone = store.listZones()[0];
+    const waiterStarted = await store.startWaiterShift(waiter.id, [zone]);
+    const adminStarted = await store.startWaiterShift(admin.id, [zone]);
+    assert.ok(waiterStarted);
+    assert.ok(adminStarted);
+
+    const indexes = waiterStarted.shift.checklist.map((_, index) => index).slice(0, 8);
+    await completeChecklistItems(store, waiterStarted.shift, waiter.id, indexes);
+    const nextDate = new Date(`${waiterStarted.shift.morningGreetingDate}T12:00:00.000Z`);
+    nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+    const ended = await store.endOpenShiftsBeforeDate(nextDate.toISOString().slice(0, 10), nextDate);
+    const endedAdmin = ended.find((shift) => shift.waiterId === admin.id);
+    assert.ok(endedAdmin);
+    assert.equal(endedAdmin.endedAutomatically, true);
+    assert.equal(endedAdmin.adminReviewRequiredCount, 10);
+    assert.equal(endedAdmin.adminReviewMissingCount, 2);
+    assert.equal(endedAdmin.adminRatingPenaltyStars, 1);
+    assert.equal(endedAdmin.adminPenaltyItemCount, 2);
+    assert.equal(endedAdmin.adminPenaltyAmount, 40);
+    assert.equal(endedAdmin.score, 4);
+
+    const pending = store.latestUnpaidAdminPenaltyShift(admin.id);
+    assert.equal(pending?.id, endedAdmin.id);
+    const receipt = await store.attachAdminPenaltyReceipt(
+      endedAdmin.id,
+      admin.id,
+      "/api/admin/review-media/penalty-1-00000000-0000-0000-0000-000000000001.jpg",
+      "telegram"
+    );
+    assert.equal(receipt?.adminPenaltyReceiptMessenger, "telegram");
+    assert.equal(store.latestUnpaidAdminPenaltyShift(admin.id), null);
   });
 });
 

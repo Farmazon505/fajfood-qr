@@ -9,6 +9,7 @@ import type {
   CallRoutingStage,
   CallStatus,
   ChecklistItem,
+  ChecklistPhase,
   DiningTable,
   GuestFeedback,
   LoyaltyLead,
@@ -51,10 +52,29 @@ export type SupervisorShiftEndResult =
   | { status: "not_found" }
   | { status: "already_ended" }
   | { status: "not_waiter" }
+  | { status: "closing_checklist_incomplete"; pendingCount: number }
   | { status: "tables_assigned"; tableCount: number };
+
+export type ShiftEndResult =
+  | { status: "ended"; shift: WaiterShift }
+  | { status: "not_found" }
+  | { status: "closing_checklist_incomplete"; shift: WaiterShift; pendingCount: number }
+  | { status: "employee_shifts_active"; shift: WaiterShift; activeCount: number }
+  | { status: "admin_reviews_incomplete"; shift: WaiterShift; missingCount: number };
+
+export type WaiterDeletionResult =
+  | { status: "deleted"; waiter: Waiter }
+  | { status: "not_found" }
+  | { status: "owner_forbidden" }
+  | { status: "active_shift"; shift: WaiterShift };
 
 const venueDateKey = (value = new Date()) =>
   new Intl.DateTimeFormat("en-CA", { timeZone: config.VENUE_TIME_ZONE }).format(value);
+
+export const SHIFT_AUTO_CLOSE_HOUR = 2;
+export const ADMIN_FINE_PER_INCOMPLETE_ITEM = 20;
+export const venueOperationalDateKey = (value = new Date()) =>
+  venueDateKey(new Date(value.getTime() - SHIFT_AUTO_CLOSE_HOUR * 60 * 60 * 1000));
 
 const roundStars = (value: number) => Math.round(value * 100) / 100;
 const clampStars = (value: number) => roundStars(Math.max(1, Math.min(5, value)));
@@ -73,11 +93,24 @@ const checklistItemStars = (item: WaiterShift["checklist"][number]) => {
   return item.adminScore === null ? 5 : clampStars(item.adminScore);
 };
 
-const calculateShiftScore = (shift: Pick<WaiterShift, "checklist">) => {
+const calculateShiftScore = (
+  shift: Pick<WaiterShift, "checklist" | "roleKind"> & Partial<Pick<WaiterShift, "adminRatingPenaltyStars">>
+) => {
   const ratedItems = ratedChecklistItems(shift);
-  if (!ratedItems.length) return 0;
-  return roundStars(ratedItems.reduce((sum, item) => sum + checklistItemStars(item), 0) / ratedItems.length);
+  const baseScore = ratedItems.length
+    ? ratedItems.reduce((sum, item) => sum + checklistItemStars(item), 0) / ratedItems.length
+    : shift.roleKind === "admin" ? 5 : 0;
+  return roundStars(Math.max(0, baseScore - (shift.adminRatingPenaltyStars || 0)));
 };
+
+const closingItems = (shift: Pick<WaiterShift, "checklist">) =>
+  shift.checklist.filter((item) => item.phase === "closing");
+
+const isAdminReviewComplete = (item: WaiterShift["checklist"][number]) =>
+  item.adminScore !== null && Boolean(item.adminPhotoUrl.trim());
+
+const checklistOrder = <T extends { phase?: ChecklistPhase; sort: number }>(left: T, right: T) =>
+  (left.phase === "closing" ? 1 : 0) - (right.phase === "closing" ? 1 : 0) || left.sort - right.sort;
 
 const normalizedPatternTitle = (value: string) => value.trim().toLocaleLowerCase("ru-RU").replace(/\s+/g, " ");
 
@@ -105,6 +138,7 @@ const defaultSettings: VenueSettings = {
 const defaultOwnerNotifications: OwnerNotificationSettings = {
   telegramChatId: "",
   maxUserId: "",
+  sberCardNumber: "",
   telegramEnabled: false,
   maxEnabled: false,
   configured: false
@@ -174,6 +208,7 @@ const defaultChecklistItems: ChecklistItem[] = [
   {
     id: "check-clean-tables",
     roleId: "waiter",
+    phase: "opening",
     title: "Проверить чистоту и сервировку столов",
     description: "Столы, стулья и сервировка готовы к приему гостей.",
     requiredForCalls: true,
@@ -184,6 +219,7 @@ const defaultChecklistItems: ChecklistItem[] = [
   {
     id: "check-qr-menu",
     roleId: "waiter",
+    phase: "opening",
     title: "Проверить QR-коды и меню",
     description: "QR-коды читаются, меню и информационные материалы на месте.",
     requiredForCalls: true,
@@ -194,6 +230,7 @@ const defaultChecklistItems: ChecklistItem[] = [
   {
     id: "check-station",
     roleId: "waiter",
+    phase: "opening",
     title: "Подготовить рабочую станцию",
     description: "Салфетки, приборы и расходные материалы пополнены.",
     requiredForCalls: true,
@@ -297,6 +334,7 @@ export class Store {
       const migratedOwnerNotifications: OwnerNotificationSettings = stored.ownerNotifications ?? {
         telegramChatId: String(legacyOwner?.telegramChatId || "").trim(),
         maxUserId: String(legacyOwner?.maxUserId || "").trim(),
+        sberCardNumber: "",
         telegramEnabled: Boolean(String(legacyOwner?.telegramChatId || "").trim()),
         maxEnabled: Boolean(String(legacyOwner?.maxUserId || "").trim()),
         configured: Boolean(legacyOwner)
@@ -326,6 +364,10 @@ export class Store {
 
   snapshot() {
     return structuredClone(this.data);
+  }
+
+  reviewMediaDirectory() {
+    return path.join(this.dataDir, "review-media");
   }
 
   publicSnapshot() {
@@ -722,12 +764,18 @@ export class Store {
     return this.snapshot().settings;
   }
 
-  async updateOwnerNotifications(settings: Omit<OwnerNotificationSettings, "configured">) {
+  async updateOwnerNotifications(
+    settings: Omit<OwnerNotificationSettings, "configured" | "sberCardNumber"> &
+      Partial<Pick<OwnerNotificationSettings, "sberCardNumber">>
+  ) {
     const telegramChatId = settings.telegramChatId.trim();
     const maxUserId = settings.maxUserId.trim();
     this.data.ownerNotifications = {
       telegramChatId,
       maxUserId,
+      sberCardNumber: settings.sberCardNumber === undefined
+        ? this.data.ownerNotifications.sberCardNumber
+        : String(settings.sberCardNumber).trim().slice(0, 32),
       telegramEnabled: Boolean(settings.telegramEnabled && telegramChatId),
       maxEnabled: Boolean(settings.maxEnabled && maxUserId),
       configured: true
@@ -755,6 +803,7 @@ export class Store {
         ...item,
         id: item.id || randomUUID(),
         roleId: this.findRole(item.roleId)?.id ?? "waiter",
+        phase: (item.phase === "closing" ? "closing" : "opening") as ChecklistPhase,
         title: item.title?.trim() || `Пункт ${index + 1}`,
         description: item.description ?? "",
         requiredForCalls: item.requiredForCalls ?? true,
@@ -762,7 +811,7 @@ export class Store {
         active: item.active ?? true,
         sort: Number.isFinite(item.sort) ? item.sort : (index + 1) * 10
       }))
-      .sort((left, right) => left.sort - right.sort);
+      .sort(checklistOrder);
     this.data.shiftTasks = (this.data.shiftTasks ?? []).map((task) => ({
       ...task,
       id: task.id || randomUUID(),
@@ -793,6 +842,7 @@ export class Store {
     this.data.ownerNotifications = {
       telegramChatId: ownerTelegramChatId,
       maxUserId: ownerMaxUserId,
+      sberCardNumber: String(ownerNotifications.sberCardNumber || "").trim().slice(0, 32),
       telegramEnabled: Boolean(ownerNotifications.telegramEnabled && ownerTelegramChatId),
       maxEnabled: Boolean(ownerNotifications.maxEnabled && ownerMaxUserId),
       configured: Boolean(ownerNotifications.configured)
@@ -820,13 +870,17 @@ export class Store {
         checklist: (shift.checklist ?? []).map((item, index) => ({
           ...item,
           itemId: item.itemId || randomUUID(),
+          phase: item.phase === "closing" ? "closing" : "opening",
           title: item.title || `Пункт ${index + 1}`,
           description: item.description ?? "",
           requiredForCalls: item.requiredForCalls ?? true,
           countsForRating: item.countsForRating ?? true,
           sort: Number.isFinite(item.sort) ? item.sort : (index + 1) * 10,
           completedAt: item.completedAt ?? null,
-          adminScore: normalizeStoredStars(item.adminScore, Boolean(item.completedAt)),
+          adminScore:
+            item.phase === "closing" && !item.completedAt && typeof item.adminScore === "number"
+              ? Math.min(4, clampStars(item.adminScore))
+              : normalizeStoredStars(item.adminScore, Boolean(item.completedAt)),
           adminComment: item.adminComment ?? "",
           adminPhotoUrl: item.adminPhotoUrl ?? "",
           reviewedAt: item.reviewedAt ?? null,
@@ -837,6 +891,16 @@ export class Store {
         endedAt: shift.endedAt ?? null,
         morningGreetingDate: shift.morningGreetingDate || venueDateKey(new Date(shift.startedAt)),
         checklistOverdueNotifiedAt: shift.checklistOverdueNotifiedAt ?? null,
+        closingChecklistIncompleteNotifiedAt: shift.closingChecklistIncompleteNotifiedAt ?? null,
+        endedAutomatically: Boolean(shift.endedAutomatically),
+        adminReviewRequiredCount: Number.isFinite(shift.adminReviewRequiredCount) ? shift.adminReviewRequiredCount : 0,
+        adminReviewMissingCount: Number.isFinite(shift.adminReviewMissingCount) ? shift.adminReviewMissingCount : 0,
+        adminRatingPenaltyStars: Number.isFinite(shift.adminRatingPenaltyStars) ? shift.adminRatingPenaltyStars : 0,
+        adminPenaltyItemCount: Number.isFinite(shift.adminPenaltyItemCount) ? shift.adminPenaltyItemCount : 0,
+        adminPenaltyAmount: Number.isFinite(shift.adminPenaltyAmount) ? shift.adminPenaltyAmount : 0,
+        adminPenaltyReceiptUrl: shift.adminPenaltyReceiptUrl ?? "",
+        adminPenaltyReceiptAt: shift.adminPenaltyReceiptAt ?? null,
+        adminPenaltyReceiptMessenger: shift.adminPenaltyReceiptMessenger ?? null,
         score: 0
       };
       normalized.score = calculateShiftScore(normalized);
@@ -977,6 +1041,7 @@ export class Store {
         ...item,
         id: item.id || randomUUID(),
         roleId: this.findRole(item.roleId)?.id ?? "waiter",
+        phase: (item.phase === "closing" ? "closing" : "opening") as ChecklistPhase,
         title: item.title.trim() || `Пункт ${index + 1}`,
         description: item.description.trim(),
         requiredForCalls: Boolean(item.requiredForCalls),
@@ -984,7 +1049,7 @@ export class Store {
         active: Boolean(item.active),
         sort: Number.isFinite(item.sort) ? item.sort : (index + 1) * 10
       }))
-      .sort((left, right) => left.sort - right.sort);
+      .sort(checklistOrder);
     await this.persist();
     return this.snapshot().checklistItems;
   }
@@ -1015,6 +1080,36 @@ export class Store {
     return this.snapshot().waiters;
   }
 
+  async deleteWaiter(waiterId: string): Promise<WaiterDeletionResult> {
+    const waiter = this.data.waiters.find((item) => item.id === waiterId);
+    if (!waiter) return { status: "not_found" };
+    if (this.roleForWaiter(waiter)?.kind === "owner") return { status: "owner_forbidden" };
+    const activeShift = this.data.shifts.find(
+      (shift) => shift.waiterId === waiterId && shift.status !== "ended"
+    );
+    if (activeShift) return { status: "active_shift", shift: structuredClone(activeShift) };
+
+    this.data.waiters = this.data.waiters.filter((item) => item.id !== waiterId);
+    this.data.tables = this.data.tables.map((table) => {
+      const waiterIds = tableWaiterIds(table).filter((id) => id !== waiterId);
+      return { ...table, waiterIds, waiterId: waiterIds[0] ?? null };
+    });
+    this.data.shiftTasks = this.data.shiftTasks.filter(
+      (task) => task.waiterId !== waiterId || Boolean(task.completedAt)
+    );
+    this.data.calls = this.data.calls.map((call) => {
+      if (call.status === "done" || call.status === "cancelled") return call;
+      return {
+        ...call,
+        assignedWaiterId: call.assignedWaiterId === waiterId ? null : call.assignedWaiterId,
+        waiterRecipientIds: call.waiterRecipientIds.filter((id) => id !== waiterId),
+        adminRecipientIds: call.adminRecipientIds.filter((id) => id !== waiterId)
+      };
+    });
+    await this.persist();
+    return { status: "deleted", waiter: structuredClone(waiter) };
+  }
+
   async startWaiterShift(waiterId: string, requestedZones: string[]) {
     const waiter = this.data.waiters.find((item) => item.id === waiterId && item.active);
     if (!waiter) return null;
@@ -1028,15 +1123,16 @@ export class Store {
     const zones = uniqueIds(requestedZones).filter((zone) => availableZones.includes(zone));
     if (!zones.length) return null;
 
-    const dateKey = venueDateKey();
+    const dateKey = venueOperationalDateKey();
     const firstShiftToday = !this.data.shifts.some(
       (shift) => shift.waiterId === waiterId && shift.morningGreetingDate === dateKey
     );
     const templateItems = this.data.checklistItems
       .filter((item) => item.active && item.roleId === role.id)
-      .sort((left, right) => left.sort - right.sort)
+      .sort(checklistOrder)
       .map((item) => ({
         itemId: item.id,
+        phase: (item.phase === "closing" ? "closing" : "opening") as ChecklistPhase,
         title: item.title,
         description: item.description,
         requiredForCalls: item.requiredForCalls,
@@ -1060,6 +1156,7 @@ export class Store {
       })
       .map((task, idx) => ({
         itemId: `task-${task.id}`,
+        phase: "opening" as ChecklistPhase,
         title: task.title,
         description: task.description,
         requiredForCalls: task.requiredForCalls,
@@ -1074,7 +1171,9 @@ export class Store {
         reviewedByUsername: ""
       }));
     const checklist = [...templateItems, ...todayTasks];
-    const requiredComplete = checklist.every((item) => !item.requiredForCalls);
+    const requiredComplete = checklist.every(
+      (item) => item.phase !== "opening" || !item.requiredForCalls
+    );
     const timestamp = now();
     const shift: WaiterShift = {
       id: randomUUID(),
@@ -1091,7 +1190,17 @@ export class Store {
       readyAt: requiredComplete ? timestamp : null,
       endedAt: null,
       morningGreetingDate: dateKey,
-      checklistOverdueNotifiedAt: null
+      checklistOverdueNotifiedAt: null,
+      closingChecklistIncompleteNotifiedAt: null,
+      endedAutomatically: false,
+      adminReviewRequiredCount: 0,
+      adminReviewMissingCount: 0,
+      adminRatingPenaltyStars: 0,
+      adminPenaltyItemCount: 0,
+      adminPenaltyAmount: 0,
+      adminPenaltyReceiptUrl: "",
+      adminPenaltyReceiptAt: null,
+      adminPenaltyReceiptMessenger: null
     };
 
     this.data.shifts.unshift(shift);
@@ -1125,6 +1234,7 @@ export class Store {
 
     const completionTimestamp = completedAt.getTime();
     const latestCompletionTimestamp = shift.checklist.reduce((latest, entry) => {
+      if (entry.phase !== item.phase) return latest;
       if (!entry.completedAt) return latest;
       const timestamp = new Date(entry.completedAt).getTime();
       return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest;
@@ -1147,7 +1257,9 @@ export class Store {
       );
       if (task && !task.completedAt) task.completedAt = timestamp;
     }
-    const requiredComplete = shift.checklist.every((entry) => !entry.requiredForCalls || entry.completedAt);
+    const requiredComplete = shift.checklist.every(
+      (entry) => entry.phase !== "opening" || !entry.requiredForCalls || entry.completedAt
+    );
     if (requiredComplete && shift.status === "checklist") {
       shift.status = "active";
       shift.readyAt = timestamp;
@@ -1169,9 +1281,16 @@ export class Store {
     for (const review of reviews) {
       const item = shift.checklist.find((entry) => entry.itemId === review.itemId);
       if (!item) continue;
-      item.adminScore = !item.completedAt || review.score === null || !Number.isFinite(review.score)
+      if (item.phase === "closing" && !item.completedAt && review.score !== null && review.score > 4) {
+        throw new Error("Оценка свыше 4 не может быть назначена: пункт чек-листа закрытия выполнен не вовремя");
+      }
+      item.adminScore = review.score === null || !Number.isFinite(review.score)
         ? null
-        : clampStars(review.score);
+        : item.completedAt
+          ? clampStars(review.score)
+          : item.phase === "closing"
+            ? Math.min(4, clampStars(review.score))
+            : null;
       item.adminComment = review.comment.trim().slice(0, 500);
       if (review.photoUrl !== undefined) item.adminPhotoUrl = review.photoUrl.trim().slice(0, 240);
       item.reviewedAt = now();
@@ -1183,19 +1302,105 @@ export class Store {
     return structuredClone(shift);
   }
 
-  async endWaiterShift(waiterId: string) {
-    const shift = this.data.shifts.find((item) => item.waiterId === waiterId && item.status !== "ended");
-    if (!shift) return null;
+  private closingReviewTargetsForAdmin(adminShift: WaiterShift) {
+    return this.data.shifts.filter((shift) => {
+      if (shift.id === adminShift.id || shift.morningGreetingDate !== adminShift.morningGreetingDate) return false;
+      if (shift.roleKind !== "waiter" && shift.roleId !== "barista") return false;
+      if (!shift.zones.some((zone) => adminShift.zones.includes(zone))) return false;
+      return true;
+    });
+  }
 
+  adminsForClosingShift(employeeShift: WaiterShift) {
+    const memberIds = new Set(
+      this.data.shifts
+        .filter(
+          (shift) =>
+            shift.roleKind === "admin" &&
+            shift.morningGreetingDate === employeeShift.morningGreetingDate &&
+            shift.zones.some((zone) => employeeShift.zones.includes(zone))
+        )
+        .map((shift) => shift.waiterId)
+    );
+    return this.data.waiters
+      .filter((member) => member.active && memberIds.has(member.id) && this.roleForWaiter(member)?.kind === "admin")
+      .map((member) => structuredClone(member));
+  }
+
+  private applyAdminClosingMetrics(shift: WaiterShift) {
+    if (shift.roleKind !== "admin") return;
+    const targetItems = this.closingReviewTargetsForAdmin(shift).flatMap((target) => closingItems(target));
+    const incompleteItems = targetItems.filter((item) => !item.completedAt);
+    const missingIncompleteReviews = incompleteItems.filter((item) => !isAdminReviewComplete(item));
+    shift.adminReviewRequiredCount = targetItems.length;
+    shift.adminReviewMissingCount = missingIncompleteReviews.length;
+    shift.adminRatingPenaltyStars = targetItems.length
+      ? roundStars((missingIncompleteReviews.length / targetItems.length) * 5)
+      : 0;
+    shift.adminPenaltyItemCount = incompleteItems.length;
+    shift.adminPenaltyAmount = incompleteItems.length * ADMIN_FINE_PER_INCOMPLETE_ITEM;
+  }
+
+  private finalizeShift(shift: WaiterShift, endedAt: Date, automatic: boolean) {
+    this.applyAdminClosingMetrics(shift);
     shift.status = "ended";
-    shift.endedAt = now();
+    shift.endedAt = endedAt.toISOString();
+    shift.endedAutomatically = automatic;
     shift.score = calculateShiftScore(shift);
+  }
+
+  async requestEndWaiterShift(
+    waiterId: string,
+    options: { automatic?: boolean; endedAt?: Date } = {}
+  ): Promise<ShiftEndResult> {
+    const shift = this.data.shifts.find((item) => item.waiterId === waiterId && item.status !== "ended");
+    if (!shift) return { status: "not_found" };
+
+    const automatic = Boolean(options.automatic);
+    if (!automatic) {
+      const pendingClosing = closingItems(shift).filter((item) => !item.completedAt);
+      if (pendingClosing.length) {
+        return {
+          status: "closing_checklist_incomplete",
+          shift: structuredClone(shift),
+          pendingCount: pendingClosing.length
+        };
+      }
+      if (shift.roleKind === "admin") {
+        const targets = this.closingReviewTargetsForAdmin(shift);
+        const activeTargets = targets.filter((target) => target.status !== "ended");
+        if (activeTargets.length) {
+          return {
+            status: "employee_shifts_active",
+            shift: structuredClone(shift),
+            activeCount: activeTargets.length
+          };
+        }
+        const missingReviews = targets
+          .flatMap((target) => closingItems(target))
+          .filter((item) => !isAdminReviewComplete(item));
+        if (missingReviews.length) {
+          return {
+            status: "admin_reviews_incomplete",
+            shift: structuredClone(shift),
+            missingCount: missingReviews.length
+          };
+        }
+      }
+    }
+
+    this.finalizeShift(shift, options.endedAt ?? new Date(), automatic);
     this.data.tables = this.data.tables.map((table) => {
       const waiterIds = tableWaiterIds(table).filter((id) => id !== waiterId);
       return { ...table, waiterIds, waiterId: waiterIds[0] ?? null };
     });
     await this.persist();
-    return structuredClone(shift);
+    return { status: "ended", shift: structuredClone(shift) };
+  }
+
+  async endWaiterShift(waiterId: string) {
+    const result = await this.requestEndWaiterShift(waiterId);
+    return result.status === "ended" ? result.shift : null;
   }
 
   async endOpenShiftsBeforeDate(dateKey: string, endedAt = new Date()) {
@@ -1204,12 +1409,12 @@ export class Store {
     );
     if (!shifts.length) return [];
 
-    const timestamp = endedAt.toISOString();
     const waiterIds = new Set(shifts.map((shift) => shift.waiterId));
-    for (const shift of shifts) {
-      shift.status = "ended";
-      shift.endedAt = timestamp;
-      shift.score = calculateShiftScore(shift);
+    for (const shift of shifts.filter((item) => item.roleKind !== "admin")) {
+      this.finalizeShift(shift, endedAt, true);
+    }
+    for (const shift of shifts.filter((item) => item.roleKind === "admin")) {
+      this.finalizeShift(shift, endedAt, true);
     }
     this.data.tables = this.data.tables.map((table) => {
       const waiterIdsForTable = tableWaiterIds(table).filter((id) => !waiterIds.has(id));
@@ -1222,6 +1427,41 @@ export class Store {
   async endWaiterShiftById(shiftId: string) {
     const shift = this.data.shifts.find((item) => item.id === shiftId && item.status !== "ended");
     return shift ? this.endWaiterShift(shift.waiterId) : null;
+  }
+
+  latestUnpaidAdminPenaltyShift(waiterId: string) {
+    const shift = this.data.shifts
+      .filter(
+        (item) =>
+          item.waiterId === waiterId &&
+          item.status === "ended" &&
+          item.roleKind === "admin" &&
+          item.adminPenaltyAmount > 0 &&
+          !item.adminPenaltyReceiptAt
+      )
+      .sort((left, right) => new Date(right.endedAt || right.startedAt).getTime() - new Date(left.endedAt || left.startedAt).getTime())[0];
+    return shift ? structuredClone(shift) : null;
+  }
+
+  async attachAdminPenaltyReceipt(
+    shiftId: string,
+    waiterId: string,
+    photoUrl: string,
+    messenger: "telegram" | "max" | "web"
+  ) {
+    const shift = this.data.shifts.find(
+      (item) =>
+        item.id === shiftId &&
+        item.waiterId === waiterId &&
+        item.roleKind === "admin" &&
+        item.adminPenaltyAmount > 0
+    );
+    if (!shift) return null;
+    shift.adminPenaltyReceiptUrl = photoUrl.trim().slice(0, 240);
+    shift.adminPenaltyReceiptAt = now();
+    shift.adminPenaltyReceiptMessenger = messenger;
+    await this.persist();
+    return structuredClone(shift);
   }
 
   shiftsDueForChecklistAlert(at: number, timeoutMs = CHECKLIST_OVERDUE_TIMEOUT_MS) {
@@ -1260,8 +1500,12 @@ export class Store {
     const tableCount = this.data.tables.filter((table) => tableWaiterIds(table).includes(shift.waiterId)).length;
     if (tableCount > 0) return { status: "tables_assigned", tableCount };
 
-    const ended = await this.endWaiterShift(shift.waiterId);
-    return ended ? { status: "ended", shift: ended } : { status: "not_found" };
+    const ended = await this.requestEndWaiterShift(shift.waiterId);
+    if (ended.status === "ended") return ended;
+    if (ended.status === "closing_checklist_incomplete") {
+      return { status: "closing_checklist_incomplete", pendingCount: ended.pendingCount };
+    }
+    return { status: "not_found" };
   }
 
   async upsertCall(input: {
@@ -1756,6 +2000,7 @@ export class Store {
       if (shift.checklist.some((item) => item.itemId === itemId)) continue;
       shift.checklist.push({
         itemId,
+        phase: "opening",
         title: task.title,
         description: task.description,
         requiredForCalls: task.requiredForCalls,

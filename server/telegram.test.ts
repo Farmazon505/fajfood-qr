@@ -287,3 +287,98 @@ test("Telegram manages a shift and keeps one live message per table", async () =
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("Telegram sends admin fine summary and stores receipt photo", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-telegram-penalty-"));
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; payload: Record<string, unknown> }> = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.includes("/file/bot")) {
+      const jpeg = Buffer.alloc(256, 0x11);
+      jpeg[0] = 0xff;
+      jpeg[1] = 0xd8;
+      jpeg[2] = 0xff;
+      return new Response(jpeg, { status: 200, headers: { "content-type": "image/jpeg" } });
+    }
+    const payload = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+    requests.push({ url, payload });
+    if (url.endsWith("/getFile")) {
+      return new Response(JSON.stringify({ ok: true, result: { file_path: "photos/receipt.jpg" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: payload.chat_id } } }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  }) as typeof fetch;
+
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const waiter = store.snapshot().waiters[0];
+    const admin = {
+      id: "admin-telegram-penalty",
+      name: "Администратор штрафа",
+      roleId: "admin",
+      telegramChatId: "22001",
+      maxUserId: "",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([waiter, admin]);
+    await store.updateOwnerNotifications({
+      telegramChatId: "",
+      maxUserId: "",
+      sberCardNumber: "2202 0000 0000 0000",
+      telegramEnabled: false,
+      maxEnabled: false
+    });
+    await store.replaceChecklistItems([{
+      id: "telegram-penalty-closing",
+      roleId: "waiter",
+      phase: "closing",
+      title: "Закрыть зал",
+      description: "",
+      requiredForCalls: false,
+      countsForRating: true,
+      active: true,
+      sort: 10
+    }]);
+    const zone = store.listZones()[0];
+    const waiterStarted = await store.startWaiterShift(waiter.id, [zone]);
+    const adminStarted = await store.startWaiterShift(admin.id, [zone]);
+    assert.ok(waiterStarted);
+    assert.ok(adminStarted);
+    const nextDate = new Date(`${waiterStarted.shift.morningGreetingDate}T12:00:00.000Z`);
+    nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+    const ended = await store.endOpenShiftsBeforeDate(nextDate.toISOString().slice(0, 10), nextDate);
+    const adminShift = ended.find((shift) => shift.waiterId === admin.id);
+    assert.ok(adminShift);
+    assert.equal(adminShift.adminPenaltyAmount, 20);
+
+    const telegram = new TelegramService(store, "test-token");
+    await telegram.notifyAdminShiftSummary(adminShift);
+    const summary = requests.find((request) => String(request.payload.text || "").includes("Итоги смены администратора"));
+    assert.match(String(summary?.payload.text), /Штраф: 20 ₽/);
+    assert.match(String(summary?.payload.text), /2202 0000 0000 0000/);
+
+    await telegram.handleUpdate({
+      update_id: 500,
+      message: {
+        message_id: 500,
+        chat: { id: "22001" },
+        photo: [{ file_id: "receipt-file", file_size: 256, width: 100, height: 100 }]
+      }
+    });
+    const saved = store.findShiftById(adminShift.id);
+    assert.match(saved?.adminPenaltyReceiptUrl || "", /^\/api\/admin\/review-media\/penalty-/);
+    assert.equal(saved?.adminPenaltyReceiptMessenger, "telegram");
+    assert.ok(saved?.adminPenaltyReceiptAt);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
