@@ -60,6 +60,7 @@ import {
   X
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
+import { fetchWithNetworkRecovery } from "./network-recovery";
 import type {
   AppData,
   AdminAccountSummary,
@@ -197,7 +198,7 @@ const adminSessionNeedsRefresh = (token: string, at = Date.now()) => {
 };
 
 const api = async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
-  const response = await fetch(path, {
+  const response = await fetchWithNetworkRecovery(path, {
     ...options,
     headers: {
       "content-type": "application/json",
@@ -292,11 +293,35 @@ function GuestPage() {
   const [feedbackDone, setFeedbackDone] = useState(false);
   const [feedbackId, setFeedbackId] = useState("");
 
-  useEffect(() => {
-    api<Bootstrap>(`/api/public/bootstrap?table=${encodeURIComponent(tableSlug)}`)
-      .then(setData)
-      .catch((requestError) => setError(requestError.message));
+  const loadGuest = useCallback(async () => {
+    try {
+      const bootstrap = await api<Bootstrap>(
+        `/api/public/bootstrap?table=${encodeURIComponent(tableSlug)}`,
+      );
+      setData(bootstrap);
+      setError("");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось загрузить столик");
+    }
   }, [tableSlug]);
+
+  useEffect(() => {
+    void loadGuest();
+  }, [loadGuest]);
+
+  useEffect(() => {
+    const recoverVisibleGuest = () => {
+      if (document.visibilityState === "visible" && navigator.onLine) void loadGuest();
+    };
+    window.addEventListener("online", loadGuest);
+    window.addEventListener("pageshow", loadGuest);
+    document.addEventListener("visibilitychange", recoverVisibleGuest);
+    return () => {
+      window.removeEventListener("online", loadGuest);
+      window.removeEventListener("pageshow", loadGuest);
+      document.removeEventListener("visibilitychange", recoverVisibleGuest);
+    };
+  }, [loadGuest]);
 
   useEffect(() => {
     const handlePopState = () => setView(guestViewFromPath(window.location.pathname));
@@ -533,6 +558,19 @@ function GuestPage() {
       <main className="guest-shell loading-screen">
         <BellRing size={30} />
         <span>Загружаем столик</span>
+      </main>
+    );
+  }
+
+  if (!data && error) {
+    return (
+      <main className="guest-shell empty-state">
+        <Wifi size={34} />
+        <h1>Восстанавливаем соединение</h1>
+        <p>{error}</p>
+        <button className="primary-button" type="button" onClick={() => void loadGuest()}>
+          Повторить
+        </button>
       </main>
     );
   }
@@ -1143,6 +1181,24 @@ function AdminPage() {
   useEffect(() => {
     void loadAdmin();
   }, [loadAdmin]);
+
+  useEffect(() => {
+    if (!token) return;
+    const recoverAdmin = () => {
+      if (navigator.onLine) void loadAdmin();
+    };
+    const recoverVisibleAdmin = () => {
+      if (document.visibilityState === "visible") recoverAdmin();
+    };
+    window.addEventListener("online", recoverAdmin);
+    window.addEventListener("pageshow", recoverAdmin);
+    document.addEventListener("visibilitychange", recoverVisibleAdmin);
+    return () => {
+      window.removeEventListener("online", recoverAdmin);
+      window.removeEventListener("pageshow", recoverAdmin);
+      document.removeEventListener("visibilitychange", recoverVisibleAdmin);
+    };
+  }, [loadAdmin, token]);
 
   useEffect(() => {
     if (!token) return;

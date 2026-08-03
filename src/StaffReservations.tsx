@@ -12,6 +12,7 @@ import {
   X,
 } from "lucide-react";
 import "./staff-reservations.css";
+import { fetchWithNetworkRecovery } from "./network-recovery";
 
 type ReservationStatus =
   | "PENDING"
@@ -223,7 +224,7 @@ export default function StaffReservations() {
     }
     if (!quiet) setLoading(true);
     try {
-      const response = await fetch(`/api/staff/reservations?date=${encodeURIComponent(date)}`, {
+      const response = await fetchWithNetworkRecovery(`/api/staff/reservations?date=${encodeURIComponent(date)}`, {
         headers: { "x-telegram-init-data": initData },
         cache: "no-store",
       });
@@ -254,6 +255,23 @@ export default function StaffReservations() {
   useEffect(() => {
     const timer = window.setInterval(() => void load(true), 10_000);
     return () => window.clearInterval(timer);
+  }, [load]);
+
+  useEffect(() => {
+    const recover = () => {
+      if (navigator.onLine) void load(true);
+    };
+    const recoverVisible = () => {
+      if (document.visibilityState === "visible") recover();
+    };
+    window.addEventListener("online", recover);
+    window.addEventListener("pageshow", recover);
+    document.addEventListener("visibilitychange", recoverVisible);
+    return () => {
+      window.removeEventListener("online", recover);
+      window.removeEventListener("pageshow", recover);
+      document.removeEventListener("visibilitychange", recoverVisible);
+    };
   }, [load]);
 
   useEffect(() => setNotes(selected?.notes || ""), [selected]);
