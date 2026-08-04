@@ -98,6 +98,14 @@ import {
   formatChecklistWindow,
   groupChecklistByPhase
 } from "../shared/checklists";
+import {
+  dateKeyDistance,
+  formatRolloverCount,
+  formatTaskDays,
+  latestShiftTaskRollover,
+  shiftTaskDurationDays,
+  shiftTaskStatus
+} from "../shared/shift-tasks";
 
 type Bootstrap = {
   settings: VenueSettings;
@@ -3420,8 +3428,24 @@ function ChecklistEditor({
           {taskNotice && <div className="task-notice">{taskNotice}</div>}
 
           <div className="shift-task-list">
+            {roleTasks.length > 0 && (
+              <div className="shift-task-table-head" aria-hidden="true">
+                <span>Дата</span>
+                <span>Задание</span>
+                <span>Сотрудник</span>
+                <span>В работе</span>
+                <span>Выполнено</span>
+                <span>Перенесено</span>
+                <span />
+              </div>
+            )}
             {roleTasks.map((task) => {
               const waiter = waiters.find((item) => item.id === task.waiterId);
+              const status = shiftTaskStatus(task);
+              const durationDays = shiftTaskDurationDays(task);
+              const rolloverHistory = (task.rolloverHistory || [])
+                .filter((record) => !task.waiterId || record.waiterId === task.waiterId)
+                .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
               return (
                 <article className="shift-task-row" key={task.id}>
                   <div className="shift-task-date">
@@ -3431,23 +3455,43 @@ function ChecklistEditor({
                   <div>
                     <strong>{task.title}</strong>
                     <span>{task.description || "Без пояснения"}</span>
+                    <div className="task-badges">
+                      {task.requiredForCalls && <span className="required-badge">Обязательное</span>}
+                      {task.countsForRating === false && <span className="rating-excluded-badge">Без рейтинга</span>}
+                    </div>
                   </div>
                   <div>
                     <strong>{waiter?.name || "Вся должность"}</strong>
-                    <span>{task.completedAt
-                      ? `Выполнено ${formatDate(task.completedAt)}`
-                      : task.waiterId
-                        ? (task.notified ? "Уведомление отправлено" : "Ожидает даты отправки")
-                        : "При начале смены"}</span>
+                    <span>{task.waiterId
+                      ? (task.notified ? "Уведомление отправлено" : "Ожидает даты отправки")
+                      : "При начале смены"}</span>
                   </div>
-                  <div className="task-badges">
-                    {task.carriedFromTaskId && <span className="rollover-badge">Перенесено</span>}
-                    {task.requiredForCalls && <span className="required-badge">Обязательное</span>}
-                    {task.countsForRating === false && <span className="rating-excluded-badge">Без рейтинга</span>}
+                  <div className={`shift-task-state is-${status}`}>
+                    <strong>{status === "in_progress" ? "В работе" : "—"}</strong>
+                    {status === "in_progress" && <span>{formatTaskDays(durationDays)}</span>}
+                  </div>
+                  <div className="shift-task-state is-completed">
+                    <strong>{task.completedAt ? "Выполнено" : "—"}</strong>
+                    {task.completedAt && <span>{formatDate(task.completedAt)} · {formatTaskDays(durationDays)}</span>}
+                  </div>
+                  <div className="shift-task-state is-carried">
+                    <strong>{formatRolloverCount(task.rolloverCount || 0)}</strong>
+                    {(task.rolloverCount || 0) > 0 && <span>{status === "carried" ? "Передано на новую дату" : `Срок: ${formatTaskDays(durationDays)}`}</span>}
                   </div>
                   <button className="icon-button" disabled={taskBusy} onClick={() => void deleteTask(task)} aria-label="Удалить задание">
                     <Trash2 size={18} />
                   </button>
+                  {rolloverHistory.length > 0 && (
+                    <div className="shift-task-rollover-history">
+                      <strong>История переносов</strong>
+                      {rolloverHistory.map((record, index) => (
+                        <span key={record.id}>
+                          {index + 1}. {!task.waiterId && `${waiters.find((item) => item.id === record.waiterId)?.name || "Сотрудник"} · `}
+                          {record.fromDate} → {record.toDate}: {record.reason || "причина от сотрудника ещё не получена"}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </article>
               );
             })}
@@ -3456,6 +3500,54 @@ function ChecklistEditor({
         </div>
       )}
     </section>
+  );
+}
+
+function DatedTaskProgress({
+  item,
+  shiftDate,
+  waiterId
+}: {
+  item: WaiterShift["checklist"][number];
+  shiftDate: string;
+  waiterId: string;
+}) {
+  if (!item.itemId.startsWith("task-")) return null;
+  const history = (item.taskRolloverHistory || [])
+    .filter((record) => record.waiterId === waiterId)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const latest = latestShiftTaskRollover(history, waiterId);
+  const durationDays = item.taskCompletionDays
+    ?? dateKeyDistance(item.taskOriginalDate || shiftDate, shiftDate);
+  return (
+    <div className="dated-task-progress">
+      <div>
+        <span>Статус</span>
+        <strong>{item.completedAt ? "Выполнено" : "В работе"}</strong>
+      </div>
+      <div>
+        <span>Перенесено</span>
+        <strong>{formatRolloverCount(item.taskRolloverCount || 0)}</strong>
+      </div>
+      <div>
+        <span>{item.completedAt ? "Время выполнения" : "В работе"}</span>
+        <strong>{formatTaskDays(durationDays)}</strong>
+      </div>
+      {latest && (
+        <div className="dated-task-progress-comment">
+          <span>Комментарий переноса</span>
+          <strong>{latest.reason || "Ожидается причина сотрудника"}</strong>
+        </div>
+      )}
+      {history.length > 1 && (
+        <details className="dated-task-history">
+          <summary>Все комментарии переносов ({history.length})</summary>
+          {history.map((record, index) => (
+            <p key={record.id}>{index + 1}. {record.fromDate} → {record.toDate}: {record.reason || "причина ещё не указана"}</p>
+          ))}
+        </details>
+      )}
+    </div>
   );
 }
 
@@ -3896,6 +3988,7 @@ function EmployeeControl({
                                     {item.completedAt ? <CheckCircle2 size={22} /> : <Clock size={22} />}
                                   </div>
                                   {item.description && <p>{item.description}</p>}
+                                  <DatedTaskProgress item={item} shiftDate={shift.morningGreetingDate} waiterId={shift.waiterId} />
                                   {reviewAvailable && (
                                     <div className="employee-item-review-form">
                                       <div className="field star-review-field"><span>Оценка пункта</span><StarScore value={draft.score} onChange={(score) => {
@@ -4264,6 +4357,7 @@ function ShiftsAndRatings({
                               {item.completedAt ? <CheckCircle2 size={20} /> : <AlertTriangle size={20} />}
                               <span><strong>{item.title}</strong><small>{item.completedAt ? `Выполнено ${formatDate(item.completedAt)}` : "Не выполнено · 0 звезд"}{item.countsForRating === false ? " · не влияет на рейтинг" : ""}</small></span>
                             </div>
+                            <DatedTaskProgress item={item} shiftDate={shift.morningGreetingDate} waiterId={shift.waiterId} />
                             <div className="field star-review-field"><span>Оценка</span>{item.countsForRating === false ? <span className="rating-excluded-badge">Не учитывается</span> : <StarScore value={draft.score} disabled={!item.completedAt} onChange={(score) => updateDraft(shift, item.itemId, { score })} />}</div>
                             <Field label="Комментарий" value={draft.comment} onChange={(value) => updateDraft(shift, item.itemId, { comment: value })} placeholder="Что улучшить или почему снижена оценка" />
                           </div>

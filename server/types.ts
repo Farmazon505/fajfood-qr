@@ -117,10 +117,28 @@ export type ShiftTask = {
   countsForRating: boolean;
   notified: boolean;       // уже отправлено персональное уведомление
   completedAt: string | null;
+  completedDate?: string | null;
+  completionDays?: number | null;
   createdAt: string;
   carriedFromTaskId?: string | null;
+  originTaskId?: string | null;
+  originalDate?: string;
+  rolloverCount?: number;
+  rolloverHistory?: ShiftTaskRolloverRecord[];
   rolloverProcessedAt?: string | null;
   rolloverTargetDate?: string | null;
+};
+
+export type ShiftTaskRolloverRecord = {
+  id: string;
+  waiterId: string;
+  fromTaskId: string;
+  fromDate: string;
+  toTaskId: string;
+  toDate: string;
+  createdAt: string;
+  reason: string;
+  reasonProvidedAt: string | null;
 };
 
 export type ShiftChecklistEntry = {
@@ -132,6 +150,10 @@ export type ShiftChecklistEntry = {
   countsForRating: boolean;
   sort: number;
   completedAt: string | null;
+  taskOriginalDate?: string;
+  taskRolloverCount?: number;
+  taskRolloverHistory?: ShiftTaskRolloverRecord[];
+  taskCompletionDays?: number | null;
   adminScore: number | null;
   adminComment: string;
   adminPhotoUrl: string;

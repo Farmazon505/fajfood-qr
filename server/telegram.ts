@@ -6,6 +6,7 @@ import type {
   DiningTable,
   ServiceCall,
   ShiftTask,
+  ShiftTaskRolloverRecord,
   TelegramMessageRef,
   VenueSettings,
   Waiter,
@@ -14,8 +15,9 @@ import type {
 import { config, publicBaseUrl } from "./config";
 import type { CrmStaffReservation } from "./crm-reservations";
 import { generatePerformanceInsights } from "./performance-ai";
-import { shiftChecklistText, shiftStartedText, shiftTaskText } from "./shift-messages";
+import { shiftChecklistText, shiftStartedText, shiftTaskRolloverText, shiftTaskText } from "./shift-messages";
 import { CHECKLIST_PHASE_META, formatChecklistWindow } from "../shared/checklists";
+import { nextDateKey } from "../shared/shift-tasks";
 
 type TelegramResponse<T> = {
   ok: boolean;
@@ -45,6 +47,7 @@ type TelegramCallCoordinator = {
   closeCall(call: ServiceCall): Promise<void>;
   notifyClosingChecklistIncomplete?(shift: WaiterShift): Promise<void>;
   notifyAdminShiftSummary?(shift: WaiterShift): Promise<void>;
+  processEndedShiftTasks?(shift: WaiterShift): Promise<ShiftTask[]>;
 };
 
 const formatTime = (value: string) =>
@@ -84,6 +87,7 @@ export class TelegramService {
   private escalationTimer: ReturnType<typeof setInterval> | null = null;
   private escalationRunning = false;
   private callQueues = new Map<string, Promise<TelegramMessageRef[]>>();
+  private rolloverReasonDrafts = new Map<string, string>();
   private coordinator: TelegramCallCoordinator | null = null;
 
   constructor(
@@ -379,6 +383,11 @@ export class TelegramService {
       return;
     }
 
+    if (query.data.startsWith("task:reason:")) {
+      await this.handleShiftTaskReasonCallback(query.id, query.message, query.data);
+      return;
+    }
+
     if (query.data.startsWith("call:")) {
       await this.handleCallCallback(query.id, query.message, query.data);
     }
@@ -459,6 +468,37 @@ export class TelegramService {
     if (normalized === "/reservations" || normalized === "брони столов") {
       await this.sendReservationsButton(message.chat.id);
       return;
+    }
+
+    const waiter = this.store.findWaiterByChatId(message.chat.id);
+    const draftKey = String(message.chat.id);
+    const selectedRecordId = this.rolloverReasonDrafts.get(draftKey);
+    if (waiter && selectedRecordId) {
+      if (text.trim().length < 3) {
+        await this.sendText(message.chat.id, "Причина слишком короткая. Опишите, что помешало выполнить задание.");
+        return;
+      }
+      const saved = await this.store.setShiftTaskRolloverReason(selectedRecordId, waiter.id, text);
+      if (saved) {
+        this.rolloverReasonDrafts.delete(draftKey);
+        await this.sendText(message.chat.id, `✅ Причина переноса сохранена для задания «${saved.task.title}».`);
+        return;
+      }
+      this.rolloverReasonDrafts.delete(draftKey);
+    }
+    if (waiter) {
+      const pending = this.store.pendingShiftTaskRolloverReasons(waiter.id);
+      if (pending.length === 1) {
+        const saved = await this.store.setShiftTaskRolloverReason(pending[0].record.id, waiter.id, text);
+        if (saved) {
+          await this.sendText(message.chat.id, `✅ Причина переноса сохранена для задания «${saved.task.title}».`);
+          return;
+        }
+      }
+      if (pending.length > 1) {
+        await this.sendText(message.chat.id, "Есть несколько перенесённых заданий. Нажмите «Указать причину» под нужным заданием, затем отправьте комментарий.");
+        return;
+      }
     }
 
     await this.sendWelcome(message.chat.id);
@@ -727,6 +767,23 @@ export class TelegramService {
     }
   }
 
+  private async handleShiftTaskReasonCallback(callbackId: string, message: TelegramMessage, data: string) {
+    const waiter = await this.requireWaiter(message.chat.id, callbackId);
+    if (!waiter) return;
+    const recordId = data.slice("task:reason:".length);
+    const pending = this.store.findPendingShiftTaskRolloverReason(recordId, waiter.id);
+    if (!pending) {
+      await this.answerCallback(callbackId, "Причина уже сохранена или перенос не найден", true);
+      return;
+    }
+    this.rolloverReasonDrafts.set(String(message.chat.id), recordId);
+    await this.answerCallback(callbackId, "Отправьте причину одним сообщением");
+    await this.sendText(
+      message.chat.id,
+      `Почему не выполнено задание «${pending.task.title}»? Отправьте причину одним сообщением до 500 символов.`
+    );
+  }
+
   private async deliverPendingCalls(waiterId: string) {
     const settings = this.store.snapshot().settings;
     for (const call of this.store.pendingCallsForWaiter(waiterId)) {
@@ -785,6 +842,18 @@ export class TelegramService {
     if (shift.roleKind === "admin") {
       if (this.coordinator?.notifyAdminShiftSummary) await this.coordinator.notifyAdminShiftSummary(shift);
       else await this.notifyAdminShiftSummary(shift);
+    }
+    if (this.coordinator?.processEndedShiftTasks) {
+      await this.coordinator.processEndedShiftTasks(shift);
+    } else {
+      const carried = await this.store.rolloverIncompleteShiftTasksForShift(
+        shift.id,
+        nextDateKey(shift.morningGreetingDate)
+      );
+      for (const task of carried) {
+        const record = [...(task.rolloverHistory || [])].at(-1);
+        if (record) await this.notifyShiftTaskRollover(task, record);
+      }
     }
   }
 
@@ -1173,6 +1242,23 @@ export class TelegramService {
         inline_keyboard: [[{
           text: "✅ Отметить выполненным",
           callback_data: `task:complete:${task.id}`
+        }]]
+      }
+    });
+    return Boolean(sent);
+  }
+
+  async notifyShiftTaskRollover(task: ShiftTask, record: ShiftTaskRolloverRecord): Promise<boolean> {
+    if (!task.waiterId) return false;
+    const waiter = this.store.findWaiterById(task.waiterId);
+    if (!waiter?.telegramChatId?.trim()) return false;
+    const sent = await this.request<TelegramMessage>("sendMessage", {
+      chat_id: waiter.telegramChatId.trim(),
+      text: shiftTaskRolloverText(task, record),
+      reply_markup: {
+        inline_keyboard: [[{
+          text: "✍️ Указать причину",
+          callback_data: `task:reason:${record.id}`
         }]]
       }
     });

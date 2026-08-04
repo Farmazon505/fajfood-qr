@@ -11,12 +11,14 @@ import type {
   MaxMessageRef,
   ServiceCall,
   ShiftTask,
+  ShiftTaskRolloverRecord,
   VenueSettings,
   Waiter,
   WaiterShift
 } from "./types";
-import { shiftChecklistText, shiftStartedText, shiftTaskText } from "./shift-messages";
+import { shiftChecklistText, shiftStartedText, shiftTaskRolloverText, shiftTaskText } from "./shift-messages";
 import { CHECKLIST_PHASE_META, formatChecklistWindow } from "../shared/checklists";
+import { nextDateKey } from "../shared/shift-tasks";
 
 type MaxUser = {
   user_id: number;
@@ -68,6 +70,7 @@ type MaxCallCoordinator = {
   closeCall(call: ServiceCall): Promise<void>;
   notifyClosingChecklistIncomplete?(shift: WaiterShift): Promise<void>;
   notifyAdminShiftSummary?(shift: WaiterShift): Promise<void>;
+  processEndedShiftTasks?(shift: WaiterShift): Promise<ShiftTask[]>;
 };
 
 type MaxApiRequest = {
@@ -95,6 +98,7 @@ const callReasonIcon = (label: string) => {
 
 export class MaxService {
   private callQueues = new Map<string, Promise<MaxMessageRef[]>>();
+  private rolloverReasonDrafts = new Map<number, string>();
   private coordinator: MaxCallCoordinator | null = null;
   private httpsAgent: HttpsAgent | undefined;
 
@@ -183,8 +187,9 @@ export class MaxService {
         await this.handlePenaltyReceiptImage(userId, image.payload?.url || "");
         return;
       }
-      const text = message.body.text?.trim().toLocaleLowerCase("ru-RU");
-      if (!userId || !text) return;
+      const rawText = message.body.text?.trim();
+      const text = rawText?.toLocaleLowerCase("ru-RU");
+      if (!userId || !text || !rawText) return;
       if (["/start", "start", "/id", "id", "мой id", "помощь", "/help"].includes(text)) {
         await this.sendWelcome(userId);
         return;
@@ -200,6 +205,35 @@ export class MaxService {
       if (["/status", "моя смена"].includes(text)) {
         await this.sendShiftStatus(userId);
         return;
+      }
+      const waiter = this.store.findWaiterByMaxUserId(userId);
+      const selectedRecordId = this.rolloverReasonDrafts.get(userId);
+      if (waiter && selectedRecordId) {
+        if (rawText.length < 3) {
+          await this.sendMessage(String(userId), { text: "Причина слишком короткая. Опишите, что помешало выполнить задание." });
+          return;
+        }
+        const saved = await this.store.setShiftTaskRolloverReason(selectedRecordId, waiter.id, rawText);
+        if (saved) {
+          this.rolloverReasonDrafts.delete(userId);
+          await this.sendMessage(String(userId), { text: `✅ Причина переноса сохранена для задания «${saved.task.title}».` });
+          return;
+        }
+        this.rolloverReasonDrafts.delete(userId);
+      }
+      if (waiter) {
+        const pending = this.store.pendingShiftTaskRolloverReasons(waiter.id);
+        if (pending.length === 1) {
+          const saved = await this.store.setShiftTaskRolloverReason(pending[0].record.id, waiter.id, rawText);
+          if (saved) {
+            await this.sendMessage(String(userId), { text: `✅ Причина переноса сохранена для задания «${saved.task.title}».` });
+            return;
+          }
+        }
+        if (pending.length > 1) {
+          await this.sendMessage(String(userId), { text: "Есть несколько перенесённых заданий. Нажмите «Указать причину» под нужным заданием, затем отправьте комментарий." });
+          return;
+        }
       }
       await this.sendWelcome(userId);
       return;
@@ -231,6 +265,10 @@ export class MaxService {
     }
     if (payload.startsWith("task:complete:")) {
       await this.handleShiftTaskCallback(callbackId, userId, payload);
+      return;
+    }
+    if (payload.startsWith("task:reason:")) {
+      await this.handleShiftTaskReasonCallback(callbackId, userId, payload);
       return;
     }
     if (payload.startsWith("call:")) {
@@ -355,6 +393,21 @@ export class MaxService {
     const userId = waiter?.maxUserId?.trim();
     if (!userId) return false;
     const sent = await this.sendMessage(userId, this.shiftTaskBody(task));
+    return Boolean(sent);
+  }
+
+  async notifyShiftTaskRollover(task: ShiftTask, record: ShiftTaskRolloverRecord): Promise<boolean> {
+    if (!task.waiterId) return false;
+    const waiter = this.store.findWaiterById(task.waiterId);
+    const userId = waiter?.maxUserId?.trim();
+    if (!userId) return false;
+    const sent = await this.sendMessage(userId, {
+      text: shiftTaskRolloverText(task, record),
+      attachments: this.keyboard([[
+        this.callbackButton("✍️ Указать причину", `task:reason:${record.id}`, "positive")
+      ]]),
+      notify: true
+    });
     return Boolean(sent);
   }
 
@@ -726,6 +779,22 @@ export class MaxService {
     }
   }
 
+  private async handleShiftTaskReasonCallback(callbackId: string, userId: number, data: string) {
+    const waiter = await this.requireWaiter(userId, callbackId);
+    if (!waiter) return;
+    const recordId = data.slice("task:reason:".length);
+    const pending = this.store.findPendingShiftTaskRolloverReason(recordId, waiter.id);
+    if (!pending) {
+      await this.answerCallback(callbackId, "Причина уже сохранена или перенос не найден");
+      return;
+    }
+    this.rolloverReasonDrafts.set(userId, recordId);
+    await this.answerCallback(callbackId, "Отправьте причину одним сообщением");
+    await this.sendMessage(String(userId), {
+      text: `Почему не выполнено задание «${pending.task.title}»? Отправьте причину одним сообщением до 500 символов.`
+    });
+  }
+
   private async deliverPendingCalls(waiterId: string) {
     const settings = this.store.snapshot().settings;
     for (const call of this.store.pendingCallsForWaiter(waiterId)) {
@@ -802,6 +871,18 @@ export class MaxService {
     if (shift.roleKind === "admin") {
       if (this.coordinator?.notifyAdminShiftSummary) await this.coordinator.notifyAdminShiftSummary(shift);
       else await this.notifyAdminShiftSummary(shift);
+    }
+    if (this.coordinator?.processEndedShiftTasks) {
+      await this.coordinator.processEndedShiftTasks(shift);
+    } else {
+      const carried = await this.store.rolloverIncompleteShiftTasksForShift(
+        shift.id,
+        nextDateKey(shift.morningGreetingDate)
+      );
+      for (const task of carried) {
+        const record = [...(task.rolloverHistory || [])].at(-1);
+        if (record) await this.notifyShiftTaskRollover(task, record);
+      }
     }
   }
 

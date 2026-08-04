@@ -1,9 +1,10 @@
 import type { MaxService } from "./max";
 import { venueOperationalDateKey, type Store } from "./store";
 import type { TelegramService } from "./telegram";
-import type { DiningTable, ServiceCall, ShiftTask, VenueSettings, Waiter, WaiterShift } from "./types";
+import type { DiningTable, ServiceCall, ShiftTask, ShiftTaskRolloverRecord, VenueSettings, Waiter, WaiterShift } from "./types";
 import { config } from "./config";
 import type { OwnerWebPushService } from "./web-push";
+import { nextDateKey } from "../shared/shift-tasks";
 
 type CallNotification = {
   call: ServiceCall;
@@ -36,6 +37,9 @@ export class MessagingService {
       },
       notifyAdminShiftSummary: async (shift: WaiterShift) => {
         await this.notifyAdminShiftSummary(shift);
+      },
+      processEndedShiftTasks: async (shift: WaiterShift) => {
+        return this.processEndedShiftTasks(shift);
       }
     };
     this.telegram.setCallCoordinator(coordinator);
@@ -110,6 +114,32 @@ export class MessagingService {
     return results.some((result) => result.status === "fulfilled" && result.value);
   }
 
+  async notifyShiftTaskRollover(task: ShiftTask, record: ShiftTaskRolloverRecord) {
+    const results = await Promise.allSettled([
+      this.telegram.notifyShiftTaskRollover(task, record),
+      this.max.notifyShiftTaskRollover(task, record)
+    ]);
+    for (const result of results) {
+      if (result.status === "rejected") console.error("[messaging] Ошибка запроса причины переноса:", result.reason);
+    }
+    return results.some((result) => result.status === "fulfilled" && result.value);
+  }
+
+  async processEndedShiftTasks(shift: WaiterShift, processedAt = new Date()) {
+    const nextShiftDate = nextDateKey(shift.morningGreetingDate);
+    const currentOperationalDate = venueOperationalDateKey(processedAt);
+    const carried = await this.store.rolloverIncompleteShiftTasksForShift(
+      shift.id,
+      currentOperationalDate > nextShiftDate ? currentOperationalDate : nextShiftDate,
+      processedAt
+    );
+    for (const task of carried) {
+      const record = [...(task.rolloverHistory || [])].at(-1);
+      if (record) await this.notifyShiftTaskRollover(task, record);
+    }
+    return carried;
+  }
+
   async notifyDeliveryCorrectionApproval(text: string) {
     const admins = this.store.activeShiftAdmins();
     if (!admins.length) return { admins: 0, delivered: 0 };
@@ -178,11 +208,16 @@ export class MessagingService {
         if (incompleteClosing && (shift.roleKind === "waiter" || shift.roleId === "barista")) {
           await this.notifyClosingChecklistIncomplete(shift);
         }
+        await this.processEndedShiftTasks(shift, currentTime);
       }
       for (const shift of endedShifts.filter((item) => item.roleKind === "admin")) {
         await this.notifyAdminShiftSummary(shift);
       }
-      await this.store.rolloverIncompleteShiftTasks(currentDateKey, currentTime);
+      const additionallyCarried = await this.store.rolloverIncompleteShiftTasks(currentDateKey, currentTime);
+      for (const task of additionallyCarried) {
+        const record = [...(task.rolloverHistory || [])].at(-1);
+        if (record) await this.notifyShiftTaskRollover(task, record);
+      }
     } catch (error) {
       console.error("[messaging] Ошибка ежедневного обслуживания:", error);
     } finally {

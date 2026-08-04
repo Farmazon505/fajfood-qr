@@ -750,6 +750,75 @@ test("an incomplete personal dated task is carried forward once per new date", a
   });
 });
 
+test("an ended shift carries an incomplete dated task with reason history and completion duration", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const startedAt = new Date("2026-01-10T12:00:00+04:00");
+    const original = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date: "2026-01-10",
+      title: "Проверить историю переноса",
+      description: "Причина и срок должны сохраняться",
+      requiredForCalls: false,
+      countsForRating: true
+    });
+    const started = await store.startWaiterShift(waiter.id, [store.listZones()[0]], startedAt);
+    assert.ok(started);
+    const templateIndexes = started.shift.checklist
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => item.itemId !== `task-${original.id}`)
+      .map(({ index }) => index);
+    await completeChecklistItems(store, started.shift, waiter.id, templateIndexes);
+    const ended = await store.requestEndWaiterShift(waiter.id, {
+      endedAt: new Date("2026-01-10T23:00:00+04:00")
+    });
+    assert.equal(ended.status, "ended");
+    if (ended.status !== "ended") return;
+
+    const firstCarry = await store.rolloverIncompleteShiftTasksForShift(
+      ended.shift.id,
+      "2026-01-11",
+      new Date("2026-01-11T02:00:00+04:00")
+    );
+    assert.equal(firstCarry.length, 1);
+    assert.equal(firstCarry[0].rolloverCount, 1);
+    assert.equal(firstCarry[0].originalDate, "2026-01-10");
+    assert.equal(store.pendingShiftTaskRolloverReasons(waiter.id).length, 1);
+
+    const firstRecord = firstCarry[0].rolloverHistory?.[0];
+    assert.ok(firstRecord);
+    const savedReason = await store.setShiftTaskRolloverReason(
+      firstRecord.id,
+      waiter.id,
+      "Не получили нужный товар от поставщика"
+    );
+    assert.equal(savedReason?.record.reason, "Не получили нужный товар от поставщика");
+    assert.equal(store.pendingShiftTaskRolloverReasons(waiter.id).length, 0);
+    assert.ok(store.listShiftTasks().every((task) =>
+      task.originTaskId !== original.id
+      || task.rolloverHistory?.some((record) => record.reason === "Не получили нужный товар от поставщика")
+    ));
+
+    const secondCarry = await store.rolloverIncompleteShiftTasks(
+      "2026-01-12",
+      new Date("2026-01-12T02:00:00+04:00")
+    );
+    assert.equal(secondCarry.length, 1);
+    assert.equal(secondCarry[0].rolloverCount, 2);
+    assert.equal(secondCarry[0].rolloverHistory?.[0].reason, "Не получили нужный товар от поставщика");
+    assert.equal(store.pendingShiftTaskRolloverReasons(waiter.id).length, 1);
+
+    const completed = await store.completeShiftTask(
+      secondCarry[0].id,
+      waiter.id,
+      new Date("2026-01-12T15:00:00+04:00")
+    );
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.task.completionDays, 2);
+  });
+});
+
 test("a completed dated task is not carried forward", async () => {
   await withStore(async (store) => {
     const waiter = store.snapshot().waiters[0];

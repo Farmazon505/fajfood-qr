@@ -1,4 +1,4 @@
-import type { ChecklistWindows, ShiftTask, WaiterShift } from "./types";
+import type { ChecklistWindows, ShiftTask, ShiftTaskRolloverRecord, WaiterShift } from "./types";
 import {
   CHECKLIST_PHASE_META,
   DEFAULT_CHECKLIST_WINDOWS,
@@ -6,19 +6,50 @@ import {
   formatChecklistWindow,
   groupChecklistByPhase
 } from "../shared/checklists";
+import {
+  dateKeyDistance,
+  formatRolloverCount,
+  formatTaskDays,
+  latestShiftTaskRollover,
+  shiftTaskDurationDays,
+  shiftTaskStatus
+} from "../shared/shift-tasks";
 
 export const shiftTaskText = (task: ShiftTask, roleLabel: string) => {
   const requiredLabel = task.requiredForCalls ? " (обязательное для допуска)" : "";
+  const status = shiftTaskStatus(task);
+  const rolloverCount = task.rolloverCount || 0;
+  const latestRollover = latestShiftTaskRollover(task.rolloverHistory, task.waiterId);
+  const duration = shiftTaskDurationDays(task);
   return [
     `🗓 Задание на смену ${task.date}`,
     "",
     `Должность: ${roleLabel}`,
     `Задание: ${task.title}${requiredLabel}`,
     task.description ? `Пояснение: ${task.description}` : "",
-    task.completedAt ? "" : "Нажмите кнопку ниже после выполнения.",
-    task.completedAt ? "✅ Задание выполнено" : ""
+    status === "completed"
+      ? "Статус: ✅ Задание выполнено"
+      : `Статус: ${status === "carried" ? "🔁 Перенесено" : "🟠 В работе"}`,
+    `Перенесено: ${formatRolloverCount(rolloverCount)}`,
+    task.completedAt
+      ? `Срок выполнения: ${formatTaskDays(duration)}`
+      : `В работе с даты назначения: ${formatTaskDays(duration)}`,
+    latestRollover?.reason ? `Комментарий переноса: ${latestRollover.reason}` : "",
+    latestRollover && !latestRollover.reason ? "Комментарий переноса: ожидается причина сотрудника" : "",
+    task.completedAt ? "" : "Нажмите кнопку ниже после выполнения."
   ].filter(Boolean).join("\n");
 };
+
+export const shiftTaskRolloverText = (task: ShiftTask, record: ShiftTaskRolloverRecord) => [
+  "🔁 Задача перенесена на следующий день",
+  "",
+  `Задание: ${task.title}`,
+  `Новая дата: ${record.toDate}`,
+  `Перенесено: ${formatRolloverCount(task.rolloverCount || 0)}`,
+  `В работе с даты назначения: ${formatTaskDays(shiftTaskDurationDays(task))}`,
+  "",
+  "Объясните причину невыполнения задания. Нажмите кнопку ниже и отправьте причину одним сообщением."
+].join("\n");
 
 export const shiftChecklistText = (
   shift: WaiterShift,
@@ -49,9 +80,22 @@ export const shiftChecklistText = (
         const requiredLabel = group.phase !== "closing" && item.requiredForCalls ? " · обязательно" : "";
         const ratingLabel = item.countsForRating === false ? " · без рейтинга" : "";
         const description = item.description.trim();
+        const isDatedTask = item.itemId.startsWith("task-");
+        const latestRollover = latestShiftTaskRollover(item.taskRolloverHistory, shift.waiterId);
+        const taskDuration = item.taskCompletionDays
+          ?? dateKeyDistance(item.taskOriginalDate || shift.morningGreetingDate, shift.morningGreetingDate);
         return [
           `${marker} ${index + 1}. ${item.title}${requiredLabel}${ratingLabel}`,
-          description ? `   Выполнить: ${description}` : ""
+          description ? `   Выполнить: ${description}` : "",
+          isDatedTask ? `   Статус: ${item.completedAt ? "выполнено" : "в работе"}` : "",
+          isDatedTask ? `   Перенесено: ${formatRolloverCount(item.taskRolloverCount || 0)}` : "",
+          isDatedTask && item.completedAt
+            ? `   Срок выполнения: ${formatTaskDays(taskDuration)}`
+            : isDatedTask
+              ? `   В работе: ${formatTaskDays(taskDuration)}`
+              : "",
+          latestRollover?.reason ? `   Комментарий переноса: ${latestRollover.reason}` : "",
+          latestRollover && !latestRollover.reason ? "   Комментарий переноса: ожидается" : ""
         ].filter(Boolean).join("\n");
       })
     ];

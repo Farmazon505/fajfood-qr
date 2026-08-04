@@ -2058,10 +2058,22 @@ fieldset.field {
   margin-top: 16px;
 }
 
+.shift-task-table-head {
+  display: grid;
+  grid-template-columns: 132px minmax(230px, 1.35fr) minmax(150px, 0.8fr) 110px minmax(160px, 0.85fr) minmax(150px, 0.8fr) 42px;
+  gap: 12px;
+  padding: 0 13px;
+  color: #657066;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .shift-task-row {
   display: grid;
-  grid-template-columns: 150px minmax(240px, 1.3fr) minmax(190px, 0.8fr) auto 42px;
-  gap: 14px;
+  grid-template-columns: 132px minmax(230px, 1.35fr) minmax(150px, 0.8fr) 110px minmax(160px, 0.85fr) minmax(150px, 0.8fr) 42px;
+  gap: 12px;
   align-items: center;
   border: 1px solid #ded6c8;
   border-radius: 8px;
@@ -2126,9 +2138,94 @@ fieldset.field {
 }
 
 .task-badges {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   gap: 5px;
-  justify-items: start;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.shift-task-state strong {
+  font-size: 14px;
+}
+
+.shift-task-state.is-in_progress strong {
+  color: #9a6500;
+}
+
+.shift-task-state.is-completed strong {
+  color: #1f7a45;
+}
+
+.shift-task-state.is-carried strong {
+  color: #245c36;
+}
+
+.shift-task-rollover-history {
+  grid-column: 2 / -2;
+  border-left: 3px solid #8eb69a;
+  border-radius: 4px;
+  padding: 9px 11px;
+  background: #edf7ef;
+}
+
+.shift-task-rollover-history > strong,
+.shift-task-rollover-history > span {
+  display: block;
+}
+
+.shift-task-rollover-history > span {
+  margin-top: 5px;
+  color: #3f5847;
+}
+
+.dated-task-progress {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+  border: 1px solid #cbdccf;
+  border-radius: 6px;
+  padding: 10px;
+  background: #f2f8f3;
+}
+
+.dated-task-progress > div span,
+.dated-task-progress > div strong {
+  display: block;
+}
+
+.dated-task-progress > div span {
+  color: #657066;
+  font-size: 12px;
+}
+
+.dated-task-progress > div strong {
+  margin-top: 3px;
+  color: #263d2d;
+  font-size: 13px;
+}
+
+.dated-task-progress-comment,
+.dated-task-history {
+  grid-column: 1 / -1;
+}
+
+.dated-task-history summary {
+  cursor: pointer;
+  color: #245c36;
+  font-weight: 800;
+}
+
+.dated-task-history p {
+  margin: 7px 0 0;
+  color: #3f5847;
+  font-size: 13px;
+}
+
+.shift-review-row > .dated-task-progress {
+  grid-column: 1 / -1;
+  margin-top: 0;
 }
 
 .shift-metrics {
@@ -4222,6 +4319,10 @@ button:disabled {
 }
 
 @media (max-width: 1180px) {
+  .shift-task-table-head {
+    display: none;
+  }
+
   .checklist-window-editor {
     grid-template-columns: minmax(220px, 1fr) 130px 130px;
   }
@@ -4246,6 +4347,10 @@ button:disabled {
   .shift-task-row .icon-button,
   .checklist-template-row > .icon-button {
     justify-self: end;
+  }
+
+  .shift-task-rollover-history {
+    grid-column: 1 / -1;
   }
 
   .shift-task-submit {
@@ -4279,6 +4384,15 @@ button:disabled {
   .shift-task-row,
   .shift-metrics {
     grid-template-columns: 1fr;
+  }
+
+  .dated-task-progress {
+    grid-template-columns: 1fr;
+  }
+
+  .dated-task-progress-comment,
+  .dated-task-history {
+    grid-column: auto;
   }
 
   .checklist-template-options .toggle-row {

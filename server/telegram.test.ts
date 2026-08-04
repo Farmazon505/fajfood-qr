@@ -80,6 +80,45 @@ test("Telegram manages a shift and keeps one live message per table", async () =
     assert.match(String(completedTaskMessage?.payload.text), /Задание выполнено/);
     assert.deepEqual(completedTaskMessage?.payload.reply_markup, { inline_keyboard: [] });
 
+    const previousDate = new Date(`${today}T12:00:00+04:00`);
+    previousDate.setDate(previousDate.getDate() - 1);
+    const overdueTask = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date: new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Astrakhan" }).format(previousDate),
+      title: "Задание с причиной переноса",
+      description: "Сотрудник должен объяснить задержку",
+      requiredForCalls: false,
+      countsForRating: true
+    });
+    const [carriedTask] = await store.rolloverIncompleteShiftTasks(today);
+    assert.equal(carriedTask.carriedFromTaskId, overdueTask.id);
+    const rolloverRecord = carriedTask.rolloverHistory?.at(-1);
+    assert.ok(rolloverRecord);
+    assert.equal(await telegram.notifyShiftTaskRollover(carriedTask, rolloverRecord), true);
+    const rolloverNotification = requests.filter(
+      (request) => request.method === "sendMessage" && String(request.payload.text).includes("Задача перенесена на следующий день")
+    ).at(-1);
+    assert.ok(rolloverNotification);
+    assert.match(JSON.stringify(rolloverNotification.payload.reply_markup), new RegExp(`task:reason:${rolloverRecord.id}`));
+
+    await telegram.handleUpdate({
+      update_id: 90,
+      callback_query: {
+        id: "rollover-reason",
+        data: `task:reason:${rolloverRecord.id}`,
+        message: { message_id: 790, chat: { id: "10001" } }
+      }
+    });
+    await telegram.handleUpdate({
+      update_id: 91,
+      message: { message_id: 791, chat: { id: "10001" }, text: "Не было доступа к складу" }
+    });
+    assert.equal(
+      store.findShiftTask(carriedTask.id)?.rolloverHistory?.at(-1)?.reason,
+      "Не было доступа к складу"
+    );
+
     await telegram.handleUpdate({
       update_id: 1,
       message: { message_id: 1, chat: { id: "10001" }, text: "/start" }

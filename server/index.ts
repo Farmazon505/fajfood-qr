@@ -1350,6 +1350,7 @@ app.post("/api/admin/shifts/:id/end", async (request, response) => {
     });
     return;
   }
+  await messaging.processEndedShiftTasks(result.shift);
   response.json(result.shift);
 });
 

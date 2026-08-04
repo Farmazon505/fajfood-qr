@@ -10,10 +10,11 @@ import {
   CHECKLIST_OVERDUE_TIMEOUT_MS,
   Store,
   WAITER_ACCEPT_TIMEOUT_MS,
-  WAITER_COMPLETE_TIMEOUT_MS
+  WAITER_COMPLETE_TIMEOUT_MS,
+  venueOperationalDateKey
 } from "./store";
 import type { TelegramService } from "./telegram";
-import type { ServiceCall, WaiterShift } from "./types";
+import type { ServiceCall, ShiftTask, ShiftTaskRolloverRecord, WaiterShift } from "./types";
 import type { OwnerWebPushService } from "./web-push";
 
 class FakeTransport {
@@ -22,6 +23,7 @@ class FakeTransport {
   closingAlerts: WaiterShift[] = [];
   adminSummaries: WaiterShift[] = [];
   approvalTexts: string[] = [];
+  shiftTaskRollovers: Array<{ task: ShiftTask; record: ShiftTaskRolloverRecord }> = [];
 
   enabled() {
     return true;
@@ -42,6 +44,11 @@ class FakeTransport {
 
   async notifyShiftTask() {
     return false;
+  }
+
+  async notifyShiftTaskRollover(task: ShiftTask, record: ShiftTaskRolloverRecord) {
+    this.shiftTaskRollovers.push(structuredClone({ task, record }));
+    return true;
   }
 
   async notifyOwnerAlert(text: string) {
@@ -262,8 +269,18 @@ test("messaging daily maintenance closes a shift from the previous venue date", 
     const store = new Store(directory);
     await store.init();
     const waiter = store.snapshot().waiters[0];
+    const datedTask = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date: venueOperationalDateKey(),
+      title: "Проверить перенос при автозавершении смены",
+      description: "Сотрудник должен получить запрос причины",
+      requiredForCalls: false,
+      countsForRating: true
+    });
     const started = await store.startWaiterShift(waiter.id, [store.listZones()[0]]);
     assert.ok(started);
+    assert.ok(started.shift.checklist.some((item) => item.itemId === `task-${datedTask.id}`));
 
     const telegram = new FakeTransport();
     const max = new FakeTransport();
@@ -283,6 +300,11 @@ test("messaging daily maintenance closes a shift from the previous venue date", 
     assert.equal(store.currentShiftForWaiter(waiter.id), null);
     assert.ok(store.snapshot().tables.every((table) => !table.waiterIds.includes(waiter.id)));
     assert.equal(telegram.ownerAlerts.length, 0);
+    assert.equal(telegram.shiftTaskRollovers.length, 1);
+    assert.equal(max.shiftTaskRollovers.length, 1);
+    assert.equal(telegram.shiftTaskRollovers[0].record.fromTaskId, datedTask.id);
+    assert.equal(telegram.shiftTaskRollovers[0].record.reason, "");
+    assert.equal(store.pendingShiftTaskRolloverReasons(waiter.id).length, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

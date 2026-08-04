@@ -180,6 +180,49 @@ test("MAX lets an employee complete a personal dated task from its notification"
     const completedBody = JSON.stringify(completed?.options.body);
     assert.match(completedBody, /Задание выполнено/);
     assert.doesNotMatch(completedBody, new RegExp(`task:complete:${task.id}`));
+
+    const overdueTask = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date: "2026-08-01",
+      title: "Перенос с комментарием в MAX",
+      description: "Причина должна сохраниться",
+      requiredForCalls: false,
+      countsForRating: true
+    });
+    const [carriedTask] = await store.rolloverIncompleteShiftTasks("2026-08-02");
+    assert.equal(carriedTask.carriedFromTaskId, overdueTask.id);
+    const rolloverRecord = carriedTask.rolloverHistory?.at(-1);
+    assert.ok(rolloverRecord);
+    assert.equal(await max.notifyShiftTaskRollover(carriedTask, rolloverRecord), true);
+    const rolloverMessage = requests.filter((request) =>
+      request.endpoint === "messages" && JSON.stringify(request.options.body).includes("Задача перенесена на следующий день")
+    ).at(-1);
+    assert.ok(rolloverMessage);
+    assert.match(JSON.stringify(rolloverMessage.options.body), new RegExp(`task:reason:${rolloverRecord.id}`));
+
+    await max.handleUpdate({
+      update_type: "message_callback",
+      timestamp: Date.now(),
+      callback: {
+        callback_id: "reason-task",
+        payload: `task:reason:${rolloverRecord.id}`,
+        user: { user_id: 30003 }
+      }
+    });
+    await max.handleUpdate({
+      update_type: "message_created",
+      timestamp: Date.now(),
+      message: {
+        sender: { user_id: 30003 },
+        recipient: { chat_id: null, chat_type: "dialog" },
+        body: { mid: "reason-message", text: "Не привезли расходные материалы" }
+      }
+    });
+    assert.equal(
+      store.findShiftTask(carriedTask.id)?.rolloverHistory?.at(-1)?.reason,
+      "Не привезли расходные материалы"
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

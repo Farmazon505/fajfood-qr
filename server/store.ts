@@ -20,6 +20,7 @@ import type {
   PerformanceAnalytics,
   ServiceCall,
   ShiftTask,
+  ShiftTaskRolloverRecord,
   StaffRoleDefinition,
   StaffRoleKind,
   TelegramMessageRef,
@@ -37,6 +38,7 @@ import {
   openingPhaseForShiftStart,
   validateChecklistWindows
 } from "../shared/checklists";
+import { dateKeyDistance, nextDateKey } from "../shared/shift-tasks";
 
 const now = () => new Date().toISOString();
 const OWNER_NOTIFICATION_RECIPIENT_ID = "owner-profile-notifications";
@@ -63,6 +65,11 @@ export type ShiftTaskCompletionResult =
   | { status: "completed"; task: ShiftTask }
   | { status: "already_completed"; task: ShiftTask }
   | { status: "not_found"; task: null };
+
+export type ShiftTaskRolloverPrompt = {
+  task: ShiftTask;
+  record: ShiftTaskRolloverRecord;
+};
 
 export type SupervisorShiftEndResult =
   | { status: "ended"; shift: WaiterShift }
@@ -824,6 +831,86 @@ export class Store {
     return structuredClone(this.data.ownerNotifications);
   }
 
+  private normalizeShiftTaskLineage() {
+    const byId = new Map(this.data.shiftTasks.map((task) => [task.id, task]));
+    const lineage = (task: ShiftTask) => {
+      const chain: ShiftTask[] = [];
+      const seen = new Set<string>();
+      let current: ShiftTask | undefined = task;
+      while (current && !seen.has(current.id)) {
+        chain.unshift(current);
+        seen.add(current.id);
+        current = current.carriedFromTaskId ? byId.get(current.carriedFromTaskId) : undefined;
+      }
+      return chain;
+    };
+
+    const historyByBranch = new Map<string, Map<string, ShiftTaskRolloverRecord>>();
+    const addHistory = (originTaskId: string, waiterId: string, record: ShiftTaskRolloverRecord) => {
+      const key = `${originTaskId}:${waiterId}`;
+      const records = historyByBranch.get(key) ?? new Map<string, ShiftTaskRolloverRecord>();
+      records.set(record.id, record);
+      historyByBranch.set(key, records);
+    };
+
+    for (const task of this.data.shiftTasks) {
+      const chain = lineage(task);
+      const root = chain[0] ?? task;
+      task.originTaskId = task.originTaskId || root.id;
+      task.originalDate = task.originalDate || root.date;
+      task.rolloverCount = Math.max(task.rolloverCount || 0, chain.length - 1);
+
+      for (const rawRecord of task.rolloverHistory || []) {
+        if (!rawRecord?.id || !rawRecord.waiterId) continue;
+        addHistory(task.originTaskId, rawRecord.waiterId, {
+          id: String(rawRecord.id).slice(0, 64),
+          waiterId: String(rawRecord.waiterId),
+          fromTaskId: String(rawRecord.fromTaskId || ""),
+          fromDate: String(rawRecord.fromDate || task.originalDate),
+          toTaskId: String(rawRecord.toTaskId || task.id),
+          toDate: String(rawRecord.toDate || task.date),
+          createdAt: String(rawRecord.createdAt || task.createdAt),
+          reason: String(rawRecord.reason || "").trim().slice(0, 500),
+          reasonProvidedAt: rawRecord.reasonProvidedAt ? String(rawRecord.reasonProvidedAt) : null
+        });
+      }
+
+      if (task.carriedFromTaskId && task.waiterId) {
+        const parent = byId.get(task.carriedFromTaskId);
+        addHistory(task.originTaskId, task.waiterId, {
+          id: `legacy-${task.id}`.slice(0, 64),
+          waiterId: task.waiterId,
+          fromTaskId: parent?.id || task.carriedFromTaskId,
+          fromDate: parent?.date || task.originalDate,
+          toTaskId: task.id,
+          toDate: task.date,
+          createdAt: task.createdAt,
+          reason: "",
+          reasonProvidedAt: null
+        });
+      }
+    }
+
+    for (const task of this.data.shiftTasks) {
+      const originTaskId = task.originTaskId || task.id;
+      const branchRecords = task.waiterId
+        ? historyByBranch.get(`${originTaskId}:${task.waiterId}`)
+        : null;
+      const records = branchRecords
+        ? Array.from(branchRecords.values())
+        : Array.from(historyByBranch.entries())
+          .filter(([key]) => key.startsWith(`${originTaskId}:`))
+          .flatMap(([, entries]) => Array.from(entries.values()));
+      const unique = new Map(records.map((record) => [record.id, record]));
+      task.rolloverHistory = Array.from(unique.values())
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      task.rolloverCount = Math.max(task.rolloverCount || 0, task.rolloverHistory.length);
+      if (task.completedDate) {
+        task.completionDays = dateKeyDistance(task.originalDate || task.date, task.completedDate);
+      }
+    }
+  }
+
   private normalizeData() {
     const storedRoles = (this.data.staffRoles ?? []).map((role) => ({
       ...role,
@@ -853,23 +940,37 @@ export class Store {
         sort: Number.isFinite(item.sort) ? item.sort : (index + 1) * 10
       }))
       .sort(checklistOrder);
-    this.data.shiftTasks = (this.data.shiftTasks ?? []).map((task) => ({
-      ...task,
-      id: task.id || randomUUID(),
-      roleId: this.findRole(task.roleId)?.id ?? "waiter",
-      waiterId: task.waiterId ?? null,
-      date: task.date ?? venueDateKey(),
-      title: task.title?.trim() || "Задание",
-      description: task.description ?? "",
-      requiredForCalls: task.requiredForCalls ?? false,
-      countsForRating: task.countsForRating ?? true,
-      notified: task.notified ?? false,
-      completedAt: task.completedAt ?? null,
-      createdAt: task.createdAt ?? now(),
-      carriedFromTaskId: task.carriedFromTaskId ?? null,
-      rolloverProcessedAt: task.rolloverProcessedAt ?? null,
-      rolloverTargetDate: task.rolloverTargetDate ?? null
-    }));
+    this.data.shiftTasks = (this.data.shiftTasks ?? []).map((task) => {
+      const date = task.date ?? venueDateKey();
+      const completedAt = task.completedAt ?? null;
+      const completedDate = task.completedDate
+        ?? (completedAt ? venueOperationalDateKey(new Date(completedAt)) : null);
+      return {
+        ...task,
+        id: task.id || randomUUID(),
+        roleId: this.findRole(task.roleId)?.id ?? "waiter",
+        waiterId: task.waiterId ?? null,
+        date,
+        title: task.title?.trim() || "Задание",
+        description: task.description ?? "",
+        requiredForCalls: task.requiredForCalls ?? false,
+        countsForRating: task.countsForRating ?? true,
+        notified: task.notified ?? false,
+        completedAt,
+        completedDate,
+        completionDays: task.completionDays
+          ?? (completedDate ? dateKeyDistance(task.originalDate || date, completedDate) : null),
+        createdAt: task.createdAt ?? now(),
+        carriedFromTaskId: task.carriedFromTaskId ?? null,
+        originTaskId: task.originTaskId ?? null,
+        originalDate: task.originalDate ?? date,
+        rolloverCount: Math.max(0, Math.round(task.rolloverCount || 0)),
+        rolloverHistory: Array.isArray(task.rolloverHistory) ? task.rolloverHistory : [],
+        rolloverProcessedAt: task.rolloverProcessedAt ?? null,
+        rolloverTargetDate: task.rolloverTargetDate ?? null
+      };
+    });
+    this.normalizeShiftTaskLineage();
     this.data.waiters = this.data.waiters.map((waiter) => ({
       ...waiter,
       roleId: this.findRole(waiter.roleId)?.id ?? "waiter",
@@ -1225,6 +1326,7 @@ export class Store {
         countsForRating: task.countsForRating,
         sort: 10000 + idx * 10,
         completedAt: null as string | null,
+        ...this.shiftTaskChecklistMetadata(task),
         adminScore: null as number | null,
         adminComment: "",
         adminPhotoUrl: "",
@@ -1334,9 +1436,13 @@ export class Store {
     if (item.itemId.startsWith("task-")) {
       const taskId = item.itemId.slice("task-".length);
       const task = this.data.shiftTasks.find(
-        (entry) => entry.id === taskId && entry.waiterId === waiterId
+        (entry) => entry.id === taskId && (entry.waiterId === null || entry.waiterId === waiterId)
       );
-      if (task && !task.completedAt) task.completedAt = timestamp;
+      const completedDate = venueOperationalDateKey(completedAt);
+      item.taskCompletionDays = dateKeyDistance(item.taskOriginalDate || shift.morningGreetingDate, completedDate);
+      if (task?.waiterId === waiterId && !task.completedAt) {
+        this.markShiftTaskCompleted(task, completedAt);
+      }
     }
     const requiredComplete = shift.checklist.every(
       (entry) => entry.phase === "closing" || !entry.requiredForCalls || entry.completedAt
@@ -2071,6 +2177,113 @@ export class Store {
 
   // ─── ShiftTask methods ───────────────────────────────────────────────
 
+  private shiftTaskChecklistMetadata(task: ShiftTask) {
+    return {
+      taskOriginalDate: task.originalDate || task.date,
+      taskRolloverCount: task.rolloverCount || 0,
+      taskRolloverHistory: structuredClone(task.rolloverHistory || []),
+      taskCompletionDays: task.completionDays ?? null
+    };
+  }
+
+  private syncShiftTaskMetadata(task: ShiftTask) {
+    const itemId = `task-${task.id}`;
+    for (const shift of this.data.shifts) {
+      const item = shift.checklist.find((entry) => entry.itemId === itemId);
+      if (!item) continue;
+      Object.assign(item, this.shiftTaskChecklistMetadata(task));
+      if (task.completedAt && !item.completedAt) item.completedAt = task.completedAt;
+    }
+  }
+
+  private markShiftTaskCompleted(task: ShiftTask, completedAt: Date) {
+    const timestamp = completedAt.toISOString();
+    const completedDate = venueOperationalDateKey(completedAt);
+    task.completedAt = timestamp;
+    task.completedDate = completedDate;
+    task.completionDays = dateKeyDistance(task.originalDate || task.date, completedDate);
+    this.syncShiftTaskMetadata(task);
+  }
+
+  private propagateRolloverHistory(
+    originTaskId: string,
+    waiterId: string,
+    history: ShiftTaskRolloverRecord[]
+  ) {
+    const sorted = [...history].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    for (const task of this.data.shiftTasks) {
+      if ((task.originTaskId || task.id) !== originTaskId) continue;
+      if (task.waiterId && task.waiterId !== waiterId) continue;
+      const existing = new Map((task.rolloverHistory || []).map((record) => [record.id, record]));
+      for (const record of sorted) existing.set(record.id, record);
+      task.rolloverHistory = Array.from(existing.values())
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      task.rolloverCount = task.waiterId
+        ? task.rolloverHistory.filter((record) => record.waiterId === waiterId).length
+        : task.rolloverHistory.length;
+      this.syncShiftTaskMetadata(task);
+    }
+  }
+
+  private createCarriedShiftTask(
+    source: ShiftTask,
+    waiterId: string,
+    targetDate: string,
+    timestamp: string
+  ) {
+    const alreadyCreated = this.data.shiftTasks.find(
+      (task) => task.date === targetDate
+        && task.waiterId === waiterId
+        && task.carriedFromTaskId === source.id
+    );
+    if (alreadyCreated) return null;
+
+    const originTaskId = source.originTaskId || source.id;
+    const originalDate = source.originalDate || source.date;
+    const targetId = randomUUID();
+    const inheritedHistory = (source.rolloverHistory || [])
+      .filter((record) => record.waiterId === waiterId);
+    const rolloverRecord: ShiftTaskRolloverRecord = {
+      id: randomUUID(),
+      waiterId,
+      fromTaskId: source.id,
+      fromDate: source.date,
+      toTaskId: targetId,
+      toDate: targetDate,
+      createdAt: timestamp,
+      reason: "",
+      reasonProvidedAt: null
+    };
+    const rolloverHistory = [...inheritedHistory, rolloverRecord];
+    const carriedTask: ShiftTask = {
+      id: targetId,
+      roleId: source.roleId,
+      waiterId,
+      date: targetDate,
+      title: source.title,
+      description: source.description,
+      requiredForCalls: source.requiredForCalls,
+      countsForRating: source.countsForRating,
+      notified: false,
+      completedAt: null,
+      completedDate: null,
+      completionDays: null,
+      createdAt: timestamp,
+      carriedFromTaskId: source.id,
+      originTaskId,
+      originalDate,
+      rolloverCount: rolloverHistory.length,
+      rolloverHistory,
+      rolloverProcessedAt: null,
+      rolloverTargetDate: null
+    };
+    this.data.shiftTasks.unshift(carriedTask);
+    source.rolloverTargetDate = targetDate;
+    this.propagateRolloverHistory(originTaskId, waiterId, rolloverHistory);
+    this.appendShiftTaskToActiveShifts(carriedTask);
+    return carriedTask;
+  }
+
   private appendShiftTaskToActiveShifts(task: ShiftTask) {
     if (task.completedAt) return;
     for (const shift of this.data.shifts) {
@@ -2096,6 +2309,7 @@ export class Store {
         countsForRating: task.countsForRating,
         sort: 10_000 + shift.checklist.filter((item) => item.itemId.startsWith("task-")).length * 10,
         completedAt: null,
+        ...this.shiftTaskChecklistMetadata(task),
         adminScore: null,
         adminComment: "",
         adminPhotoUrl: "",
@@ -2121,15 +2335,22 @@ export class Store {
   }
 
   async addShiftTask(task: Omit<ShiftTask, "id" | "notified" | "completedAt" | "createdAt">): Promise<ShiftTask> {
+    const id = randomUUID();
     const newTask: ShiftTask = {
       ...task,
-      id: randomUUID(),
+      id,
       notified: false,
       completedAt: null,
+      completedDate: null,
+      completionDays: null,
       createdAt: now(),
-      carriedFromTaskId: task.carriedFromTaskId ?? null,
-      rolloverProcessedAt: task.rolloverProcessedAt ?? null,
-      rolloverTargetDate: task.rolloverTargetDate ?? null
+      carriedFromTaskId: null,
+      originTaskId: id,
+      originalDate: task.date,
+      rolloverCount: 0,
+      rolloverHistory: [],
+      rolloverProcessedAt: null,
+      rolloverTargetDate: null
     };
     this.data.shiftTasks.unshift(newTask);
     this.appendShiftTaskToActiveShifts(newTask);
@@ -2150,13 +2371,13 @@ export class Store {
     if (task.completedAt) return { status: "already_completed", task: structuredClone(task) };
 
     const timestamp = completedAt.toISOString();
-    task.completedAt = timestamp;
+    this.markShiftTaskCompleted(task, completedAt);
     const itemId = `task-${task.id}`;
     for (const shift of this.data.shifts) {
       if (shift.waiterId !== waiterId || shift.morningGreetingDate !== task.date) continue;
       const item = shift.checklist.find((entry) => entry.itemId === itemId);
-      if (!item || item.completedAt) continue;
-      item.completedAt = timestamp;
+      if (!item) continue;
+      if (!item.completedAt) item.completedAt = timestamp;
       if (shift.status !== "ended") {
         const requiredComplete = shift.checklist.every(
           (entry) => entry.phase === "closing" || !entry.requiredForCalls || entry.completedAt
@@ -2171,6 +2392,82 @@ export class Store {
 
     await this.persist();
     return { status: "completed", task: structuredClone(task) };
+  }
+
+  async rolloverIncompleteShiftTasksForShift(
+    shiftId: string,
+    targetDate?: string,
+    processedAt = new Date()
+  ): Promise<ShiftTask[]> {
+    const shift = this.data.shifts.find((item) => item.id === shiftId);
+    if (!shift) return [];
+    const rolloverDate = targetDate || nextDateKey(shift.morningGreetingDate);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(rolloverDate)) {
+      throw new Error("Invalid shift task rollover date");
+    }
+
+    const timestamp = processedAt.toISOString();
+    const created: ShiftTask[] = [];
+    let changed = false;
+    for (const item of shift.checklist) {
+      if (item.completedAt || !item.itemId.startsWith("task-")) continue;
+      const source = this.data.shiftTasks.find((task) => task.id === item.itemId.slice("task-".length));
+      if (!source || source.completedAt) continue;
+      const carried = this.createCarriedShiftTask(source, shift.waiterId, rolloverDate, timestamp);
+      if (carried) {
+        created.push(carried);
+        changed = true;
+      }
+      if (source.waiterId === shift.waiterId && !source.rolloverProcessedAt) {
+        source.rolloverProcessedAt = timestamp;
+        source.rolloverTargetDate = rolloverDate;
+        changed = true;
+      }
+    }
+    if (changed) await this.persist();
+    return structuredClone(created);
+  }
+
+  pendingShiftTaskRolloverReasons(waiterId: string): ShiftTaskRolloverPrompt[] {
+    const prompts = new Map<string, ShiftTaskRolloverPrompt>();
+    for (const task of this.data.shiftTasks) {
+      for (const record of task.rolloverHistory || []) {
+        if (record.waiterId !== waiterId || record.reason.trim()) continue;
+        const target = this.data.shiftTasks.find((candidate) => candidate.id === record.toTaskId);
+        if (!target) continue;
+        prompts.set(record.id, { task: target, record });
+      }
+    }
+    return Array.from(prompts.values())
+      .sort((left, right) => left.record.createdAt.localeCompare(right.record.createdAt))
+      .map((prompt) => structuredClone(prompt));
+  }
+
+  findPendingShiftTaskRolloverReason(recordId: string, waiterId: string) {
+    return this.pendingShiftTaskRolloverReasons(waiterId)
+      .find((prompt) => prompt.record.id === recordId) ?? null;
+  }
+
+  async setShiftTaskRolloverReason(recordId: string, waiterId: string, reason: string) {
+    const normalizedReason = reason.trim().replace(/\s+/g, " ").slice(0, 500);
+    if (normalizedReason.length < 3) return null;
+    const pending = this.findPendingShiftTaskRolloverReason(recordId, waiterId);
+    if (!pending) return null;
+    const providedAt = now();
+
+    for (const task of this.data.shiftTasks) {
+      let changed = false;
+      task.rolloverHistory = (task.rolloverHistory || []).map((record) => {
+        if (record.id !== recordId || record.waiterId !== waiterId) return record;
+        changed = true;
+        return { ...record, reason: normalizedReason, reasonProvidedAt: providedAt };
+      });
+      if (changed) this.syncShiftTaskMetadata(task);
+    }
+    await this.persist();
+    const target = this.data.shiftTasks.find((task) => task.id === pending.task.id);
+    const record = target?.rolloverHistory?.find((item) => item.id === recordId);
+    return target && record ? structuredClone({ task: target, record }) : null;
   }
 
   async rolloverIncompleteShiftTasks(targetDate: string, processedAt = new Date()): Promise<ShiftTask[]> {
@@ -2223,32 +2520,8 @@ export class Store {
       }
 
       for (const waiterId of waiterIds) {
-        const alreadyCreated = this.data.shiftTasks.some(
-          (task) => task.date === targetDate
-            && task.waiterId === waiterId
-            && task.carriedFromTaskId === source.id
-        );
-        if (alreadyCreated) continue;
-
-        const carriedTask: ShiftTask = {
-          id: randomUUID(),
-          roleId: source.roleId,
-          waiterId,
-          date: targetDate,
-          title: source.title,
-          description: source.description,
-          requiredForCalls: source.requiredForCalls,
-          countsForRating: source.countsForRating,
-          notified: false,
-          completedAt: null,
-          createdAt: timestamp,
-          carriedFromTaskId: source.id,
-          rolloverProcessedAt: null,
-          rolloverTargetDate: null
-        };
-        this.data.shiftTasks.unshift(carriedTask);
-        this.appendShiftTaskToActiveShifts(carriedTask);
-        created.push(carriedTask);
+        const carriedTask = this.createCarriedShiftTask(source, waiterId, targetDate, timestamp);
+        if (carriedTask) created.push(carriedTask);
       }
 
       source.rolloverProcessedAt = timestamp;
