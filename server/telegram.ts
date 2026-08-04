@@ -668,10 +668,7 @@ export class TelegramService {
   private checklistKeyboard(shift: WaiterShift) {
     const buttons = shift.checklist
       .map((item, index) => ({ item, index }))
-      .filter(({ item }) => !item.completedAt && (
-        item.itemId.startsWith("task-")
-        || this.store.checklistPhaseWindowStatus(shift, item.phase) === "available"
-      ))
+      .filter(({ item }) => !item.completedAt)
       .map(({ item, index }) => [
         {
           text: `Сделано: пункт ${index + 1}`,

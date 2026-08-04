@@ -319,6 +319,52 @@ test("shift receives the correct opening phase and checklist completion is limit
   });
 });
 
+test("adding an evening template updates an already open evening shift", async () => {
+  await withStore(async (store) => {
+    const windows: ChecklistWindows = {
+      opening: { start: "10:00", end: "12:30" },
+      evening: { start: "18:00", end: "19:00" },
+      closing: { start: "22:00", end: "02:00" }
+    };
+    const template = (id: string, phase: "opening" | "evening" | "closing") => ({
+      id,
+      roleId: "waiter",
+      phase,
+      title: id,
+      description: "",
+      requiredForCalls: phase !== "closing",
+      countsForRating: true,
+      active: true,
+      sort: phase === "closing" ? 30 : phase === "evening" ? 20 : 10
+    });
+    await store.replaceChecklistConfiguration([
+      template("morning", "opening"),
+      template("closing", "closing")
+    ], windows);
+
+    const waiter = store.snapshot().waiters[0];
+    const started = await store.startWaiterShift(
+      waiter.id,
+      [store.listZones()[0]],
+      new Date("2026-08-04T14:02:00.000Z") // 18:02 Astrakhan
+    );
+    assert.ok(started);
+    assert.deepEqual(started.shift.checklist.map((item) => item.phase), ["opening", "closing"]);
+
+    await store.replaceChecklistConfiguration([
+      template("morning", "opening"),
+      template("evening", "evening"),
+      template("closing", "closing")
+    ], windows);
+
+    const synchronized = store.currentShiftForWaiter(waiter.id);
+    assert.ok(synchronized);
+    assert.deepEqual(synchronized.checklist.map((item) => item.phase), ["evening", "closing"]);
+    assert.deepEqual(synchronized.checklist.map((item) => item.itemId), ["evening", "closing"]);
+    assert.equal(synchronized.status, "checklist");
+  });
+});
+
 test("closing checklist blocks manual shift end and keeps its own one-minute interval", async () => {
   await withStore(async (store) => {
     const waiter = store.snapshot().waiters[0];

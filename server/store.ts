@@ -1,6 +1,7 @@
 import { copyFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { config } from "./config";
 import type {
   AppData,
@@ -955,6 +956,78 @@ export class Store {
     return this.removeShiftTaskChecklistEntries(orphanedTaskIds);
   }
 
+  private syncOpenShiftsWithChecklistTemplates() {
+    let changed = 0;
+    for (const shift of this.data.shifts) {
+      if (shift.status === "ended") continue;
+
+      const roleTemplates = this.data.checklistItems
+        .filter((item) => item.active && item.roleId === shift.roleId);
+      const preferredOpeningPhase = openingPhaseForShiftStart(
+        this.data.checklistWindows,
+        shift.morningGreetingDate,
+        new Date(shift.startedAt),
+        config.VENUE_TIME_ZONE
+      );
+      const openingPhase = preferredOpeningPhase === "evening"
+        && !roleTemplates.some((item) => normalizeChecklistPhase(item.phase) === "evening")
+        ? "opening"
+        : preferredOpeningPhase;
+      const existingTemplates = new Map(
+        shift.checklist
+          .filter((item) => !item.itemId.startsWith("task-"))
+          .map((item) => [item.itemId, item])
+      );
+      const templateItems = roleTemplates
+        .filter((item) => {
+          const phase = normalizeChecklistPhase(item.phase);
+          return phase === "closing" || phase === openingPhase;
+        })
+        .sort(checklistOrder)
+        .map((item) => {
+          const existing = existingTemplates.get(item.id);
+          return {
+            itemId: item.id,
+            phase: normalizeChecklistPhase(item.phase),
+            title: item.title,
+            description: item.description,
+            requiredForCalls: item.requiredForCalls,
+            countsForRating: item.countsForRating,
+            sort: item.sort,
+            completedAt: existing?.completedAt ?? null,
+            adminScore: existing?.adminScore ?? null,
+            adminComment: existing?.adminComment ?? "",
+            adminPhotoUrl: existing?.adminPhotoUrl ?? "",
+            reviewedAt: existing?.reviewedAt ?? null,
+            reviewedByRole: existing?.reviewedByRole ?? null,
+            reviewedByUsername: existing?.reviewedByUsername ?? ""
+          };
+        });
+      const datedTasks = shift.checklist
+        .filter((item) => item.itemId.startsWith("task-"))
+        .map((item) => ({ ...item, phase: openingPhase as ChecklistPhase }));
+      const nextChecklist = [...templateItems, ...datedTasks];
+      if (isDeepStrictEqual(nextChecklist, shift.checklist)) continue;
+
+      shift.checklist = nextChecklist;
+      const requiredComplete = shift.checklist.every(
+        (item) => item.phase === "closing" || !item.requiredForCalls || Boolean(item.completedAt)
+      );
+      if (requiredComplete) {
+        if (shift.status === "checklist") {
+          shift.status = "active";
+          shift.readyAt = now();
+        }
+      } else {
+        shift.status = "checklist";
+        shift.readyAt = null;
+      }
+      shift.score = calculateShiftScore(shift);
+      changed += 1;
+    }
+    return changed;
+  }
+
   private normalizeData() {
     const storedRoles = (this.data.staffRoles ?? []).map((role) => ({
       ...role,
@@ -1092,6 +1165,7 @@ export class Store {
       normalized.score = calculateShiftScore(normalized);
       return normalized;
     });
+    const synchronizedOpenShifts = this.syncOpenShiftsWithChecklistTemplates();
     this.data.calls = this.data.calls.map((call) => ({
       ...call,
       threadVersion: call.threadVersion ?? 1,
@@ -1168,7 +1242,7 @@ export class Store {
         createdAt: popup.createdAt ?? now()
       }))
       .sort((left, right) => left.sort - right.sort);
-    return this.removeOrphanedShiftTaskChecklistEntries();
+    return synchronizedOpenShifts + this.removeOrphanedShiftTaskChecklistEntries();
   }
 
   async replaceOffers(offers: Offer[]) {
@@ -1244,6 +1318,7 @@ export class Store {
       }))
       .sort(checklistOrder);
     this.data.checklistWindows = normalizedWindows;
+    this.syncOpenShiftsWithChecklistTemplates();
     await this.persist();
     const snapshot = this.snapshot();
     return { items: snapshot.checklistItems, windows: snapshot.checklistWindows };

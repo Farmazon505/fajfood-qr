@@ -18,8 +18,28 @@ test("checklist defaults expose morning, evening and overnight closing windows",
     "available"
   );
   assert.equal(
+    checklistWindowStatus("opening", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-04T12:31:00"), "Europe/Astrakhan"),
+    "closed"
+  );
+  assert.equal(
     checklistWindowStatus("evening", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-04T17:59:00"), "Europe/Astrakhan"),
     "not_started"
+  );
+  assert.equal(
+    checklistWindowStatus("evening", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-04T18:00:00"), "Europe/Astrakhan"),
+    "available"
+  );
+  assert.equal(
+    checklistWindowStatus("evening", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-04T19:01:00"), "Europe/Astrakhan"),
+    "closed"
+  );
+  assert.equal(
+    checklistWindowStatus("closing", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-04T21:59:00"), "Europe/Astrakhan"),
+    "not_started"
+  );
+  assert.equal(
+    checklistWindowStatus("closing", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-04T22:00:00"), "Europe/Astrakhan"),
+    "available"
   );
   assert.equal(
     checklistWindowStatus("closing", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-05T01:59:00"), "Europe/Astrakhan"),

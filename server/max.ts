@@ -689,10 +689,7 @@ export class MaxService {
   private checklistBody(shift: WaiterShift, prefix = ""): MaxMessageBody {
     const buttons = shift.checklist
       .map((item, index) => ({ item, index }))
-      .filter(({ item }) => !item.completedAt && (
-        item.itemId.startsWith("task-")
-        || this.store.checklistPhaseWindowStatus(shift, item.phase) === "available"
-      ))
+      .filter(({ item }) => !item.completedAt)
       .map(({ index }) => [
         this.callbackButton(`Сделано: пункт ${index + 1}`, `check:${shift.id}:${index}`, "positive")
       ]);
