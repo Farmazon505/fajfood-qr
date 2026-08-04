@@ -60,6 +60,11 @@ import {
   X
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
+import {
+  isLatestAdminOverviewRequest,
+  mergeAdminOverviewWithDrafts,
+  type AdminEditableResource
+} from "./admin-drafts";
 import { fetchWithNetworkRecovery } from "./network-recovery";
 import type {
   AppData,
@@ -1125,7 +1130,8 @@ function AdminPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState("");
-  const checklistDirtyRef = useRef(false);
+  const dirtyAdminResourcesRef = useRef(new Set<AdminEditableResource>());
+  const latestAdminOverviewRequestRef = useRef(0);
   const contentRef = useRef<HTMLElement | null>(null);
   const tabHistoryRef = useRef<string[]>(["dashboard"]);
   const swipeStartRef = useRef<SwipeStart | null>(null);
@@ -1153,6 +1159,8 @@ function AdminPage() {
   const authHeaders = useMemo(() => ({ authorization: `Bearer ${token}` }), [token]);
 
   const clearAdminSession = useCallback(() => {
+    latestAdminOverviewRequestRef.current += 1;
+    dirtyAdminResourcesRef.current.clear();
     localStorage.removeItem("adminToken");
     setData(null);
     setToken("");
@@ -1160,15 +1168,16 @@ function AdminPage() {
 
   const loadAdmin = useCallback(async () => {
     if (!token) return;
+    const requestId = ++latestAdminOverviewRequestRef.current;
     try {
       const overview = await api<AdminData>("/api/admin/overview", {
         headers: authHeaders
       });
-      setData((current) => checklistDirtyRef.current && current
-        ? { ...overview, checklistItems: current.checklistItems }
-        : overview);
+      if (!isLatestAdminOverviewRequest(requestId, latestAdminOverviewRequestRef.current)) return;
+      setData((current) => mergeAdminOverviewWithDrafts(overview, current, dirtyAdminResourcesRef.current));
       setError("");
     } catch (requestError) {
+      if (!isLatestAdminOverviewRequest(requestId, latestAdminOverviewRequestRef.current)) return;
       if (requestError instanceof ApiRequestError && requestError.status === 401) {
         clearAdminSession();
         setError("Сессия истекла. Войдите ещё раз.");
@@ -1177,6 +1186,14 @@ function AdminPage() {
       setError("Не удалось обновить данные. Сессия сохранена — проверьте подключение к интернету.");
     }
   }, [authHeaders, clearAdminSession, token]);
+
+  const updateAdminDraftResource = useCallback(<K extends AdminEditableResource,>(
+    resource: K,
+    value: AdminData[K]
+  ) => {
+    dirtyAdminResourcesRef.current.add(resource);
+    setData((current) => current ? { ...current, [resource]: value } : current);
+  }, []);
 
   useEffect(() => {
     void loadAdmin();
@@ -1199,6 +1216,16 @@ function AdminPage() {
       document.removeEventListener("visibilitychange", recoverVisibleAdmin);
     };
   }, [loadAdmin, token]);
+
+  useEffect(() => {
+    const warnAboutUnsavedChanges = (event: BeforeUnloadEvent) => {
+      if (dirtyAdminResourcesRef.current.size === 0) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnAboutUnsavedChanges);
+    return () => window.removeEventListener("beforeunload", warnAboutUnsavedChanges);
+  }, []);
 
   useEffect(() => {
     if (!token) return;
@@ -1340,16 +1367,23 @@ function AdminPage() {
     }
   };
 
-  const saveResource = async <T,>(resource: string, body: T, message: string, onSaved?: () => void) => {
+  const saveResource = async <K extends AdminEditableResource,>(
+    resource: string,
+    body: AdminData[K],
+    message: string,
+    draftResource: K
+  ) => {
     setSaved("");
     setError("");
     try {
-      await api(`/api/admin/${resource}`, {
+      const savedResource = await api<AdminData[K]>(`/api/admin/${resource}`, {
         method: "PUT",
         headers: authHeaders,
         body: JSON.stringify(body)
       });
-      onSaved?.();
+      latestAdminOverviewRequestRef.current += 1;
+      dirtyAdminResourcesRef.current.delete(draftResource);
+      setData((current) => current ? { ...current, [draftResource]: savedResource } : current);
       setSaved(message);
       setTimeout(() => setSaved(""), 3000);
       await loadAdmin();
@@ -1373,7 +1407,15 @@ function AdminPage() {
       const json = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(json.error || "Не удалось загрузить логотип");
       const settings = json as VenueSettings;
-      setData((current) => (current ? { ...current, settings } : current));
+      latestAdminOverviewRequestRef.current += 1;
+      setData((current) => {
+        if (!current) return current;
+        if (!dirtyAdminResourcesRef.current.has("settings")) return { ...current, settings };
+        return {
+          ...current,
+          settings: { ...settings, ...current.settings, logoUrl: settings.logoUrl }
+        };
+      });
       setSaved("Логотип сохранен");
       setTimeout(() => setSaved(""), 3000);
     } catch (requestError) {
@@ -1399,6 +1441,11 @@ function AdminPage() {
         method: "DELETE",
         headers: authHeaders
       });
+      latestAdminOverviewRequestRef.current += 1;
+      setData((current) => current ? {
+        ...current,
+        waiters: current.waiters.filter((item) => item.id !== waiter.id)
+      } : current);
       setSaved(`Сотрудник «${waiter.name}» удалён`);
       setTimeout(() => setSaved(""), 3000);
       await loadAdmin();
@@ -1421,9 +1468,12 @@ function AdminPage() {
     setError("");
     try {
       const offers = await api<Offer[]>("/api/admin/offers/sync", { method: "POST", headers: authHeaders });
+      latestAdminOverviewRequestRef.current += 1;
+      dirtyAdminResourcesRef.current.delete("offers");
       setData((current) => current ? { ...current, offers } : current);
       setSaved("Акции обновлены из CRM");
       window.setTimeout(() => setSaved(""), 3000);
+      await loadAdmin();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Не удалось обновить акции из CRM");
     }
@@ -1596,9 +1646,9 @@ function AdminPage() {
         {activeTab === "settings" && (
           <SettingsEditor
             settings={data.settings}
-            onChange={(settings) => setData({ ...data, settings })}
+            onChange={(settings) => updateAdminDraftResource("settings", settings)}
             onUploadLogo={uploadLogo}
-            onSave={() => void saveResource("settings", data.settings, "Настройки заведения сохранены")}
+            onSave={() => void saveResource("settings", data.settings, "Настройки заведения сохранены", "settings")}
           />
         )}
 
@@ -1606,8 +1656,8 @@ function AdminPage() {
           <TablesEditor
             data={data}
             publicUrl={publicUrl}
-            onChange={(tables) => setData({ ...data, tables })}
-            onSave={() => void saveResource("tables", data.tables, "Столы сохранены")}
+            onChange={(tables) => updateAdminDraftResource("tables", tables)}
+            onSave={() => void saveResource("tables", data.tables, "Столы сохранены", "tables")}
           />
         )}
 
@@ -1624,10 +1674,10 @@ function AdminPage() {
             waiters={data.waiters}
             roles={data.staffRoles}
             accessRole={data.accessRole}
-            onWaitersChange={(waiters) => setData({ ...data, waiters })}
-            onRolesChange={(staffRoles) => setData({ ...data, staffRoles })}
-            onSaveWaiters={() => void saveResource("waiters", data.waiters, "Сотрудники сохранены")}
-            onSaveRoles={() => void saveResource("staff-roles", data.staffRoles, "Должности сохранены")}
+            onWaitersChange={(waiters) => updateAdminDraftResource("waiters", waiters)}
+            onRolesChange={(staffRoles) => updateAdminDraftResource("staffRoles", staffRoles)}
+            onSaveWaiters={() => void saveResource("waiters", data.waiters, "Сотрудники сохранены", "waiters")}
+            onSaveRoles={() => void saveResource("staff-roles", data.staffRoles, "Должности сохранены", "staffRoles")}
             onDeleteWaiter={deleteStaffMember}
           />
         )}
@@ -1692,15 +1742,12 @@ function AdminPage() {
             roles={data.staffRoles}
             waiters={data.waiters}
             authHeaders={authHeaders}
-            onChange={(checklistItems) => {
-              checklistDirtyRef.current = true;
-              setData((current) => current ? { ...current, checklistItems } : current);
-            }}
+            onChange={(checklistItems) => updateAdminDraftResource("checklistItems", checklistItems)}
             onSave={() => void saveResource(
               "checklist",
               data.checklistItems,
               "Шаблоны чек-листов сохранены",
-              () => { checklistDirtyRef.current = false; }
+              "checklistItems"
             )}
             onRefresh={loadAdmin}
           />
@@ -1722,16 +1769,16 @@ function AdminPage() {
         {activeTab === "actions" && (
           <ActionsEditor
             actions={data.actions}
-            onChange={(actions) => setData({ ...data, actions })}
-            onSave={() => void saveResource("actions", data.actions, "Кнопки вызова сохранены")}
+            onChange={(actions) => updateAdminDraftResource("actions", actions)}
+            onSave={() => void saveResource("actions", data.actions, "Кнопки вызова сохранены", "actions")}
           />
         )}
 
         {activeTab === "offers" && (
           <OffersEditor
             offers={data.offers}
-            onChange={(offers) => setData({ ...data, offers })}
-            onSave={() => void saveResource("offers", data.offers, "Акции сохранены")}
+            onChange={(offers) => updateAdminDraftResource("offers", offers)}
+            onSave={() => void saveResource("offers", data.offers, "Акции сохранены", "offers")}
             onSync={() => void syncOffers()}
           />
         )}
