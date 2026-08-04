@@ -402,6 +402,28 @@ export type PopupNotification = {
   createdAt: string;
 };
 
+export type DeliveryPickupAlertStatus = "pending" | "acknowledged";
+
+export type DeliveryPickupAlert = {
+  id: string;
+  externalId: string;
+  deliveryOrderId: string;
+  orderNumber: string;
+  branchCode: "gorkogo";
+  etaMinutes: number | null;
+  courierStatus: string;
+  message: string;
+  status: DeliveryPickupAlertStatus;
+  recipientWaiterIds: string[];
+  fallbackToAdmin: boolean;
+  delivered: number;
+  acknowledgedById: string | null;
+  acknowledgedByName: string | null;
+  acknowledgedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type AppData = {
   analyticsStartedAt: string;
   settings: VenueSettings;
@@ -419,5 +441,6 @@ export type AppData = {
   loyaltyLeads: LoyaltyLead[];
   feedbacks: GuestFeedback[];
   popups: PopupNotification[];
+  deliveryPickupAlerts: DeliveryPickupAlert[];
   updatedAt: string;
 };

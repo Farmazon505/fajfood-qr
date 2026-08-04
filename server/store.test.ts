@@ -58,6 +58,52 @@ const completeChecklistItems = async (
   return current;
 };
 
+test("packer is a stable system role and active packers can acknowledge pickup alerts", async () => {
+  await withStore(async (store) => {
+    const packerRole = store.snapshot().staffRoles.find((role) => role.id === "packer");
+    assert.deepEqual(packerRole, {
+      id: "packer",
+      name: "Упаковщик",
+      kind: "staff",
+      system: true,
+      active: true
+    });
+    const packer = {
+      id: "packer-1",
+      name: "Упаковщик смены",
+      roleId: "packer",
+      telegramChatId: "70001",
+      maxUserId: "",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([...store.snapshot().waiters, packer]);
+    const started = await store.startWaiterShift(packer.id, ["Зал 1-й этаж"]);
+    assert.ok(started);
+    assert.equal(started.shift.status, "active");
+    assert.deepEqual(store.activeShiftPackers().map((member) => member.id), [packer.id]);
+
+    const created = await store.createDeliveryPickupAlert({
+      externalId: "crm-alert-1",
+      deliveryOrderId: "delivery-1",
+      orderNumber: "FJ-G-1001",
+      branchCode: "gorkogo",
+      etaMinutes: 7,
+      courierStatus: "performer_found",
+      message: "Курьер подъезжает"
+    });
+    assert.equal(created.existing, false);
+    await store.recordDeliveryPickupAlertNotification(created.alert.id, {
+      recipientWaiterIds: [packer.id],
+      fallbackToAdmin: false,
+      delivered: 1
+    });
+    const acknowledged = await store.acknowledgeDeliveryPickupAlert(created.alert.id, packer.id);
+    assert.equal(acknowledged.status, "acknowledged");
+    assert.equal(acknowledged.alert?.acknowledgedByName, packer.name);
+  });
+});
+
 test("waiter receives table calls only after required checklist is complete", async () => {
   await withStore(async (store) => {
     const waiter = store.snapshot().waiters[0];

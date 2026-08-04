@@ -14,7 +14,7 @@ import {
   venueOperationalDateKey
 } from "./store";
 import type { TelegramService } from "./telegram";
-import type { ServiceCall, ShiftTask, ShiftTaskRolloverRecord, WaiterShift } from "./types";
+import type { DeliveryPickupAlert, ServiceCall, ShiftTask, ShiftTaskRolloverRecord, WaiterShift } from "./types";
 import type { OwnerWebPushService } from "./web-push";
 
 class FakeTransport {
@@ -23,6 +23,7 @@ class FakeTransport {
   closingAlerts: WaiterShift[] = [];
   adminSummaries: WaiterShift[] = [];
   approvalTexts: string[] = [];
+  pickupAlerts: DeliveryPickupAlert[] = [];
   shiftTaskRollovers: Array<{ task: ShiftTask; record: ShiftTaskRolloverRecord }> = [];
 
   enabled() {
@@ -70,6 +71,11 @@ class FakeTransport {
     this.approvalTexts.push(text);
     return 1;
   }
+
+  async notifyDeliveryPickupAlert(_recipients: unknown[], alert: DeliveryPickupAlert) {
+    this.pickupAlerts.push(structuredClone(alert));
+    return 1;
+  }
 }
 
 test("delivery correction code is sent only when an administrator is on shift", async () => {
@@ -108,6 +114,51 @@ test("delivery correction code is sent only when an administrator is on shift", 
     });
     assert.deepEqual(telegram.approvalTexts, ["Код 123456"]);
     assert.deepEqual(max.approvalTexts, ["Код 123456"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("pickup alert is delivered to the active packer through both messengers", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-packer-alert-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const telegram = new FakeTransport();
+    const max = new FakeTransport();
+    const messaging = new MessagingService(
+      store,
+      telegram as unknown as TelegramService,
+      max as unknown as MaxService
+    );
+    const packer = {
+      id: "packer-alert",
+      name: "Упаковщик",
+      roleId: "packer",
+      telegramChatId: "20002",
+      maxUserId: "30002",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([packer]);
+    await store.startWaiterShift(packer.id, store.listZones().slice(0, 1));
+    const created = await store.createDeliveryPickupAlert({
+      externalId: "crm-pickup-1",
+      deliveryOrderId: "delivery-1",
+      orderNumber: "FJ-G-1002",
+      branchCode: "gorkogo",
+      etaMinutes: 6,
+      courierStatus: "performer_found",
+      message: "Курьер подъезжает"
+    });
+    assert.deepEqual(await messaging.notifyDeliveryPickupAlert(created.alert), {
+      packers: 1,
+      admins: 0,
+      delivered: 2,
+      fallbackToAdmin: false
+    });
+    assert.equal(telegram.pickupAlerts.length, 1);
+    assert.equal(max.pickupAlerts.length, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

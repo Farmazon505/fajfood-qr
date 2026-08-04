@@ -1,7 +1,7 @@
 import type { MaxService } from "./max";
 import { venueOperationalDateKey, type Store } from "./store";
 import type { TelegramService } from "./telegram";
-import type { DiningTable, ServiceCall, ShiftTask, ShiftTaskRolloverRecord, VenueSettings, Waiter, WaiterShift } from "./types";
+import type { DeliveryPickupAlert, DiningTable, ServiceCall, ShiftTask, ShiftTaskRolloverRecord, VenueSettings, Waiter, WaiterShift } from "./types";
 import { config } from "./config";
 import type { OwnerWebPushService } from "./web-push";
 import { nextDateKey } from "../shared/shift-tasks";
@@ -40,6 +40,9 @@ export class MessagingService {
       },
       processEndedShiftTasks: async (shift: WaiterShift) => {
         return this.processEndedShiftTasks(shift);
+      },
+      acknowledgeDeliveryPickupAlert: async (alertId: string, waiterId: string) => {
+        return this.acknowledgeDeliveryPickupAlert(alertId, waiterId);
       }
     };
     this.telegram.setCallCoordinator(coordinator);
@@ -157,6 +160,77 @@ export class MessagingService {
         0
       )
     };
+  }
+
+  async notifyDeliveryPickupAlert(alert: DeliveryPickupAlert) {
+    const packers = this.store.activeShiftPackers();
+    let admins = packers.length ? [] : this.store.activeShiftAdmins();
+    let recipients = packers.length ? packers : admins;
+    if (!recipients.length) return { packers: 0, admins: 0, delivered: 0, fallbackToAdmin: false };
+    const deliver = async (targets: Waiter[]) => {
+      const results = await Promise.allSettled([
+        this.telegram.notifyDeliveryPickupAlert(targets, alert),
+        this.max.notifyDeliveryPickupAlert(targets, alert)
+      ]);
+      for (const result of results) {
+        if (result.status === "rejected") console.error("[messaging] Ошибка уведомления упаковщика:", result.reason);
+      }
+      return results.reduce(
+        (total, result) => total + (result.status === "fulfilled" ? result.value : 0),
+        0
+      );
+    };
+    let delivered = await deliver(recipients);
+    let fallbackToAdmin = !packers.length;
+    if (packers.length && !delivered) {
+      admins = this.store.activeShiftAdmins();
+      if (admins.length) {
+        recipients = admins;
+        fallbackToAdmin = true;
+        delivered = await deliver(recipients);
+      }
+    }
+    await this.store.recordDeliveryPickupAlertNotification(alert.id, {
+      recipientWaiterIds: recipients.map((recipient) => recipient.id),
+      fallbackToAdmin,
+      delivered
+    });
+    return {
+      packers: packers.length,
+      admins: admins.length,
+      delivered,
+      fallbackToAdmin
+    };
+  }
+
+  async acknowledgeDeliveryPickupAlert(alertId: string, waiterId: string) {
+    const result = await this.store.acknowledgeDeliveryPickupAlert(alertId, waiterId);
+    if (!result.alert || !["acknowledged", "already_acknowledged"].includes(result.status)) return result;
+    const secret = config.CRM_STAFF_SERVICE_SECRET.trim();
+    const baseUrl = config.CRM_BASE_URL.replace(/\/$/, "");
+    if (!baseUrl || secret.length < 32 || !result.alert.acknowledgedById || !result.alert.acknowledgedByName || !result.alert.acknowledgedAt) {
+      return result;
+    }
+    try {
+      const response = await fetch(`${baseUrl}/api/integrations/qr/delivery-pickup-alert/ack`, {
+        method: "POST",
+        signal: AbortSignal.timeout(10_000),
+        headers: {
+          "Content-Type": "application/json",
+          "x-qrnastol-staff-secret": secret
+        },
+        body: JSON.stringify({
+          alertId: result.alert.externalId,
+          acknowledgedById: result.alert.acknowledgedById,
+          acknowledgedByName: result.alert.acknowledgedByName,
+          acknowledgedAt: result.alert.acknowledgedAt
+        })
+      });
+      if (!response.ok) throw new Error(`CRM вернула ${response.status}`);
+    } catch (error) {
+      console.error("[messaging] Не удалось передать подтверждение упаковщика в CRM:", error);
+    }
+    return result;
   }
 
   async notifyClosingChecklistIncomplete(shift: WaiterShift) {

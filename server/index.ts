@@ -157,6 +157,16 @@ const deliveryCorrectionApprovalSchema = z.object({
   expiresAt: z.string().datetime()
 });
 
+const deliveryPickupAlertSchema = z.object({
+  alertId: z.string().trim().min(1).max(160),
+  deliveryOrderId: z.string().trim().min(1).max(160),
+  orderNumber: z.string().trim().min(1).max(120),
+  branchCode: z.literal("gorkogo"),
+  etaMinutes: z.number().int().min(0).max(180).nullable(),
+  courierStatus: z.string().trim().min(1).max(120),
+  message: z.string().trim().min(3).max(1200)
+});
+
 const crmIntegrationAuthorized = (request: express.Request) => {
   const configured = config.CRM_STAFF_SERVICE_SECRET.trim();
   const provided = String(request.headers["x-qrnastol-staff-secret"] || "").trim();
@@ -337,6 +347,51 @@ app.post(
       return;
     }
     response.status(201).json(result);
+  }
+);
+
+app.post(
+  "/api/integrations/crm/delivery-pickup-alert",
+  crmIntegrationLimiter,
+  async (request, response) => {
+    if (!crmIntegrationAuthorized(request)) {
+      response.status(401).json({ error: "Внутренняя интеграция CRM и Qr не авторизована" });
+      return;
+    }
+    const parsed = deliveryPickupAlertSchema.safeParse(request.body);
+    if (!parsed.success) {
+      response.status(400).json({ error: "Некорректное уведомление о прибытии курьера" });
+      return;
+    }
+    const stored = await store.createDeliveryPickupAlert({
+      externalId: parsed.data.alertId,
+      deliveryOrderId: parsed.data.deliveryOrderId,
+      orderNumber: parsed.data.orderNumber,
+      branchCode: parsed.data.branchCode,
+      etaMinutes: parsed.data.etaMinutes,
+      courierStatus: parsed.data.courierStatus,
+      message: parsed.data.message
+    });
+    if (stored.existing && stored.alert.delivered > 0) {
+      response.status(200).json({
+        existing: true,
+        packers: stored.alert.fallbackToAdmin ? 0 : stored.alert.recipientWaiterIds.length,
+        admins: stored.alert.fallbackToAdmin ? stored.alert.recipientWaiterIds.length : 0,
+        delivered: stored.alert.delivered,
+        fallbackToAdmin: stored.alert.fallbackToAdmin
+      });
+      return;
+    }
+    const result = await messaging.notifyDeliveryPickupAlert(stored.alert);
+    if (!result.packers && !result.admins) {
+      response.status(409).json({ error: "В Qr нет упаковщика или администратора на активной смене" });
+      return;
+    }
+    if (!result.delivered) {
+      response.status(503).json({ error: "Сотрудник на смене найден, но уведомление не доставлено в Telegram или MAX" });
+      return;
+    }
+    response.status(stored.existing ? 200 : 201).json({ ...result, existing: stored.existing });
   }
 );
 

@@ -7,6 +7,7 @@ import fetch from "node-fetch";
 import { config, publicBaseUrl } from "./config";
 import type { ShiftEndResult, Store } from "./store";
 import type {
+  DeliveryPickupAlert,
   DiningTable,
   MaxMessageRef,
   ServiceCall,
@@ -71,6 +72,7 @@ type MaxCallCoordinator = {
   notifyClosingChecklistIncomplete?(shift: WaiterShift): Promise<void>;
   notifyAdminShiftSummary?(shift: WaiterShift): Promise<void>;
   processEndedShiftTasks?(shift: WaiterShift): Promise<ShiftTask[]>;
+  acknowledgeDeliveryPickupAlert?(alertId: string, waiterId: string): Promise<any>;
 };
 
 type MaxApiRequest = {
@@ -271,6 +273,10 @@ export class MaxService {
       await this.handleShiftTaskReasonCallback(callbackId, userId, payload);
       return;
     }
+    if (payload.startsWith("delivery:pickup:ack:")) {
+      await this.handleDeliveryPickupAlertCallback(callbackId, userId, payload);
+      return;
+    }
     if (payload.startsWith("call:")) {
       await this.handleCallCallback(callbackId, userId, payload);
     }
@@ -385,6 +391,55 @@ export class MaxService {
       if (sent) delivered += 1;
     }
     return delivered;
+  }
+
+  async notifyDeliveryPickupAlert(recipients: Waiter[], alert: DeliveryPickupAlert) {
+    if (!this.enabled()) return 0;
+    let delivered = 0;
+    for (const recipient of recipients) {
+      const userId = recipient.maxUserId.trim();
+      if (!userId) continue;
+      const sent = await this.sendMessage(userId, {
+        text: [
+          "📦 Нужно вынести заказ курьеру",
+          alert.message,
+          `Заказ: ${alert.orderNumber}`,
+          alert.etaMinutes === null ? "" : `Ожидаемое прибытие: через ${alert.etaMinutes} мин.`,
+          "Способ: от подъезда до подъезда."
+        ].filter(Boolean).join("\n"),
+        attachments: this.keyboard([[
+          this.callbackButton("✅ Принял, выношу", `delivery:pickup:ack:${alert.id}`, "positive")
+        ]]),
+        notify: true
+      });
+      if (sent) delivered += 1;
+    }
+    return delivered;
+  }
+
+  private async handleDeliveryPickupAlertCallback(callbackId: string, userId: number, data: string) {
+    const waiter = this.store.findWaiterByMaxUserId(userId);
+    if (!waiter?.active || !this.coordinator?.acknowledgeDeliveryPickupAlert) {
+      await this.answerCallback(callbackId, "MAX не привязан к активному сотруднику");
+      return;
+    }
+    const alertId = data.slice("delivery:pickup:ack:".length);
+    const result = await this.coordinator.acknowledgeDeliveryPickupAlert(alertId, waiter.id);
+    if (result.status === "forbidden") {
+      await this.answerCallback(callbackId, "Уведомление назначено другому сотруднику");
+      return;
+    }
+    if (result.status === "not_found") {
+      await this.answerCallback(callbackId, "Уведомление уже недоступно");
+      return;
+    }
+    if (result.status === "already_acknowledged") {
+      await this.answerCallback(callbackId, `Уже принял: ${result.alert?.acknowledgedByName || "сотрудник"}`);
+      return;
+    }
+    await this.answerCallback(callbackId, "Принято. Вынесите заказ ко входу.", {
+      text: `✅ Заказ ${result.alert?.orderNumber || ""} закреплён за вами.`
+    });
   }
 
   async notifyShiftTask(task: ShiftTask): Promise<boolean> {

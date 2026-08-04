@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { venueOperationalDateKey, type ShiftEndResult, type Store } from "./store";
 import type {
+  DeliveryPickupAlert,
   DiningTable,
   ServiceCall,
   ShiftTask,
@@ -48,6 +49,7 @@ type TelegramCallCoordinator = {
   notifyClosingChecklistIncomplete?(shift: WaiterShift): Promise<void>;
   notifyAdminShiftSummary?(shift: WaiterShift): Promise<void>;
   processEndedShiftTasks?(shift: WaiterShift): Promise<ShiftTask[]>;
+  acknowledgeDeliveryPickupAlert?(alertId: string, waiterId: string): Promise<any>;
 };
 
 const formatTime = (value: string) =>
@@ -294,6 +296,58 @@ export class TelegramService {
     return delivered;
   }
 
+  async notifyDeliveryPickupAlert(recipients: Waiter[], alert: DeliveryPickupAlert) {
+    if (!this.enabled()) return 0;
+    let delivered = 0;
+    for (const recipient of recipients) {
+      const chatId = recipient.telegramChatId.trim();
+      if (!chatId) continue;
+      const sent = await this.request<TelegramMessage>("sendMessage", {
+        chat_id: chatId,
+        text: [
+          "📦 Нужно вынести заказ курьеру",
+          alert.message,
+          `Заказ: ${alert.orderNumber}`,
+          alert.etaMinutes === null ? "" : `Ожидаемое прибытие: через ${alert.etaMinutes} мин.`,
+          "Способ: от подъезда до подъезда."
+        ].filter(Boolean).join("\n"),
+        disable_notification: false,
+        reply_markup: {
+          inline_keyboard: [[{
+            text: "✅ Принял, выношу",
+            callback_data: `delivery:pickup:ack:${alert.id}`
+          }]]
+        }
+      });
+      if (sent?.message_id) delivered += 1;
+    }
+    return delivered;
+  }
+
+  private async handleDeliveryPickupAlertCallback(callbackId: string, message: TelegramMessage, data: string) {
+    const waiter = this.store.findWaiterByChatId(message.chat.id);
+    if (!waiter?.active || !this.coordinator?.acknowledgeDeliveryPickupAlert) {
+      await this.answerCallback(callbackId, "Telegram не привязан к активному сотруднику", true);
+      return;
+    }
+    const alertId = data.slice("delivery:pickup:ack:".length);
+    const result = await this.coordinator.acknowledgeDeliveryPickupAlert(alertId, waiter.id);
+    if (result.status === "forbidden") {
+      await this.answerCallback(callbackId, "Уведомление назначено другому сотруднику", true);
+      return;
+    }
+    if (result.status === "not_found") {
+      await this.answerCallback(callbackId, "Уведомление уже недоступно", true);
+      return;
+    }
+    if (result.status === "already_acknowledged") {
+      await this.answerCallback(callbackId, `Уже принял: ${result.alert?.acknowledgedByName || "сотрудник"}`);
+      return;
+    }
+    await this.answerCallback(callbackId, "Принято. Вынесите заказ ко входу.");
+    await this.sendText(message.chat.id, `✅ Заказ ${result.alert?.orderNumber || ""} закреплён за вами.`);
+  }
+
   async notifyClosingChecklistIncomplete(shift: WaiterShift) {
     if (!this.enabled()) return 0;
     const pending = shift.checklist.filter((item) => item.phase === "closing" && !item.completedAt);
@@ -385,6 +439,11 @@ export class TelegramService {
 
     if (query.data.startsWith("task:reason:")) {
       await this.handleShiftTaskReasonCallback(query.id, query.message, query.data);
+      return;
+    }
+
+    if (query.data.startsWith("delivery:pickup:ack:")) {
+      await this.handleDeliveryPickupAlertCallback(query.id, query.message, query.data);
       return;
     }
 

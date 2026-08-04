@@ -13,6 +13,7 @@ import type {
   ChecklistPhase,
   ChecklistWindows,
   DiningTable,
+  DeliveryPickupAlert,
   GuestFeedback,
   LoyaltyLead,
   MaxMessageRef,
@@ -228,6 +229,7 @@ const defaultStaffRoles: StaffRoleDefinition[] = [
   { id: "admin", name: "Администратор", kind: "admin", system: true, active: true },
   { id: "waiter", name: "Официант", kind: "waiter", system: true, active: true },
   { id: "barista", name: "Бариста", kind: "staff", system: true, active: true },
+  { id: "packer", name: "Упаковщик", kind: "staff", system: true, active: true },
   { id: "cleaning", name: "Клининг", kind: "staff", system: true, active: true }
 ];
 
@@ -321,6 +323,7 @@ const createDefaultData = (): AppData => ({
   loyaltyLeads: [],
   feedbacks: [],
   popups: [],
+  deliveryPickupAlerts: [],
   updatedAt: now()
 });
 
@@ -377,6 +380,7 @@ export class Store {
         shifts: stored.shifts ?? [],
         feedbacks: stored.feedbacks ?? [],
         popups: stored.popups ?? [],
+        deliveryPickupAlerts: stored.deliveryPickupAlerts ?? [],
         loyaltyLeads: stored.loyaltyLeads ?? [],
         ownerNotifications: migratedOwnerNotifications,
         settings: {
@@ -759,6 +763,90 @@ export class Store {
     });
   }
 
+  activeShiftPackers() {
+    return this.data.waiters.filter((member) => {
+      if (!member.active || !this.hasMessengerConnection(member) || member.roleId !== "packer") return false;
+      return this.data.shifts.some(
+        (shift) => shift.waiterId === member.id && shift.status === "active"
+      );
+    });
+  }
+
+  findDeliveryPickupAlert(id: string) {
+    return this.data.deliveryPickupAlerts.find((alert) => alert.id === id) ?? null;
+  }
+
+  findDeliveryPickupAlertByExternalId(externalId: string) {
+    return this.data.deliveryPickupAlerts.find((alert) => alert.externalId === externalId) ?? null;
+  }
+
+  async createDeliveryPickupAlert(input: Omit<
+    DeliveryPickupAlert,
+    | "id"
+    | "status"
+    | "recipientWaiterIds"
+    | "fallbackToAdmin"
+    | "delivered"
+    | "acknowledgedById"
+    | "acknowledgedByName"
+    | "acknowledgedAt"
+    | "createdAt"
+    | "updatedAt"
+  >) {
+    const existing = this.findDeliveryPickupAlertByExternalId(input.externalId);
+    if (existing) return { alert: structuredClone(existing), existing: true };
+    const timestamp = now();
+    const alert: DeliveryPickupAlert = {
+      id: randomUUID(),
+      ...input,
+      status: "pending",
+      recipientWaiterIds: [],
+      fallbackToAdmin: false,
+      delivered: 0,
+      acknowledgedById: null,
+      acknowledgedByName: null,
+      acknowledgedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    this.data.deliveryPickupAlerts.push(alert);
+    this.data.deliveryPickupAlerts = this.data.deliveryPickupAlerts.slice(-500);
+    await this.persist();
+    return { alert: structuredClone(alert), existing: false };
+  }
+
+  async recordDeliveryPickupAlertNotification(
+    id: string,
+    input: { recipientWaiterIds: string[]; fallbackToAdmin: boolean; delivered: number }
+  ) {
+    const alert = this.findDeliveryPickupAlert(id);
+    if (!alert) return null;
+    alert.recipientWaiterIds = uniqueIds(input.recipientWaiterIds);
+    alert.fallbackToAdmin = input.fallbackToAdmin;
+    alert.delivered = Math.max(alert.delivered, Math.max(0, Math.round(input.delivered)));
+    alert.updatedAt = now();
+    await this.persist();
+    return structuredClone(alert);
+  }
+
+  async acknowledgeDeliveryPickupAlert(id: string, waiterId: string) {
+    const alert = this.findDeliveryPickupAlert(id);
+    const waiter = this.findWaiterById(waiterId);
+    if (!alert || !waiter) return { status: "not_found" as const, alert: null };
+    if (alert.status === "acknowledged") {
+      return { status: "already_acknowledged" as const, alert: structuredClone(alert) };
+    }
+    const allowed = alert.recipientWaiterIds.includes(waiter.id) || this.activeShiftAdmins().some((item) => item.id === waiter.id);
+    if (!allowed) return { status: "forbidden" as const, alert: structuredClone(alert) };
+    alert.status = "acknowledged";
+    alert.acknowledgedById = waiter.id;
+    alert.acknowledgedByName = waiter.name;
+    alert.acknowledgedAt = now();
+    alert.updatedAt = alert.acknowledgedAt;
+    await this.persist();
+    return { status: "acknowledged" as const, alert: structuredClone(alert) };
+  }
+
   ownersForEscalation() {
     if (this.data.ownerNotifications.configured) {
       const owner = this.ownerNotificationRecipient();
@@ -1087,6 +1175,29 @@ export class Store {
         rolloverTargetDate: task.rolloverTargetDate ?? null
       };
     });
+    this.data.deliveryPickupAlerts = (this.data.deliveryPickupAlerts ?? [])
+      .map((alert) => ({
+        ...alert,
+        id: alert.id || randomUUID(),
+        externalId: String(alert.externalId || "").trim(),
+        deliveryOrderId: String(alert.deliveryOrderId || "").trim(),
+        orderNumber: String(alert.orderNumber || "").trim(),
+        branchCode: "gorkogo" as const,
+        etaMinutes: Number.isFinite(Number(alert.etaMinutes)) ? Math.max(0, Math.round(Number(alert.etaMinutes))) : null,
+        courierStatus: String(alert.courierStatus || ""),
+        message: String(alert.message || ""),
+        status: alert.status === "acknowledged" ? "acknowledged" as const : "pending" as const,
+        recipientWaiterIds: Array.isArray(alert.recipientWaiterIds) ? uniqueIds(alert.recipientWaiterIds) : [],
+        fallbackToAdmin: Boolean(alert.fallbackToAdmin),
+        delivered: Math.max(0, Math.round(Number(alert.delivered || 0))),
+        acknowledgedById: alert.acknowledgedById || null,
+        acknowledgedByName: alert.acknowledgedByName || null,
+        acknowledgedAt: alert.acknowledgedAt || null,
+        createdAt: alert.createdAt || now(),
+        updatedAt: alert.updatedAt || alert.createdAt || now()
+      }))
+      .filter((alert) => alert.externalId && alert.deliveryOrderId)
+      .slice(-500);
     this.normalizeShiftTaskLineage();
     this.data.waiters = this.data.waiters.map((waiter) => ({
       ...waiter,
