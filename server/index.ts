@@ -3,7 +3,7 @@ import compression from "compression";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -127,6 +127,13 @@ const staffReservationsLimiter = rateLimit({
   legacyHeaders: false
 });
 
+const crmIntegrationLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
 const dateKeySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 const reservationUpdateSchema = z.object({
@@ -137,6 +144,25 @@ const reservationUpdateSchema = z.object({
   notes: z.string().max(4000).optional(),
   reason: z.string().max(500).optional()
 });
+
+const deliveryCorrectionApprovalSchema = z.object({
+  approvalId: z.string().uuid(),
+  orderNumber: z.string().trim().min(1).max(120),
+  code: z.string().regex(/^\d{6}$/),
+  reason: z.string().trim().min(3).max(1200),
+  requestedBy: z.string().trim().min(1).max(160),
+  previousDeliveryCost: z.number().nonnegative().max(100000),
+  nextDeliveryCost: z.number().nonnegative().max(100000),
+  fulfillmentType: z.enum(["delivery", "pickup"]),
+  expiresAt: z.string().datetime()
+});
+
+const crmIntegrationAuthorized = (request: express.Request) => {
+  const configured = config.CRM_STAFF_SERVICE_SECRET.trim();
+  const provided = String(request.headers["x-qrnastol-staff-secret"] || "").trim();
+  if (configured.length < 32 || provided.length !== configured.length) return false;
+  return timingSafeEqual(Buffer.from(configured), Buffer.from(provided));
+};
 
 const staffAccess = (request: express.Request) => {
   const identity = validateTelegramInitData(
@@ -273,6 +299,46 @@ app.get("/api/ready", (_request, response) => {
     publicBaseUrl: publicBaseUrl()
   });
 });
+
+app.post(
+  "/api/integrations/crm/delivery-correction-approval",
+  crmIntegrationLimiter,
+  async (request, response) => {
+    if (!crmIntegrationAuthorized(request)) {
+      response.status(401).json({ error: "Внутренняя интеграция CRM и Qr не авторизована" });
+      return;
+    }
+    const parsed = deliveryCorrectionApprovalSchema.safeParse(request.body);
+    if (!parsed.success) {
+      response.status(400).json({ error: "Некорректный запрос подтверждения коррекции" });
+      return;
+    }
+    const expiresAt = new Date(parsed.data.expiresAt);
+    if (expiresAt.getTime() <= Date.now()) {
+      response.status(400).json({ error: "Код подтверждения уже истёк" });
+      return;
+    }
+    const result = await messaging.notifyDeliveryCorrectionApproval([
+      "🔐 Подтверждение коррекции заказа",
+      `Заказ: ${parsed.data.orderNumber}`,
+      `Оператор: ${parsed.data.requestedBy}`,
+      `Изменение доставки: ${parsed.data.previousDeliveryCost} ₽ → ${parsed.data.nextDeliveryCost} ₽`,
+      `Способ получения: ${parsed.data.fulfillmentType === "pickup" ? "самовывоз" : "доставка"}`,
+      `Причина: ${parsed.data.reason}`,
+      `Одноразовый код: ${parsed.data.code}`,
+      "Сообщите код оператору только если подтверждаете эту коррекцию. Код действует 10 минут."
+    ].join("\n"));
+    if (!result.admins) {
+      response.status(409).json({ error: "В Qr сейчас нет администратора на активной смене" });
+      return;
+    }
+    if (!result.delivered) {
+      response.status(503).json({ error: "Администратор на смене найден, но код не доставлен в Telegram или MAX" });
+      return;
+    }
+    response.status(201).json(result);
+  }
+);
 
 app.get("/api/staff/reservations", staffReservationsLimiter, async (request, response) => {
   const access = staffAccess(request);

@@ -21,6 +21,7 @@ class FakeTransport {
   ownerAlerts: string[] = [];
   closingAlerts: WaiterShift[] = [];
   adminSummaries: WaiterShift[] = [];
+  approvalTexts: string[] = [];
 
   enabled() {
     return true;
@@ -57,7 +58,53 @@ class FakeTransport {
     this.adminSummaries.push(structuredClone(shift));
     return 1;
   }
+
+  async notifyDeliveryCorrectionApproval(_admins: unknown[], text: string) {
+    this.approvalTexts.push(text);
+    return 1;
+  }
 }
+
+test("delivery correction code is sent only when an administrator is on shift", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-correction-approval-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const telegram = new FakeTransport();
+    const max = new FakeTransport();
+    const messaging = new MessagingService(
+      store,
+      telegram as unknown as TelegramService,
+      max as unknown as MaxService
+    );
+
+    assert.deepEqual(await messaging.notifyDeliveryCorrectionApproval("Код 123456"), {
+      admins: 0,
+      delivered: 0
+    });
+
+    const admin = {
+      id: "admin-approval",
+      name: "Администратор",
+      roleId: "admin",
+      telegramChatId: "20001",
+      maxUserId: "30001",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([admin]);
+    await store.startWaiterShift(admin.id, store.listZones().slice(0, 1));
+
+    assert.deepEqual(await messaging.notifyDeliveryCorrectionApproval("Код 123456"), {
+      admins: 1,
+      delivered: 2
+    });
+    assert.deepEqual(telegram.approvalTexts, ["Код 123456"]);
+    assert.deepEqual(max.approvalTexts, ["Код 123456"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 class FakeWebPush {
   notifications: Array<{ title: string; body: string; tag?: string }> = [];

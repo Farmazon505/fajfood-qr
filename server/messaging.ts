@@ -110,6 +110,25 @@ export class MessagingService {
     return results.some((result) => result.status === "fulfilled" && result.value);
   }
 
+  async notifyDeliveryCorrectionApproval(text: string) {
+    const admins = this.store.activeShiftAdmins();
+    if (!admins.length) return { admins: 0, delivered: 0 };
+    const results = await Promise.allSettled([
+      this.telegram.notifyDeliveryCorrectionApproval(admins, text),
+      this.max.notifyDeliveryCorrectionApproval(admins, text)
+    ]);
+    for (const result of results) {
+      if (result.status === "rejected") console.error("[messaging] Ошибка доставки кода коррекции:", result.reason);
+    }
+    return {
+      admins: admins.length,
+      delivered: results.reduce(
+        (total, result) => total + (result.status === "fulfilled" ? result.value : 0),
+        0
+      )
+    };
+  }
+
   async notifyClosingChecklistIncomplete(shift: WaiterShift) {
     const results = await Promise.allSettled([
       this.telegram.notifyClosingChecklistIncomplete(shift),

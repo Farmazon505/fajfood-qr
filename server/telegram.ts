@@ -273,6 +273,22 @@ export class TelegramService {
     return delivered;
   }
 
+  async notifyDeliveryCorrectionApproval(admins: Waiter[], text: string) {
+    if (!this.enabled()) return 0;
+    let delivered = 0;
+    for (const admin of admins) {
+      const chatId = admin.telegramChatId.trim();
+      if (!chatId) continue;
+      const sent = await this.request<TelegramMessage>("sendMessage", {
+        chat_id: chatId,
+        text,
+        disable_notification: false
+      });
+      if (sent?.message_id) delivered += 1;
+    }
+    return delivered;
+  }
+
   async notifyClosingChecklistIncomplete(shift: WaiterShift) {
     if (!this.enabled()) return 0;
     const pending = shift.checklist.filter((item) => item.phase === "closing" && !item.completedAt);

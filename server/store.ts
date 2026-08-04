@@ -710,6 +710,15 @@ export class Store {
     });
   }
 
+  activeShiftAdmins() {
+    return this.data.waiters.filter((member) => {
+      if (!member.active || !this.hasMessengerConnection(member) || this.roleForWaiter(member)?.kind !== "admin") return false;
+      return this.data.shifts.some(
+        (shift) => shift.waiterId === member.id && shift.status !== "ended"
+      );
+    });
+  }
+
   ownersForEscalation() {
     if (this.data.ownerNotifications.configured) {
       const owner = this.ownerNotificationRecipient();

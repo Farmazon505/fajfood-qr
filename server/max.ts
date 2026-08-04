@@ -336,6 +336,18 @@ export class MaxService {
     return refs;
   }
 
+  async notifyDeliveryCorrectionApproval(admins: Waiter[], text: string) {
+    if (!this.enabled()) return 0;
+    let delivered = 0;
+    for (const admin of admins) {
+      const userId = admin.maxUserId.trim();
+      if (!userId) continue;
+      const sent = await this.sendMessage(userId, { text, notify: true });
+      if (sent) delivered += 1;
+    }
+    return delivered;
+  }
+
   async notifyShiftTask(task: ShiftTask): Promise<boolean> {
     if (!task.waiterId) return false;
     const waiter = this.store.findWaiterById(task.waiterId);
