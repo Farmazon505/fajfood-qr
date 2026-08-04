@@ -862,15 +862,19 @@ export class Store {
 
       for (const rawRecord of task.rolloverHistory || []) {
         if (!rawRecord?.id || !rawRecord.waiterId) continue;
+        const recordId = String(rawRecord.id).slice(0, 64);
+        const legacyReason = recordId.startsWith("legacy-")
+          ? "Причина не фиксировалась: перенос выполнен до обновления системы"
+          : "";
         addHistory(task.originTaskId, rawRecord.waiterId, {
-          id: String(rawRecord.id).slice(0, 64),
+          id: recordId,
           waiterId: String(rawRecord.waiterId),
           fromTaskId: String(rawRecord.fromTaskId || ""),
           fromDate: String(rawRecord.fromDate || task.originalDate),
           toTaskId: String(rawRecord.toTaskId || task.id),
           toDate: String(rawRecord.toDate || task.date),
           createdAt: String(rawRecord.createdAt || task.createdAt),
-          reason: String(rawRecord.reason || "").trim().slice(0, 500),
+          reason: String(rawRecord.reason || legacyReason).trim().slice(0, 500),
           reasonProvidedAt: rawRecord.reasonProvidedAt ? String(rawRecord.reasonProvidedAt) : null
         });
       }
@@ -885,7 +889,7 @@ export class Store {
           toTaskId: task.id,
           toDate: task.date,
           createdAt: task.createdAt,
-          reason: "",
+          reason: "Причина не фиксировалась: перенос выполнен до обновления системы",
           reasonProvidedAt: null
         });
       }

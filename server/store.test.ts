@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -817,6 +817,47 @@ test("an ended shift carries an incomplete dated task with reason history and co
     assert.equal(completed.status, "completed");
     assert.equal(completed.task.completionDays, 2);
   });
+});
+
+test("legacy carried tasks receive an explanatory comment without requesting a missing historical reason", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-legacy-task-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const waiter = store.snapshot().waiters[0];
+    const original = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date: "2026-01-10",
+      title: "Старое перенесённое задание",
+      description: "Перенос создан до сбора причин",
+      requiredForCalls: false,
+      countsForRating: true
+    });
+    const [carried] = await store.rolloverIncompleteShiftTasks("2026-01-11");
+    assert.equal(carried.carriedFromTaskId, original.id);
+
+    const dataPath = path.join(directory, "app.json");
+    const persisted = JSON.parse(await readFile(dataPath, "utf8")) as { shiftTasks: Array<Record<string, unknown>> };
+    for (const task of persisted.shiftTasks) {
+      delete task.originTaskId;
+      delete task.originalDate;
+      delete task.rolloverCount;
+      delete task.rolloverHistory;
+      delete task.completedDate;
+      delete task.completionDays;
+    }
+    await writeFile(dataPath, JSON.stringify(persisted, null, 2), "utf8");
+
+    const migratedStore = new Store(directory);
+    await migratedStore.init();
+    const migrated = migratedStore.findShiftTask(carried.id);
+    assert.equal(migrated?.rolloverCount, 1);
+    assert.match(migrated?.rolloverHistory?.[0]?.reason || "", /до обновления системы/);
+    assert.equal(migratedStore.pendingShiftTaskRolloverReasons(waiter.id).length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("a completed dated task is not carried forward", async () => {
