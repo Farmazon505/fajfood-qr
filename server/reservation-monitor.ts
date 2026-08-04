@@ -13,11 +13,24 @@ const dateKey = (value = new Date()) =>
 
 const fingerprint = (reservation: CrmStaffReservation) => JSON.stringify([
   reservation.status,
+  reservation.depositPaid,
   reservation.tableId,
   reservation.date,
   reservation.guestsCount,
   reservation.notes,
 ]);
+
+const paidReservationStatuses = new Set<CrmStaffReservation["status"]>([
+  "CONFIRMED",
+  "SEATED",
+  "COMPLETED",
+  "CANCELLED",
+  "NO_SHOW",
+]);
+
+export const isWaiterReservationNotificationEligible = (
+  reservation: CrmStaffReservation
+) => reservation.depositPaid && paidReservationStatuses.has(reservation.status);
 
 export class ReservationMonitor {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -51,19 +64,24 @@ export class ReservationMonitor {
       for (const table of snapshot.tables) {
         const hallName = halls.get(table.hall) || table.hall;
         for (const reservation of table.reservations) {
+          if (!isWaiterReservationNotificationEligible(reservation)) continue;
+
           const nextFingerprint = fingerprint(reservation);
           current.set(reservation.id, nextFingerprint);
           const previous = this.known.get(reservation.id);
-          if (this.seeded && previous !== nextFingerprint) {
+          const changed = this.seeded && previous !== nextFingerprint;
+          if (changed) {
             await this.notify(previous ? "changed" : "new", reservation, table, hallName);
           }
 
-          if (reservation.status === "CONFIRMED" || reservation.status === "PENDING") {
+          if (reservation.status === "CONFIRMED") {
             const startsIn = new Date(reservation.date).getTime() - now.getTime();
             const reminderKey = `${reservation.id}:${reservation.date}`;
             if (startsIn > 0 && startsIn <= 30 * 60_000 && !this.reminders.has(reminderKey)) {
               this.reminders.add(reminderKey);
-              await this.notify("reminder", reservation, table, hallName);
+              if (!changed) {
+                await this.notify("reminder", reservation, table, hallName);
+              }
             }
           }
         }
