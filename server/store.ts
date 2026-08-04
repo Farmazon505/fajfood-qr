@@ -383,7 +383,8 @@ export class Store {
           ...(stored.settings ?? {})
         }
       };
-      this.normalizeData();
+      const removedOrphanedTaskItems = this.normalizeData();
+      if (removedOrphanedTaskItems > 0) await this.persist();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await this.persist();
@@ -915,6 +916,45 @@ export class Store {
     }
   }
 
+  private removeShiftTaskChecklistEntries(taskIds: Set<string>) {
+    if (!taskIds.size) return 0;
+    let removed = 0;
+    for (const shift of this.data.shifts) {
+      const before = shift.checklist.length;
+      shift.checklist = shift.checklist.filter((item) => {
+        if (!item.itemId.startsWith("task-")) return true;
+        return !taskIds.has(item.itemId.slice("task-".length));
+      });
+      const removedFromShift = before - shift.checklist.length;
+      if (!removedFromShift) continue;
+      removed += removedFromShift;
+      if (shift.status !== "ended") {
+        const requiredComplete = shift.checklist.every(
+          (item) => item.phase === "closing" || !item.requiredForCalls || item.completedAt
+        );
+        if (requiredComplete && shift.status === "checklist") {
+          shift.status = "active";
+          shift.readyAt = shift.readyAt || now();
+        }
+      }
+      shift.score = calculateShiftScore(shift);
+    }
+    return removed;
+  }
+
+  private removeOrphanedShiftTaskChecklistEntries() {
+    const existingTaskIds = new Set(this.data.shiftTasks.map((task) => task.id));
+    const orphanedTaskIds = new Set<string>();
+    for (const shift of this.data.shifts) {
+      for (const item of shift.checklist) {
+        if (!item.itemId.startsWith("task-")) continue;
+        const taskId = item.itemId.slice("task-".length);
+        if (!existingTaskIds.has(taskId)) orphanedTaskIds.add(taskId);
+      }
+    }
+    return this.removeShiftTaskChecklistEntries(orphanedTaskIds);
+  }
+
   private normalizeData() {
     const storedRoles = (this.data.staffRoles ?? []).map((role) => ({
       ...role,
@@ -1128,6 +1168,7 @@ export class Store {
         createdAt: popup.createdAt ?? now()
       }))
       .sort((left, right) => left.sort - right.sort);
+    return this.removeOrphanedShiftTaskChecklistEntries();
   }
 
   async replaceOffers(offers: Offer[]) {
@@ -2537,9 +2578,16 @@ export class Store {
   }
 
   async deleteShiftTask(id: string): Promise<boolean> {
-    const before = this.data.shiftTasks.length;
-    this.data.shiftTasks = this.data.shiftTasks.filter((task) => task.id !== id);
-    if (this.data.shiftTasks.length === before) return false;
+    const target = this.data.shiftTasks.find((task) => task.id === id);
+    if (!target) return false;
+    const originTaskId = target.originTaskId || target.id;
+    const lineageTaskIds = new Set(
+      this.data.shiftTasks
+        .filter((task) => (task.originTaskId || task.id) === originTaskId)
+        .map((task) => task.id)
+    );
+    this.data.shiftTasks = this.data.shiftTasks.filter((task) => !lineageTaskIds.has(task.id));
+    this.removeShiftTaskChecklistEntries(lineageTaskIds);
     await this.persist();
     return true;
   }

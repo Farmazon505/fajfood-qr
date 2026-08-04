@@ -860,6 +860,96 @@ test("legacy carried tasks receive an explanatory comment without requesting a m
   }
 });
 
+test("deleting a dated task removes its complete carry lineage from current and historical shifts", async () => {
+  await withStore(async (store) => {
+    const waiter = store.snapshot().waiters[0];
+    const original = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date: "2026-01-10",
+      title: "Удаляемая задача со всей историей",
+      description: "Не должна остаться ни в одной смене",
+      requiredForCalls: false,
+      countsForRating: true
+    });
+    const firstShift = await store.startWaiterShift(
+      waiter.id,
+      [store.listZones()[0]],
+      new Date("2026-01-10T12:00:00+04:00")
+    );
+    assert.ok(firstShift);
+    const ended = await store.requestEndWaiterShift(waiter.id, {
+      automatic: true,
+      endedAt: new Date("2026-01-11T02:00:00+04:00")
+    });
+    assert.equal(ended.status, "ended");
+    if (ended.status !== "ended") return;
+    const [carried] = await store.rolloverIncompleteShiftTasksForShift(
+      ended.shift.id,
+      "2026-01-11",
+      new Date("2026-01-11T02:00:00+04:00")
+    );
+    assert.ok(carried);
+    const secondShift = await store.startWaiterShift(
+      waiter.id,
+      [store.listZones()[0]],
+      new Date("2026-01-11T12:00:00+04:00")
+    );
+    assert.ok(secondShift);
+    assert.ok(store.snapshot().shifts.some((shift) =>
+      shift.checklist.some((item) => item.itemId === `task-${original.id}` || item.itemId === `task-${carried.id}`)
+    ));
+
+    assert.equal(await store.deleteShiftTask(carried.id), true);
+    assert.equal(store.listShiftTasks().some((task) => task.originTaskId === original.id), false);
+    assert.equal(store.snapshot().shifts.some((shift) =>
+      shift.checklist.some((item) => item.itemId === `task-${original.id}` || item.itemId === `task-${carried.id}`)
+    ), false);
+    assert.equal(await store.deleteShiftTask(carried.id), false);
+  });
+});
+
+test("store startup permanently removes checklist copies whose dated task was already deleted", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-orphan-task-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const waiter = store.snapshot().waiters[0];
+    const task = await store.addShiftTask({
+      roleId: waiter.roleId,
+      waiterId: waiter.id,
+      date: venueOperationalDateKey(),
+      title: "Осиротевшая копия задачи",
+      description: "Должна удалиться при запуске",
+      requiredForCalls: false,
+      countsForRating: true
+    });
+    const started = await store.startWaiterShift(waiter.id, [store.listZones()[0]]);
+    assert.ok(started);
+    assert.ok(started.shift.checklist.some((item) => item.itemId === `task-${task.id}`));
+
+    const dataPath = path.join(directory, "app.json");
+    const persisted = JSON.parse(await readFile(dataPath, "utf8")) as {
+      shiftTasks: Array<{ id: string }>;
+      shifts: WaiterShift[];
+    };
+    persisted.shiftTasks = persisted.shiftTasks.filter((item) => item.id !== task.id);
+    await writeFile(dataPath, JSON.stringify(persisted, null, 2), "utf8");
+
+    const reloadedStore = new Store(directory);
+    await reloadedStore.init();
+    assert.equal(reloadedStore.snapshot().shifts.some((shift) =>
+      shift.checklist.some((item) => item.itemId === `task-${task.id}`)
+    ), false);
+    const cleaned = JSON.parse(await readFile(dataPath, "utf8")) as { shifts: WaiterShift[] };
+    assert.equal(cleaned.shifts.some((shift) =>
+      shift.checklist.some((item) => item.itemId === `task-${task.id}`)
+    ), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a completed dated task is not carried forward", async () => {
   await withStore(async (store) => {
     const waiter = store.snapshot().waiters[0];
