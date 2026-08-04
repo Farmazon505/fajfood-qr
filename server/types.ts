@@ -21,7 +21,12 @@ export type OwnerWebPushStatus = {
 };
 export type StaffRoleKind = "owner" | "admin" | "waiter" | "staff";
 export type CallRoutingStage = "waiter" | "admin" | "owner";
-export type ChecklistPhase = "opening" | "closing";
+export type ChecklistPhase = "opening" | "evening" | "closing";
+export type ChecklistTimeWindow = {
+  start: string;
+  end: string;
+};
+export type ChecklistWindows = Record<ChecklistPhase, ChecklistTimeWindow>;
 
 export type StaffRoleDefinition = {
   id: string;
@@ -385,6 +390,7 @@ export type AppData = {
   waiters: Waiter[];
   tables: DiningTable[];
   checklistItems: ChecklistItem[];
+  checklistWindows: ChecklistWindows;
   shiftTasks: ShiftTask[];
   shifts: WaiterShift[];
   calls: ServiceCall[];

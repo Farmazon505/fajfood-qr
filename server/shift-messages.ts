@@ -1,4 +1,11 @@
-import type { ShiftTask, WaiterShift } from "./types";
+import type { ChecklistWindows, ShiftTask, WaiterShift } from "./types";
+import {
+  CHECKLIST_PHASE_META,
+  DEFAULT_CHECKLIST_WINDOWS,
+  checklistWindowStatus,
+  formatChecklistWindow,
+  groupChecklistByPhase
+} from "../shared/checklists";
 
 export const shiftTaskText = (task: ShiftTask, roleLabel: string) => {
   const requiredLabel = task.requiredForCalls ? " (обязательное для допуска)" : "";
@@ -13,25 +20,44 @@ export const shiftTaskText = (task: ShiftTask, roleLabel: string) => {
   ].filter(Boolean).join("\n");
 };
 
-export const shiftChecklistText = (shift: WaiterShift) => {
-  const required = shift.checklist.filter((item) => item.phase === "opening" && item.requiredForCalls);
+export const shiftChecklistText = (
+  shift: WaiterShift,
+  windows: ChecklistWindows = DEFAULT_CHECKLIST_WINDOWS,
+  timeZone = "Europe/Astrakhan",
+  at = new Date()
+) => {
+  const required = shift.checklist.filter((item) => item.phase !== "closing" && item.requiredForCalls);
   const requiredDone = required.filter((item) => item.completedAt).length;
-  const rowsForPhase = (phase: "opening" | "closing") => {
-    const entries = shift.checklist.map((item, index) => ({ item, index })).filter(({ item }) => item.phase === phase);
-    if (!entries.length) return [];
-    return [phase === "opening" ? "🌅 ЧЕК-ЛИСТ ОТКРЫТИЯ" : "🌙 ЧЕК-ЛИСТ ЗАКРЫТИЯ", ...entries.map(({ item, index }) => {
+  const rows = groupChecklistByPhase(shift.checklist).flatMap((group, groupIndex) => {
+    const meta = CHECKLIST_PHASE_META[group.phase];
+    const status = checklistWindowStatus(group.phase, windows, shift.morningGreetingDate, at, timeZone);
+    const pending = group.entries.some(({ item }) => !item.completedAt);
+    const pendingDatedTask = group.entries.some(({ item }) => item.itemId.startsWith("task-") && !item.completedAt);
+    const availability = !pending
+      ? "✅ Этап выполнен"
+      : status === "available" || pendingDatedTask
+        ? "🟢 Можно выполнять сейчас"
+        : status === "not_started"
+          ? `⏳ Доступ откроется в ${windows[group.phase].start}`
+          : `🔒 Время заполнения истекло в ${windows[group.phase].end}`;
+    return [
+      ...(groupIndex ? [""] : []),
+      `${meta.icon} ${meta.title.toLocaleUpperCase("ru-RU")} · ${formatChecklistWindow(windows[group.phase])}`,
+      availability,
+      ...group.entries.map(({ item, index }) => {
         const marker = item.completedAt ? "✅" : "⬜";
-        const requiredLabel = phase === "opening" && item.requiredForCalls ? " · обязательно" : "";
+        const requiredLabel = group.phase !== "closing" && item.requiredForCalls ? " · обязательно" : "";
         const ratingLabel = item.countsForRating === false ? " · без рейтинга" : "";
         const description = item.description.trim();
         return [
           `${marker} ${index + 1}. ${item.title}${requiredLabel}${ratingLabel}`,
           description ? `   Выполнить: ${description}` : ""
         ].filter(Boolean).join("\n");
-      })];
-  };
-  const rows = shift.checklist.length
-    ? [...rowsForPhase("opening"), "", ...rowsForPhase("closing")]
+      })
+    ];
+  });
+  const checklistRows = shift.checklist.length
+    ? rows
     : ["Чек-лист на сегодня пуст."];
   const admission = shift.status === "active"
     ? "Обязательные пункты выполнены"
@@ -43,7 +69,7 @@ export const shiftChecklistText = (shift: WaiterShift) => {
     `Чек-лист: ${shift.roleName}`,
     `Этажи: ${shift.zones.join(", ")}`,
     "",
-    ...rows,
+    ...checklistRows,
     "",
     admission,
     shift.checklist.length > 1 ? "Интервал между пунктами одного чек-листа — 1 минута." : "",

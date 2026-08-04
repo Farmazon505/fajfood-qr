@@ -73,6 +73,8 @@ import type {
   CallAction,
   CallStatus,
   ChecklistItem,
+  ChecklistPhase,
+  ChecklistWindows,
   DiningTable,
   GuestFeedback,
   LoyaltyLead,
@@ -90,6 +92,12 @@ import type {
   WaiterShift,
   PopupNotification
 } from "../server/types";
+import {
+  CHECKLIST_PHASE_META,
+  CHECKLIST_PHASES,
+  formatChecklistWindow,
+  groupChecklistByPhase
+} from "../shared/checklists";
 
 type Bootstrap = {
   settings: VenueSettings;
@@ -1392,6 +1400,32 @@ function AdminPage() {
     }
   };
 
+  const saveChecklistConfiguration = async () => {
+    if (!data) return;
+    setSaved("");
+    setError("");
+    try {
+      const savedConfiguration = await api<{ items: ChecklistItem[]; windows: ChecklistWindows }>("/api/admin/checklist", {
+        method: "PUT",
+        headers: authHeaders,
+        body: JSON.stringify({ items: data.checklistItems, windows: data.checklistWindows })
+      });
+      latestAdminOverviewRequestRef.current += 1;
+      dirtyAdminResourcesRef.current.delete("checklistItems");
+      dirtyAdminResourcesRef.current.delete("checklistWindows");
+      setData((current) => current ? {
+        ...current,
+        checklistItems: savedConfiguration.items,
+        checklistWindows: savedConfiguration.windows
+      } : current);
+      setSaved("Шаблоны и время чек-листов сохранены");
+      setTimeout(() => setSaved(""), 3000);
+      await loadAdmin();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось сохранить чек-листы");
+    }
+  };
+
   const uploadLogo = async (file: File) => {
     setSaved("");
     setError("");
@@ -1738,17 +1772,14 @@ function AdminPage() {
         {activeTab === "checklist" && (
           <ChecklistEditor
             items={data.checklistItems}
+            windows={data.checklistWindows}
             shiftTasks={data.shiftTasks}
             roles={data.staffRoles}
             waiters={data.waiters}
             authHeaders={authHeaders}
             onChange={(checklistItems) => updateAdminDraftResource("checklistItems", checklistItems)}
-            onSave={() => void saveResource(
-              "checklist",
-              data.checklistItems,
-              "Шаблоны чек-листов сохранены",
-              "checklistItems"
-            )}
+            onWindowsChange={(checklistWindows) => updateAdminDraftResource("checklistWindows", checklistWindows)}
+            onSave={() => void saveChecklistConfiguration()}
             onRefresh={loadAdmin}
           />
         )}
@@ -3117,20 +3148,24 @@ function ManagementTelegramEditor({
 
 function ChecklistEditor({
   items,
+  windows,
   shiftTasks,
   roles,
   waiters,
   authHeaders,
   onChange,
+  onWindowsChange,
   onSave,
   onRefresh
 }: {
   items: ChecklistItem[];
+  windows: ChecklistWindows;
   shiftTasks: ShiftTask[];
   roles: StaffRoleDefinition[];
   waiters: Waiter[];
   authHeaders: Record<string, string>;
   onChange: (items: ChecklistItem[]) => void;
+  onWindowsChange: (windows: ChecklistWindows) => void;
   onSave: () => void;
   onRefresh: () => Promise<void>;
 }) {
@@ -3138,7 +3173,7 @@ function ChecklistEditor({
   const preferredRoleId = availableRoles.find((role) => role.kind === "waiter")?.id || availableRoles[0]?.id || "";
   const [roleId, setRoleId] = useState(preferredRoleId);
   const [section, setSection] = useState<"template" | "tasks">("template");
-  const [templatePhase, setTemplatePhase] = useState<"opening" | "closing">("opening");
+  const [templatePhase, setTemplatePhase] = useState<ChecklistPhase>("opening");
   const [taskDate, setTaskDate] = useState(() => new Intl.DateTimeFormat("en-CA").format(new Date()));
   const [taskWaiterId, setTaskWaiterId] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
@@ -3230,7 +3265,7 @@ function ChecklistEditor({
       <div className="panel-heading">
         <div>
           <h2>Чек-листы по должностям</h2>
-          <p className="muted checklist-intro">Шаблон повторяется каждую смену. Невыполненные задания по датам автоматически переносятся сотруднику на следующий день.</p>
+          <p className="muted checklist-intro">Для каждого этапа задаётся своё время заполнения. Утренняя и вечерняя смены получают свой чек-лист открытия, а закрытие назначается каждой смене. Невыполненные задания по датам автоматически переносятся сотруднику на следующий день.</p>
         </div>
       </div>
 
@@ -3254,17 +3289,47 @@ function ChecklistEditor({
       {section === "template" ? (
         <div className="checklist-section-body">
           <div className="checklist-phase-tabs" role="tablist" aria-label="Этап смены">
-            <button className={templatePhase === "opening" ? "active" : ""} onClick={() => setTemplatePhase("opening")}>
-              🌅 Чек-лист открытия
-            </button>
-            <button className={templatePhase === "closing" ? "active" : ""} onClick={() => setTemplatePhase("closing")}>
-              🌙 Чек-лист закрытия
-            </button>
+            {CHECKLIST_PHASES.map((phase) => (
+              <button key={phase} className={templatePhase === phase ? "active" : ""} onClick={() => setTemplatePhase(phase)}>
+                {CHECKLIST_PHASE_META[phase].icon} {CHECKLIST_PHASE_META[phase].title}
+              </button>
+            ))}
+          </div>
+          <div className="checklist-window-editor">
+            <div>
+              <strong>Время заполнения: {CHECKLIST_PHASE_META[templatePhase].title}</strong>
+              <span>Вне этого интервала сотрудник не сможет отметить пункт выполненным в Telegram или MAX.</span>
+            </div>
+            <label className="field">
+              <span>С</span>
+              <input
+                type="time"
+                value={windows[templatePhase].start}
+                onChange={(event) => onWindowsChange({
+                  ...windows,
+                  [templatePhase]: { ...windows[templatePhase], start: event.target.value }
+                })}
+              />
+            </label>
+            <label className="field">
+              <span>До</span>
+              <input
+                type="time"
+                value={windows[templatePhase].end}
+                onChange={(event) => onWindowsChange({
+                  ...windows,
+                  [templatePhase]: { ...windows[templatePhase], end: event.target.value }
+                })}
+              />
+            </label>
+            <span className="checklist-window-value">{formatChecklistWindow(windows[templatePhase])}</span>
           </div>
           <div className="section-toolbar">
-            <p className="muted">{templatePhase === "opening"
-              ? "Обязательные пункты блокируют рабочие уведомления официанта до выполнения."
-              : "Все пункты закрытия необходимо выполнить до ручного завершения смены. Автозакрытие выполняется в 02:00."}</p>
+            <p className="muted">{templatePhase === "closing"
+              ? "Все пункты закрытия необходимо выполнить до ручного завершения смены. Автозакрытие выполняется в 02:00."
+              : templatePhase === "evening"
+                ? "Этот чек-лист назначается сотруднику, который открывает вечернюю смену. Обязательные пункты блокируют рабочие уведомления до выполнения."
+                : "Этот чек-лист назначается сотруднику утренней смены. Обязательные пункты блокируют рабочие уведомления официанта до выполнения."}</p>
             <div className="button-row">
               <button
                 className="ghost-button"
@@ -3298,7 +3363,7 @@ function ChecklistEditor({
                 <Field label="Задача" value={item.title} onChange={(value) => updateItem(globalIndex, { title: value })} textarea autoGrow />
                 <Field label="Пояснение" value={item.description} onChange={(value) => updateItem(globalIndex, { description: value })} textarea autoGrow />
                 <div className="checklist-template-options">
-                  {templatePhase === "opening" && <label className="toggle-row">
+                  {templatePhase !== "closing" && <label className="toggle-row">
                     <input type="checkbox" checked={item.requiredForCalls} onChange={(event) => updateItem(globalIndex, { requiredForCalls: event.target.checked })} />
                     Обязателен для допуска
                   </label>}
@@ -3316,7 +3381,7 @@ function ChecklistEditor({
                 </button>
               </article>
             ))}
-            {!roleEntries.length && <p className="muted">Для этой должности чек-лист {templatePhase === "opening" ? "открытия" : "закрытия"} пока пуст.</p>}
+            {!roleEntries.length && <p className="muted">Для этой должности раздел «{CHECKLIST_PHASE_META[templatePhase].title}» пока пуст.</p>}
           </div>
         </div>
       ) : (
@@ -3773,6 +3838,7 @@ function EmployeeControl({
                 const progress = total ? Math.round((completed / total) * 100) : 100;
                 const nextPending = shift.checklist.find((item) => !item.completedAt);
                 const lastCompleted = [...shift.checklist].reverse().find((item) => item.completedAt);
+                const phaseGroups = groupChecklistByPhase(shift.checklist);
                 return (
                   <article className="employee-shift-control" key={shift.id}>
                     <div className="employee-shift-summary">
@@ -3804,45 +3870,61 @@ function EmployeeControl({
                       </div>
                     )}
                     <div className="employee-checklist-review">
-                      {shift.checklist.map((item, index) => {
-                        const draft = draftFor(shift, item);
-                        const key = draftKey(shift.id, item.itemId);
-                        const closingReviewRequired = item.phase === "closing" && (shift.roleKind === "waiter" || shift.roleId === "barista");
-                        const reviewAvailable = Boolean(item.completedAt) || closingReviewRequired;
-                        return (
-                          <article className={`employee-checklist-item ${item.completedAt ? "is-completed" : "is-pending"}`} key={item.itemId}>
-                            <div className="employee-checklist-item-heading">
-                              <span className="employee-checklist-index">{index + 1}</span>
-                              <div><strong>{item.title}</strong><small>{item.phase === "closing" ? "Закрытие · " : "Открытие · "}{item.completedAt ? `выполнено ${formatDate(item.completedAt)}` : "не выполнено"}{item.countsForRating === false ? " · оценка не влияет на общий рейтинг" : ""}</small></div>
-                              {item.completedAt ? <CheckCircle2 size={22} /> : <Clock size={22} />}
-                            </div>
-                            {item.description && <p>{item.description}</p>}
-                            {reviewAvailable && (
-                              <div className="employee-item-review-form">
-                                <div className="field star-review-field"><span>Оценка пункта</span><StarScore value={draft.score} onChange={(score) => {
-                                  if (!item.completedAt && item.phase === "closing" && score > 4) {
-                                    window.alert("Оценка свыше 4 не может быть назначена, так как пункт чек-листа закрытия выполнен не вовремя.");
-                                    return;
-                                  }
-                                  updateDraft(shift, item, { score });
-                                }} /></div>
-                                {!item.completedAt && item.phase === "closing" && <div className="task-notice">Пункт выполнен не вовремя: максимальная оценка — 4 звезды. Фото обязательно.</div>}
-                                <label className="field employee-review-comment"><span>Комментарий руководителя</span><textarea rows={3} maxLength={500} value={draft.comment} onChange={(event) => updateDraft(shift, item, { comment: event.target.value })} placeholder="Что выполнено хорошо и что нужно улучшить" /></label>
-                                <div className="employee-review-photo">
-                                  <span className="employee-review-photo-label">Фото к комментарию</span>
-                                  {(draft.photoFile || draft.photoUrl) && <ReviewImagePreview photoFile={draft.photoFile} photoUrl={draft.photoUrl} authHeaders={authHeaders} alt={`Фото проверки: ${item.title}`} />}
-                                  <div className="button-row">
-                                    <label className="ghost-button compact review-photo-upload"><ImageIcon size={17} /> {draft.photoFile || draft.photoUrl ? "Заменить фото" : "Добавить фото"}<input type="file" accept="image/png,image/jpeg,image/webp" capture="environment" onChange={(event) => selectPhoto(shift, item, event.target.files?.[0])} /></label>
-                                    {(draft.photoFile || draft.photoUrl) && <button className="ghost-button compact" type="button" onClick={() => updateDraft(shift, item, { photoFile: null, photoUrl: "" })}><X size={17} /> Убрать</button>}
+                      {phaseGroups.map((group) => (
+                        <details className="employee-checklist-phase" key={group.phase}>
+                          <summary>
+                            <span className="employee-checklist-phase-title">
+                              <span aria-hidden="true">{CHECKLIST_PHASE_META[group.phase].icon}</span>
+                              <span><strong>{CHECKLIST_PHASE_META[group.phase].title}</strong><small>{group.completed === group.entries.length ? "Все пункты выполнены" : `Осталось выполнить: ${group.entries.length - group.completed}`}</small></span>
+                            </span>
+                            <span className="employee-checklist-phase-metrics">
+                              <strong>{group.completed} / {group.entries.length}</strong>
+                              <small>{group.reviewed ? `оценено ${group.reviewed}${group.averageScore !== null ? ` · ${group.averageScore} ★` : ""}` : "ещё не оценено"}</small>
+                            </span>
+                          </summary>
+                          <div className="employee-checklist-phase-items">
+                            {group.entries.map(({ item, index }) => {
+                              const draft = draftFor(shift, item);
+                              const key = draftKey(shift.id, item.itemId);
+                              const closingReviewRequired = item.phase === "closing" && (shift.roleKind === "waiter" || shift.roleId === "barista");
+                              const reviewAvailable = Boolean(item.completedAt) || closingReviewRequired;
+                              return (
+                                <article className={`employee-checklist-item ${item.completedAt ? "is-completed" : "is-pending"}`} key={item.itemId}>
+                                  <div className="employee-checklist-item-heading">
+                                    <span className="employee-checklist-index">{index + 1}</span>
+                                    <div><strong>{item.title}</strong><small>{CHECKLIST_PHASE_META[group.phase].shortTitle} · {item.completedAt ? `выполнено ${formatDate(item.completedAt)}` : "не выполнено"}{item.countsForRating === false ? " · оценка не влияет на общий рейтинг" : ""}</small></div>
+                                    {item.completedAt ? <CheckCircle2 size={22} /> : <Clock size={22} />}
                                   </div>
-                                </div>
-                                {item.reviewedAt && <small className="employee-review-meta">Последняя проверка: {formatDate(item.reviewedAt)}{item.reviewedByUsername ? ` · ${item.reviewedByUsername}` : ""}</small>}
-                                <button className="primary-button compact employee-review-save" disabled={savingItem === key} onClick={() => void saveItemReview(shift, item)}><Save size={18} /> {savingItem === key ? "Сохраняем" : "Сохранить оценку"}</button>
-                              </div>
-                            )}
-                          </article>
-                        );
-                      })}
+                                  {item.description && <p>{item.description}</p>}
+                                  {reviewAvailable && (
+                                    <div className="employee-item-review-form">
+                                      <div className="field star-review-field"><span>Оценка пункта</span><StarScore value={draft.score} onChange={(score) => {
+                                        if (!item.completedAt && item.phase === "closing" && score > 4) {
+                                          window.alert("Оценка свыше 4 не может быть назначена, так как пункт чек-листа закрытия выполнен не вовремя.");
+                                          return;
+                                        }
+                                        updateDraft(shift, item, { score });
+                                      }} /></div>
+                                      {!item.completedAt && item.phase === "closing" && <div className="task-notice">Пункт выполнен не вовремя: максимальная оценка — 4 звезды. Фото обязательно.</div>}
+                                      <label className="field employee-review-comment"><span>Комментарий руководителя</span><textarea rows={3} maxLength={500} value={draft.comment} onChange={(event) => updateDraft(shift, item, { comment: event.target.value })} placeholder="Что выполнено хорошо и что нужно улучшить" /></label>
+                                      <div className="employee-review-photo">
+                                        <span className="employee-review-photo-label">Фото к комментарию</span>
+                                        {(draft.photoFile || draft.photoUrl) && <ReviewImagePreview photoFile={draft.photoFile} photoUrl={draft.photoUrl} authHeaders={authHeaders} alt={`Фото проверки: ${item.title}`} />}
+                                        <div className="button-row">
+                                          <label className="ghost-button compact review-photo-upload"><ImageIcon size={17} /> {draft.photoFile || draft.photoUrl ? "Заменить фото" : "Добавить фото"}<input type="file" accept="image/png,image/jpeg,image/webp" capture="environment" onChange={(event) => selectPhoto(shift, item, event.target.files?.[0])} /></label>
+                                          {(draft.photoFile || draft.photoUrl) && <button className="ghost-button compact" type="button" onClick={() => updateDraft(shift, item, { photoFile: null, photoUrl: "" })}><X size={17} /> Убрать</button>}
+                                        </div>
+                                      </div>
+                                      {item.reviewedAt && <small className="employee-review-meta">Последняя проверка: {formatDate(item.reviewedAt)}{item.reviewedByUsername ? ` · ${item.reviewedByUsername}` : ""}</small>}
+                                      <button className="primary-button compact employee-review-save" disabled={savingItem === key} onClick={() => void saveItemReview(shift, item)}><Save size={18} /> {savingItem === key ? "Сохраняем" : "Сохранить оценку"}</button>
+                                    </div>
+                                  )}
+                                </article>
+                              );
+                            })}
+                          </div>
+                        </details>
+                      ))}
                     </div>
                   </article>
                 );
@@ -4167,19 +4249,29 @@ function ShiftsAndRatings({
                 <span className="shift-score">{shift.checklist.some((item) => item.countsForRating !== false) ? `${shift.score} / 5 ★` : "Без оценки"}</span>
               </summary>
               <div className="shift-review-items">
-                {shift.checklist.map((item) => {
-                  const draft = draftFor(shift, item.itemId);
-                  return (
-                    <div className="shift-review-row" key={item.itemId}>
-                      <div className="shift-review-task">
-                        {item.completedAt ? <CheckCircle2 size={20} /> : <AlertTriangle size={20} />}
-                        <span><strong>{item.title}</strong><small>{item.completedAt ? `Выполнено ${formatDate(item.completedAt)}` : "Не выполнено · 0 звезд"}{item.countsForRating === false ? " · не влияет на рейтинг" : ""}</small></span>
-                      </div>
-                      <div className="field star-review-field"><span>Оценка</span>{item.countsForRating === false ? <span className="rating-excluded-badge">Не учитывается</span> : <StarScore value={draft.score} disabled={!item.completedAt} onChange={(score) => updateDraft(shift, item.itemId, { score })} />}</div>
-                      <Field label="Комментарий" value={draft.comment} onChange={(value) => updateDraft(shift, item.itemId, { comment: value })} placeholder="Что улучшить или почему снижена оценка" />
+                {groupChecklistByPhase(shift.checklist).map((group) => (
+                  <details className="shift-review-phase" key={group.phase}>
+                    <summary>
+                      <span><strong>{CHECKLIST_PHASE_META[group.phase].icon} {CHECKLIST_PHASE_META[group.phase].title}</strong><small>{group.completed} из {group.entries.length} выполнено · {group.reviewed} оценено</small></span>
+                      <span className="shift-phase-score">{group.averageScore === null ? "—" : `${group.averageScore} ★`}</span>
+                    </summary>
+                    <div className="shift-review-phase-items">
+                      {group.entries.map(({ item }) => {
+                        const draft = draftFor(shift, item.itemId);
+                        return (
+                          <div className="shift-review-row" key={item.itemId}>
+                            <div className="shift-review-task">
+                              {item.completedAt ? <CheckCircle2 size={20} /> : <AlertTriangle size={20} />}
+                              <span><strong>{item.title}</strong><small>{item.completedAt ? `Выполнено ${formatDate(item.completedAt)}` : "Не выполнено · 0 звезд"}{item.countsForRating === false ? " · не влияет на рейтинг" : ""}</small></span>
+                            </div>
+                            <div className="field star-review-field"><span>Оценка</span>{item.countsForRating === false ? <span className="rating-excluded-badge">Не учитывается</span> : <StarScore value={draft.score} disabled={!item.completedAt} onChange={(score) => updateDraft(shift, item.itemId, { score })} />}</div>
+                            <Field label="Комментарий" value={draft.comment} onChange={(value) => updateDraft(shift, item.itemId, { comment: value })} placeholder="Что улучшить или почему снижена оценка" />
+                          </div>
+                        );
+                      })}
                     </div>
-                  );
-                })}
+                  </details>
+                ))}
                 <div className="shift-review-actions">
                   <button className="primary-button compact" disabled={savingShift === shift.id} onClick={() => void saveReview(shift)}>
                     <Save size={18} /> {savingShift === shift.id ? "Сохраняем" : "Сохранить оценку"}

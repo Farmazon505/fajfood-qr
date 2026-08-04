@@ -16,6 +16,7 @@ import type {
   WaiterShift
 } from "./types";
 import { shiftChecklistText, shiftStartedText, shiftTaskText } from "./shift-messages";
+import { CHECKLIST_PHASE_META, formatChecklistWindow } from "../shared/checklists";
 
 type MaxUser = {
   user_id: number;
@@ -635,12 +636,19 @@ export class MaxService {
   private checklistBody(shift: WaiterShift, prefix = ""): MaxMessageBody {
     const buttons = shift.checklist
       .map((item, index) => ({ item, index }))
-      .filter(({ item }) => !item.completedAt)
+      .filter(({ item }) => !item.completedAt && (
+        item.itemId.startsWith("task-")
+        || this.store.checklistPhaseWindowStatus(shift, item.phase) === "available"
+      ))
       .map(({ index }) => [
         this.callbackButton(`Сделано: пункт ${index + 1}`, `check:${shift.id}:${index}`, "positive")
       ]);
     return {
-      text: [prefix, shiftChecklistText(shift)].filter(Boolean).join("\n\n"),
+      text: [prefix, shiftChecklistText(
+        shift,
+        this.store.snapshot().checklistWindows,
+        config.VENUE_TIME_ZONE
+      )].filter(Boolean).join("\n\n"),
       attachments: this.keyboard(buttons)
     };
   }
@@ -666,6 +674,16 @@ export class MaxService {
     }
     if (result.status === "cooldown") {
       await this.answerCallback(callbackId, `Следующий пункт можно отметить через ${result.retryAfterSeconds} сек.`);
+      return;
+    }
+    if (result.status === "outside_window") {
+      const meta = CHECKLIST_PHASE_META[result.phase];
+      await this.answerCallback(
+        callbackId,
+        result.windowStatus === "not_started"
+          ? `${meta.shortTitle}: заполнение доступно с ${result.window.start} до ${result.window.end}`
+          : `${meta.shortTitle}: время заполнения ${formatChecklistWindow(result.window)} уже истекло`
+      );
       return;
     }
 

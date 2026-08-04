@@ -15,6 +15,7 @@ import { config, publicBaseUrl } from "./config";
 import type { CrmStaffReservation } from "./crm-reservations";
 import { generatePerformanceInsights } from "./performance-ai";
 import { shiftChecklistText, shiftStartedText, shiftTaskText } from "./shift-messages";
+import { CHECKLIST_PHASE_META, formatChecklistWindow } from "../shared/checklists";
 
 type TelegramResponse<T> = {
   ok: boolean;
@@ -615,7 +616,11 @@ export class TelegramService {
   private async sendChecklist(chatId: string | number, shift: WaiterShift, prefix = "") {
     await this.request("sendMessage", {
       chat_id: chatId,
-      text: [prefix, shiftChecklistText(shift)].filter(Boolean).join("\n\n"),
+      text: [prefix, shiftChecklistText(
+        shift,
+        this.store.snapshot().checklistWindows,
+        config.VENUE_TIME_ZONE
+      )].filter(Boolean).join("\n\n"),
       reply_markup: this.checklistKeyboard(shift)
     });
   }
@@ -623,7 +628,10 @@ export class TelegramService {
   private checklistKeyboard(shift: WaiterShift) {
     const buttons = shift.checklist
       .map((item, index) => ({ item, index }))
-      .filter(({ item }) => !item.completedAt)
+      .filter(({ item }) => !item.completedAt && (
+        item.itemId.startsWith("task-")
+        || this.store.checklistPhaseWindowStatus(shift, item.phase) === "available"
+      ))
       .map(({ item, index }) => [
         {
           text: `Сделано: пункт ${index + 1}`,
@@ -656,6 +664,17 @@ export class TelegramService {
       );
       return;
     }
+    if (result.status === "outside_window") {
+      const meta = CHECKLIST_PHASE_META[result.phase];
+      await this.answerCallback(
+        callbackId,
+        result.windowStatus === "not_started"
+          ? `${meta.shortTitle}: заполнение доступно с ${result.window.start} до ${result.window.end}`
+          : `${meta.shortTitle}: время заполнения ${formatChecklistWindow(result.window)} уже истекло`,
+        true
+      );
+      return;
+    }
 
     const shift = result.shift;
 
@@ -663,7 +682,11 @@ export class TelegramService {
     await this.request("editMessageText", {
       chat_id: message.chat.id,
       message_id: message.message_id,
-      text: shiftChecklistText(shift),
+      text: shiftChecklistText(
+        shift,
+        this.store.snapshot().checklistWindows,
+        config.VENUE_TIME_ZONE
+      ),
       reply_markup: this.checklistKeyboard(shift)
     });
 

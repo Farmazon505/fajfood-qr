@@ -11,13 +11,20 @@ import {
   WAITER_COMPLETE_TIMEOUT_MS,
   venueOperationalDateKey
 } from "./store";
-import type { WaiterShift } from "./types";
+import type { ChecklistWindows, WaiterShift } from "./types";
+
+const TEST_CHECKLIST_WINDOWS: ChecklistWindows = {
+  opening: { start: "00:00", end: "23:59" },
+  evening: { start: "18:00", end: "19:00" },
+  closing: { start: "00:00", end: "23:59" }
+};
 
 const withStore = async (run: (store: Store) => Promise<void>) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-store-"));
   try {
     const store = new Store(directory);
     await store.init();
+    await store.replaceChecklistConfiguration(store.snapshot().checklistItems, TEST_CHECKLIST_WINDOWS);
     await run(store);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -235,6 +242,81 @@ test("checklist items require one minute between distinct completions", async ()
 test("operational shift date changes at 02:00 venue time", () => {
   assert.equal(venueOperationalDateKey(new Date("2026-08-03T21:59:59.000Z")), "2026-08-03");
   assert.equal(venueOperationalDateKey(new Date("2026-08-03T22:00:00.000Z")), "2026-08-04");
+});
+
+test("shift receives the correct opening phase and checklist completion is limited by its time window", async () => {
+  await withStore(async (store) => {
+    const windows: ChecklistWindows = {
+      opening: { start: "10:00", end: "12:30" },
+      evening: { start: "18:00", end: "19:00" },
+      closing: { start: "22:00", end: "02:00" }
+    };
+    const templates = [
+      { id: "morning", phase: "opening" as const, title: "Утреннее открытие" },
+      { id: "evening", phase: "evening" as const, title: "Вечернее открытие" },
+      { id: "closing", phase: "closing" as const, title: "Закрытие" }
+    ].map((item, index) => ({
+      ...item,
+      roleId: "waiter",
+      description: "",
+      requiredForCalls: item.phase !== "closing",
+      countsForRating: true,
+      active: true,
+      sort: (index + 1) * 10
+    }));
+    await store.replaceChecklistConfiguration(templates, windows);
+
+    const [waiter] = store.snapshot().waiters;
+    const morningStartedAt = new Date("2026-08-04T06:00:00.000Z"); // 10:00 Astrakhan
+    const morning = await store.startWaiterShift(waiter.id, [store.listZones()[0]], morningStartedAt);
+    assert.ok(morning);
+    assert.deepEqual(morning.shift.checklist.map((item) => item.phase), ["opening", "closing"]);
+
+    const beforeOpening = await store.completeShiftChecklistItem(
+      morning.shift.id,
+      waiter.id,
+      0,
+      new Date("2026-08-04T05:59:00.000Z")
+    );
+    assert.equal(beforeOpening.status, "outside_window");
+    if (beforeOpening.status === "outside_window") assert.equal(beforeOpening.windowStatus, "not_started");
+
+    const opening = await store.completeShiftChecklistItem(
+      morning.shift.id,
+      waiter.id,
+      0,
+      morningStartedAt
+    );
+    assert.equal(opening.status, "completed");
+    if (opening.status === "completed") assert.equal(opening.shift.status, "active");
+
+    const beforeClosing = await store.completeShiftChecklistItem(
+      morning.shift.id,
+      waiter.id,
+      1,
+      new Date("2026-08-04T17:59:00.000Z")
+    );
+    assert.equal(beforeClosing.status, "outside_window");
+    if (beforeClosing.status === "outside_window") assert.equal(beforeClosing.windowStatus, "not_started");
+
+    const closing = await store.completeShiftChecklistItem(
+      morning.shift.id,
+      waiter.id,
+      1,
+      new Date("2026-08-04T18:00:00.000Z")
+    );
+    assert.equal(closing.status, "completed");
+
+    const eveningWaiter = { ...waiter, id: "evening-waiter", name: "Вечерний официант" };
+    await store.replaceWaiters([...store.snapshot().waiters, eveningWaiter]);
+    const evening = await store.startWaiterShift(
+      eveningWaiter.id,
+      [store.listZones()[0]],
+      new Date("2026-08-04T14:30:00.000Z") // 18:30 Astrakhan
+    );
+    assert.ok(evening);
+    assert.deepEqual(evening.shift.checklist.map((item) => item.phase), ["evening", "closing"]);
+  });
 });
 
 test("closing checklist blocks manual shift end and keeps its own one-minute interval", async () => {

@@ -26,7 +26,7 @@ import { MaxService } from "./max";
 import { MessagingService } from "./messaging";
 import { OwnerWebPushService } from "./web-push";
 import { generatePerformanceInsights, isPerformanceAiConfigured } from "./performance-ai";
-import type { CallStatus } from "./types";
+import type { CallStatus, ChecklistItem } from "./types";
 import { crmLoyalty } from "./crm-loyalty";
 import {
   CrmReservationsClient,
@@ -1142,17 +1142,28 @@ app.put("/api/admin/actions", async (request, response) => {
 });
 
 app.put("/api/admin/checklist", async (request, response) => {
-  const submitted = Array.isArray(request.body) ? request.body : [];
+  const submitted = Array.isArray(request.body)
+    ? request.body
+    : Array.isArray(request.body?.items) ? request.body.items : [];
+  const windows = Array.isArray(request.body)
+    ? store.snapshot().checklistWindows
+    : request.body?.windows ?? store.snapshot().checklistWindows;
   const auth = getAdminAuth(request);
-  if (auth?.role === "owner") {
-    response.json(await store.replaceChecklistItems(submitted));
-    return;
+  try {
+    if (auth?.role === "owner") {
+      response.json(await store.replaceChecklistConfiguration(submitted, windows));
+      return;
+    }
+    const ownerItems = store.snapshot().checklistItems.filter(
+      (item) => store.findRole(item.roleId)?.kind === "owner"
+    );
+    const allowed = (submitted as ChecklistItem[]).filter(
+      (item) => store.findRole(String(item.roleId || ""))?.kind !== "owner"
+    );
+    response.json(await store.replaceChecklistConfiguration([...ownerItems, ...allowed], windows));
+  } catch (error) {
+    response.status(400).json({ error: error instanceof Error ? error.message : "Не удалось сохранить настройки чек-листа" });
   }
-  const ownerItems = store.snapshot().checklistItems.filter(
-    (item) => store.findRole(item.roleId)?.kind === "owner"
-  );
-  const allowed = submitted.filter((item) => store.findRole(String(item.roleId || ""))?.kind !== "owner");
-  response.json(await store.replaceChecklistItems([...ownerItems, ...allowed]));
 });
 
 app.put("/api/admin/staff-roles", requireOwner, async (request, response) => {

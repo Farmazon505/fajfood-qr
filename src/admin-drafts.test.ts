@@ -16,6 +16,7 @@ const freshState = (): EditableState => ({
   waiters: ["server-waiter"],
   staffRoles: ["server-role"],
   checklistItems: ["server-checklist"],
+  checklistWindows: { opening: "10:00-12:30" },
   actions: ["server-action"],
   offers: ["server-offer"],
   calls: ["fresh-call"]
@@ -30,6 +31,7 @@ test("admin polling preserves every dirty editor and still refreshes live data",
     waiters: ["draft-waiter"],
     staffRoles: ["new-role"],
     checklistItems: ["draft-checklist"],
+    checklistWindows: { opening: "09:30-12:00" },
     actions: ["draft-action"],
     offers: ["draft-offer"],
     calls: ["old-call"]
@@ -40,6 +42,7 @@ test("admin polling preserves every dirty editor and still refreshes live data",
     "waiters",
     "staffRoles",
     "checklistItems",
+    "checklistWindows",
     "actions",
     "offers"
   ]);

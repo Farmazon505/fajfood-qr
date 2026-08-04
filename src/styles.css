@@ -1881,9 +1881,46 @@ fieldset.field {
 
 .checklist-phase-tabs {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 16px;
+}
+
+.checklist-window-editor {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) 130px 130px auto;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 16px;
+  border: 1px solid #ded6c8;
+  border-radius: 10px;
+  padding: 14px;
+  background: #fbf7ef;
+}
+
+.checklist-window-editor > div strong,
+.checklist-window-editor > div span {
+  display: block;
+}
+
+.checklist-window-editor > div span {
+  margin-top: 5px;
+  color: #687168;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.checklist-window-value {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  padding: 0 14px;
+  color: #fffdfa;
+  background: var(--brand-primary);
+  font-weight: 900;
+  white-space: nowrap;
 }
 
 .checklist-phase-tabs button {
@@ -2231,6 +2268,68 @@ button:disabled {
   gap: 10px;
   border-top: 1px solid #e6dfd3;
   padding: 14px;
+}
+
+.shift-review-phase,
+.employee-checklist-phase {
+  overflow: hidden;
+  border: 1px solid #ded6c8;
+  border-radius: 10px;
+  background: #fffdfa;
+}
+
+.shift-review-phase > summary,
+.employee-checklist-phase > summary {
+  min-height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 14px;
+  cursor: pointer;
+}
+
+.shift-review-phase > summary:hover,
+.employee-checklist-phase > summary:hover {
+  background: #fbf7ef;
+}
+
+.shift-review-phase > summary span,
+.shift-review-phase > summary strong,
+.shift-review-phase > summary small,
+.employee-checklist-phase > summary span,
+.employee-checklist-phase > summary strong,
+.employee-checklist-phase > summary small {
+  min-width: 0;
+}
+
+.shift-review-phase > summary strong,
+.shift-review-phase > summary small,
+.employee-checklist-phase > summary strong,
+.employee-checklist-phase > summary small {
+  display: block;
+}
+
+.shift-review-phase > summary small,
+.employee-checklist-phase > summary small {
+  margin-top: 4px;
+  color: #687168;
+}
+
+.shift-review-phase-items,
+.employee-checklist-phase-items {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #e6dfd3;
+  padding: 14px;
+  background: #fff;
+}
+
+.shift-phase-score {
+  flex: 0 0 auto;
+  color: var(--brand-primary);
+  font-size: 17px;
+  font-weight: 900;
 }
 
 .shift-review-row {
@@ -3005,6 +3104,26 @@ button:disabled {
   border-top: 1px solid #e1dacd;
   padding: 16px;
   background: #fffdfa;
+}
+
+.employee-checklist-phase-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.employee-checklist-phase-title > span:first-child {
+  font-size: 25px;
+}
+
+.employee-checklist-phase-metrics {
+  flex: 0 0 auto;
+  text-align: right;
+}
+
+.employee-checklist-phase-metrics > strong {
+  color: var(--brand-primary);
+  font-size: 18px;
 }
 
 .employee-checklist-item {
@@ -4103,6 +4222,14 @@ button:disabled {
 }
 
 @media (max-width: 1180px) {
+  .checklist-window-editor {
+    grid-template-columns: minmax(220px, 1fr) 130px 130px;
+  }
+
+  .checklist-window-value {
+    grid-column: 1 / -1;
+  }
+
   .checklist-template-row,
   .shift-task-form,
   .shift-task-row {
@@ -4128,6 +4255,15 @@ button:disabled {
 }
 
 @media (max-width: 720px) {
+  .checklist-phase-tabs,
+  .checklist-window-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .checklist-window-value {
+    grid-column: auto;
+  }
+
   .section-toolbar {
     align-items: stretch;
     flex-direction: column;
@@ -4163,6 +4299,17 @@ button:disabled {
 
   .shift-journal-filter {
     width: 100%;
+  }
+
+  .shift-review-phase > summary,
+  .employee-checklist-phase > summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .employee-checklist-phase-metrics {
+    width: 100%;
+    text-align: left;
   }
 
   .shift-journal-filter .field {

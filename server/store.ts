@@ -10,6 +10,7 @@ import type {
   CallStatus,
   ChecklistItem,
   ChecklistPhase,
+  ChecklistWindows,
   DiningTable,
   GuestFeedback,
   LoyaltyLead,
@@ -27,6 +28,15 @@ import type {
   WaiterRating,
   WaiterShift
 } from "./types";
+import {
+  CHECKLIST_PHASES,
+  DEFAULT_CHECKLIST_WINDOWS,
+  checklistWindowStatus,
+  normalizeChecklistPhase,
+  normalizeChecklistWindows,
+  openingPhaseForShiftStart,
+  validateChecklistWindows
+} from "../shared/checklists";
 
 const now = () => new Date().toISOString();
 const OWNER_NOTIFICATION_RECIPIENT_ID = "owner-profile-notifications";
@@ -40,6 +50,13 @@ export type ChecklistCompletionResult =
   | { status: "completed"; shift: WaiterShift }
   | { status: "already_completed"; shift: WaiterShift }
   | { status: "cooldown"; shift: WaiterShift; retryAfterSeconds: number }
+  | {
+      status: "outside_window";
+      shift: WaiterShift;
+      phase: ChecklistPhase;
+      window: ChecklistWindows[ChecklistPhase];
+      windowStatus: "not_started" | "closed";
+    }
   | { status: "not_found"; shift: null };
 
 export type ShiftTaskCompletionResult =
@@ -110,7 +127,9 @@ const isAdminReviewComplete = (item: WaiterShift["checklist"][number]) =>
   item.adminScore !== null && Boolean(item.adminPhotoUrl.trim());
 
 const checklistOrder = <T extends { phase?: ChecklistPhase; sort: number }>(left: T, right: T) =>
-  (left.phase === "closing" ? 1 : 0) - (right.phase === "closing" ? 1 : 0) || left.sort - right.sort;
+  CHECKLIST_PHASES.indexOf(normalizeChecklistPhase(left.phase))
+    - CHECKLIST_PHASES.indexOf(normalizeChecklistPhase(right.phase))
+  || left.sort - right.sort;
 
 const normalizedPatternTitle = (value: string) => value.trim().toLocaleLowerCase("ru-RU").replace(/\s+/g, " ");
 
@@ -287,6 +306,7 @@ const createDefaultData = (): AppData => ({
   ],
   tables: defaultTables,
   checklistItems: defaultChecklistItems,
+  checklistWindows: DEFAULT_CHECKLIST_WINDOWS,
   shiftTasks: [],
   shifts: [],
   calls: [],
@@ -344,6 +364,7 @@ export class Store {
         ...stored,
         staffRoles: stored.staffRoles ?? defaultStaffRoles,
         checklistItems: stored.checklistItems ?? defaultChecklistItems,
+        checklistWindows: normalizeChecklistWindows(stored.checklistWindows),
         shiftTasks: stored.shiftTasks ?? [],
         shifts: stored.shifts ?? [],
         feedbacks: stored.feedbacks ?? [],
@@ -450,6 +471,16 @@ export class Store {
   currentShiftForWaiter(waiterId: string) {
     const shift = this.data.shifts.find((item) => item.waiterId === waiterId && item.status !== "ended");
     return shift ? structuredClone(shift) : null;
+  }
+
+  checklistPhaseWindowStatus(shift: Pick<WaiterShift, "morningGreetingDate">, phase: ChecklistPhase, at = new Date()) {
+    return checklistWindowStatus(
+      phase,
+      this.data.checklistWindows,
+      shift.morningGreetingDate,
+      at,
+      config.VENUE_TIME_ZONE
+    );
   }
 
   listZones() {
@@ -807,12 +838,13 @@ export class Store {
       roleMap.set(role.id, { ...role, ...(roleMap.get(role.id) ?? {}), kind: role.kind, system: true });
     }
     this.data.staffRoles = Array.from(roleMap.values());
+    this.data.checklistWindows = normalizeChecklistWindows(this.data.checklistWindows);
     this.data.checklistItems = (this.data.checklistItems ?? defaultChecklistItems)
       .map((item, index) => ({
         ...item,
         id: item.id || randomUUID(),
         roleId: this.findRole(item.roleId)?.id ?? "waiter",
-        phase: (item.phase === "closing" ? "closing" : "opening") as ChecklistPhase,
+        phase: normalizeChecklistPhase(item.phase),
         title: item.title?.trim() || `Пункт ${index + 1}`,
         description: item.description ?? "",
         requiredForCalls: item.requiredForCalls ?? true,
@@ -879,7 +911,7 @@ export class Store {
         checklist: (shift.checklist ?? []).map((item, index) => ({
           ...item,
           itemId: item.itemId || randomUUID(),
-          phase: item.phase === "closing" ? "closing" : "opening",
+          phase: normalizeChecklistPhase(item.phase),
           title: item.title || `Пункт ${index + 1}`,
           description: item.description ?? "",
           requiredForCalls: item.requiredForCalls ?? true,
@@ -1045,12 +1077,18 @@ export class Store {
   }
 
   async replaceChecklistItems(items: ChecklistItem[]) {
+    const result = await this.replaceChecklistConfiguration(items, this.data.checklistWindows);
+    return result.items;
+  }
+
+  async replaceChecklistConfiguration(items: ChecklistItem[], windows: ChecklistWindows) {
+    const normalizedWindows = validateChecklistWindows(windows);
     this.data.checklistItems = items
       .map((item, index) => ({
         ...item,
         id: item.id || randomUUID(),
         roleId: this.findRole(item.roleId)?.id ?? "waiter",
-        phase: (item.phase === "closing" ? "closing" : "opening") as ChecklistPhase,
+        phase: normalizeChecklistPhase(item.phase),
         title: item.title.trim() || `Пункт ${index + 1}`,
         description: item.description.trim(),
         requiredForCalls: Boolean(item.requiredForCalls),
@@ -1059,8 +1097,10 @@ export class Store {
         sort: Number.isFinite(item.sort) ? item.sort : (index + 1) * 10
       }))
       .sort(checklistOrder);
+    this.data.checklistWindows = normalizedWindows;
     await this.persist();
-    return this.snapshot().checklistItems;
+    const snapshot = this.snapshot();
+    return { items: snapshot.checklistItems, windows: snapshot.checklistWindows };
   }
 
   async replaceTables(tables: DiningTable[]) {
@@ -1119,7 +1159,7 @@ export class Store {
     return { status: "deleted", waiter: structuredClone(waiter) };
   }
 
-  async startWaiterShift(waiterId: string, requestedZones: string[]) {
+  async startWaiterShift(waiterId: string, requestedZones: string[], startedAt = new Date()) {
     const waiter = this.data.waiters.find((item) => item.id === waiterId && item.active);
     if (!waiter) return null;
     const role = this.roleForWaiter(waiter);
@@ -1132,16 +1172,29 @@ export class Store {
     const zones = uniqueIds(requestedZones).filter((zone) => availableZones.includes(zone));
     if (!zones.length) return null;
 
-    const dateKey = venueOperationalDateKey();
+    const dateKey = venueOperationalDateKey(startedAt);
     const firstShiftToday = !this.data.shifts.some(
       (shift) => shift.waiterId === waiterId && shift.morningGreetingDate === dateKey
     );
+    const preferredOpeningPhase = openingPhaseForShiftStart(
+      this.data.checklistWindows,
+      dateKey,
+      startedAt,
+      config.VENUE_TIME_ZONE
+    );
+    const openingPhase = preferredOpeningPhase === "evening"
+      && !this.data.checklistItems.some(
+        (item) => item.active && item.roleId === role.id && normalizeChecklistPhase(item.phase) === "evening"
+      )
+      ? "opening"
+      : preferredOpeningPhase;
     const templateItems = this.data.checklistItems
       .filter((item) => item.active && item.roleId === role.id)
+      .filter((item) => normalizeChecklistPhase(item.phase) === "closing" || normalizeChecklistPhase(item.phase) === openingPhase)
       .sort(checklistOrder)
       .map((item) => ({
         itemId: item.id,
-        phase: (item.phase === "closing" ? "closing" : "opening") as ChecklistPhase,
+        phase: normalizeChecklistPhase(item.phase),
         title: item.title,
         description: item.description,
         requiredForCalls: item.requiredForCalls,
@@ -1165,7 +1218,7 @@ export class Store {
       })
       .map((task, idx) => ({
         itemId: `task-${task.id}`,
-        phase: "opening" as ChecklistPhase,
+        phase: openingPhase as ChecklistPhase,
         title: task.title,
         description: task.description,
         requiredForCalls: task.requiredForCalls,
@@ -1181,9 +1234,9 @@ export class Store {
       }));
     const checklist = [...templateItems, ...todayTasks];
     const requiredComplete = checklist.every(
-      (item) => item.phase !== "opening" || !item.requiredForCalls
+      (item) => item.phase === "closing" || !item.requiredForCalls
     );
-    const timestamp = now();
+    const timestamp = startedAt.toISOString();
     const shift: WaiterShift = {
       id: randomUUID(),
       waiterId: waiter.id,
@@ -1241,6 +1294,25 @@ export class Store {
       return { status: "already_completed", shift: structuredClone(shift) };
     }
 
+    if (!item.itemId.startsWith("task-")) {
+      const windowStatus = checklistWindowStatus(
+        item.phase,
+        this.data.checklistWindows,
+        shift.morningGreetingDate,
+        completedAt,
+        config.VENUE_TIME_ZONE
+      );
+      if (windowStatus !== "available") {
+        return {
+          status: "outside_window",
+          shift: structuredClone(shift),
+          phase: item.phase,
+          window: structuredClone(this.data.checklistWindows[item.phase]),
+          windowStatus
+        };
+      }
+    }
+
     const completionTimestamp = completedAt.getTime();
     const latestCompletionTimestamp = shift.checklist.reduce((latest, entry) => {
       if (entry.phase !== item.phase) return latest;
@@ -1267,7 +1339,7 @@ export class Store {
       if (task && !task.completedAt) task.completedAt = timestamp;
     }
     const requiredComplete = shift.checklist.every(
-      (entry) => entry.phase !== "opening" || !entry.requiredForCalls || entry.completedAt
+      (entry) => entry.phase === "closing" || !entry.requiredForCalls || entry.completedAt
     );
     if (requiredComplete && shift.status === "checklist") {
       shift.status = "active";
@@ -2009,7 +2081,15 @@ export class Store {
       if (shift.checklist.some((item) => item.itemId === itemId)) continue;
       shift.checklist.push({
         itemId,
-        phase: "opening",
+        phase: (
+          shift.checklist.find((item) => item.phase !== "closing")?.phase
+          ?? openingPhaseForShiftStart(
+            this.data.checklistWindows,
+            shift.morningGreetingDate,
+            new Date(shift.startedAt),
+            config.VENUE_TIME_ZONE
+          )
+        ),
         title: task.title,
         description: task.description,
         requiredForCalls: task.requiredForCalls,
@@ -2079,7 +2159,7 @@ export class Store {
       item.completedAt = timestamp;
       if (shift.status !== "ended") {
         const requiredComplete = shift.checklist.every(
-          (entry) => !entry.requiredForCalls || entry.completedAt
+          (entry) => entry.phase === "closing" || !entry.requiredForCalls || entry.completedAt
         );
         if (requiredComplete && shift.status === "checklist") {
           shift.status = "active";

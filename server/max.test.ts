@@ -6,11 +6,21 @@ import test from "node:test";
 import { MaxService } from "./max";
 import { CHECKLIST_ITEM_COOLDOWN_MS, Store } from "./store";
 
+const allowChecklistAllDay = (store: Store) => store.replaceChecklistConfiguration(
+  store.snapshot().checklistItems,
+  {
+    opening: { start: "00:00", end: "23:59" },
+    evening: { start: "18:00", end: "19:00" },
+    closing: { start: "00:00", end: "23:59" }
+  }
+);
+
 test("MAX delivers a call and handles accept and done callbacks", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-max-"));
   try {
     const store = new Store(directory);
     await store.init();
+    await allowChecklistAllDay(store);
     const waiter = store.snapshot().waiters[0];
     await store.replaceWaiters([{
       ...waiter,
@@ -180,6 +190,7 @@ test("MAX manages a shift and shows the full checklist item text", async () => {
   try {
     const store = new Store(directory);
     await store.init();
+    await allowChecklistAllDay(store);
     const waiter = store.snapshot().waiters[0];
     await store.replaceWaiters([{
       ...waiter,

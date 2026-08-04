@@ -32,6 +32,11 @@ test("Telegram manages a shift and keeps one live message per table", async () =
   try {
     const store = new Store(directory);
     await store.init();
+    await store.replaceChecklistConfiguration(store.snapshot().checklistItems, {
+      opening: { start: "00:00", end: "23:59" },
+      evening: { start: "18:00", end: "19:00" },
+      closing: { start: "00:00", end: "23:59" }
+    });
     const waiter = store.snapshot().waiters[0];
     const admin = { id: "admin-1", name: "Администратор", roleId: "admin", telegramChatId: "20001", maxUserId: "", tipUrl: "", active: true };
     const owner = { id: "owner-1", name: "Владелец", roleId: "owner", telegramChatId: "30001", maxUserId: "", tipUrl: "", active: true };

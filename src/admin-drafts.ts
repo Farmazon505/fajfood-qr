@@ -4,6 +4,7 @@ export const ADMIN_EDITABLE_RESOURCES = [
   "waiters",
   "staffRoles",
   "checklistItems",
+  "checklistWindows",
   "actions",
   "offers"
 ] as const;
