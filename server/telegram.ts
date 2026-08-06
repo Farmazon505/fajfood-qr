@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import nodeFetch from "node-fetch";
 import {
   venueOperationalDateKey,
   type AdminEmployeeShiftEndResult,
@@ -19,6 +20,7 @@ import type {
   WaiterShift
 } from "./types";
 import { config, publicBaseUrl } from "./config";
+import { createAiProxyAgent } from "./ai-proxy";
 import type { CrmStaffReservation } from "./crm-reservations";
 import { generatePerformanceInsights } from "./performance-ai";
 import { shiftChecklistText, shiftStartedText, shiftTaskRolloverText, shiftTaskText } from "./shift-messages";
@@ -100,6 +102,8 @@ const menuKeyboard = {
 
 export class TelegramService {
   private token: string;
+  private fetcher: typeof nodeFetch;
+  private proxyAgent: ReturnType<typeof createAiProxyAgent>;
   private offset = 0;
   private polling = false;
   private lastPollingRetryAfterMs = 0;
@@ -111,10 +115,17 @@ export class TelegramService {
 
   constructor(
     private store: Store,
-    token = config.TELEGRAM_BOT_TOKEN,
+    token?: string,
     private repeatAlertLifetimeMs = REPEAT_ALERT_LIFETIME_MS
   ) {
-    this.token = token;
+    const useConfiguredTransport = token === undefined;
+    this.token = token ?? config.TELEGRAM_BOT_TOKEN;
+    this.fetcher = useConfiguredTransport
+      ? nodeFetch
+      : globalThis.fetch as unknown as typeof nodeFetch;
+    this.proxyAgent = useConfiguredTransport
+      ? createAiProxyAgent(config.AI_PROXY_URL)
+      : undefined;
   }
 
   enabled() {
@@ -1525,10 +1536,11 @@ export class TelegramService {
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
-        const response = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
+        const response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(payload),
+          ...(this.proxyAgent ? { agent: this.proxyAgent } : {}),
           signal: AbortSignal.timeout(method === "getUpdates" ? POLLING_REQUEST_TIMEOUT_MS : OUTBOUND_REQUEST_TIMEOUT_MS)
         });
         const json = (await response.json()) as TelegramResponse<T>;
