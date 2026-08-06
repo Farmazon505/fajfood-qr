@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createServer } from "node:http";
 import { MaxService } from "./max";
 import { CHECKLIST_ITEM_COOLDOWN_MS, Store } from "./store";
 
@@ -14,6 +15,40 @@ const allowChecklistAllDay = (store: Store) => store.replaceChecklistConfigurati
     closing: { start: "00:00", end: "23:59" }
   }
 );
+
+test("MAX retries a transient API failure before reporting delivery failure", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-max-retry-"));
+  let attempts = 0;
+  const api = createServer((_request, response) => {
+    attempts += 1;
+    response.setHeader("content-type", "application/json");
+    if (attempts === 1) {
+      response.statusCode = 502;
+      response.end(JSON.stringify({ message: "Bad Gateway" }));
+      return;
+    }
+    response.statusCode = 200;
+    response.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise<void>((resolve) => api.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const address = api.address();
+    assert.ok(address && typeof address !== "string");
+    const store = new Store(directory);
+    await store.init();
+    const max = new MaxService(store, "test-token", `http://127.0.0.1:${address.port}/`);
+    (max as unknown as { httpsAgent?: undefined }).httpsAgent = undefined;
+    const result = await (max as unknown as {
+      request<T>(method: string, endpoint: string): Promise<T | null>;
+    }).request<{ ok: boolean }>("GET", "me");
+    assert.equal(result?.ok, true);
+    assert.equal(attempts, 2);
+  } finally {
+    await new Promise<void>((resolve, reject) => api.close((error) => error ? reject(error) : resolve()));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("MAX delivers a call and handles accept and done callbacks", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-max-"));

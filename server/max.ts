@@ -80,6 +80,10 @@ type MaxApiRequest = {
   body?: unknown;
 };
 
+const MAX_REQUEST_TIMEOUT_MS = 8_000;
+const MAX_RETRY_DELAYS_MS = [250, 1_000];
+const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
 const formatTime = (value: string) =>
   new Intl.DateTimeFormat("ru-RU", {
     timeZone: config.VENUE_TIME_ZONE,
@@ -1065,6 +1069,15 @@ export class MaxService {
           query: { message_id: existing.messageId },
           body
         });
+        await this.store.recordNotificationDelivery({
+          callId: call.id,
+          channel: "max",
+          recipientId: userId,
+          recipientRole: recipient.recipientRole,
+          operation: "edit",
+          status: edited?.success ? "delivered" : "failed",
+          externalMessageId: edited?.success ? existing.messageId : ""
+        });
         if (edited?.success) {
           refs.push(existing);
           continue;
@@ -1072,6 +1085,15 @@ export class MaxService {
       }
 
       const sent = await this.sendMessage(userId, body);
+      await this.store.recordNotificationDelivery({
+        callId: call.id,
+        channel: "max",
+        recipientId: userId,
+        recipientRole: recipient.recipientRole,
+        operation: "send",
+        status: sent?.message.body.mid ? "delivered" : "failed",
+        externalMessageId: sent?.message.body.mid || ""
+      });
       if (sent?.message.body.mid) {
         refs.push({
           userId,
@@ -1153,35 +1175,44 @@ export class MaxService {
     for (const [key, value] of Object.entries(options.query || {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
-    let response;
-    try {
-      response = await fetch(url, {
-        method,
-        headers: {
-          Authorization: this.token,
-          ...(options.body === undefined ? {} : { "content-type": "application/json" })
-        },
-        body: options.body === undefined ? undefined : JSON.stringify(options.body),
-        agent: this.httpsAgent
-      });
-    } catch (error) {
-      console.error(`[max] ${method} /${endpoint}:`, error instanceof Error ? error.message : error);
-      return null;
+    let lastError = "unknown error";
+    for (let attempt = 0; attempt <= MAX_RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        const response = await fetch(url, {
+          method,
+          headers: {
+            Authorization: this.token,
+            ...(options.body === undefined ? {} : { "content-type": "application/json" })
+          },
+          body: options.body === undefined ? undefined : JSON.stringify(options.body),
+          agent: this.httpsAgent,
+          signal: AbortSignal.timeout(MAX_REQUEST_TIMEOUT_MS)
+        });
+        const raw = await response.text();
+        let result: unknown = null;
+        try {
+          result = raw ? JSON.parse(raw) : null;
+        } catch {
+          result = null;
+        }
+        if (response.ok) return result as T;
+
+        const message = result && typeof result === "object" && "message" in result
+          ? String((result as { message?: unknown }).message || response.statusText)
+          : response.statusText;
+        lastError = `${response.status} ${message}`.trim();
+        const retryable = response.status === 429 || response.status >= 500;
+        if (!retryable || attempt === MAX_RETRY_DELAYS_MS.length) break;
+        const retryAfterSeconds = Number(response.headers.get("retry-after") || 0);
+        const retryAfterMs = Number.isFinite(retryAfterSeconds) ? Math.max(0, retryAfterSeconds * 1_000) : 0;
+        await wait(Math.max(retryAfterMs, MAX_RETRY_DELAYS_MS[attempt] || MAX_RETRY_DELAYS_MS.at(-1)!));
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        if (attempt === MAX_RETRY_DELAYS_MS.length) break;
+        await wait(MAX_RETRY_DELAYS_MS[attempt] || MAX_RETRY_DELAYS_MS.at(-1)!);
+      }
     }
-    const raw = await response.text();
-    let result: unknown = null;
-    try {
-      result = raw ? JSON.parse(raw) : null;
-    } catch {
-      result = null;
-    }
-    if (!response.ok) {
-      const message = result && typeof result === "object" && "message" in result
-        ? String((result as { message?: unknown }).message || response.statusText)
-        : response.statusText;
-      console.error(`[max] ${method} /${endpoint}: ${response.status} ${message}`);
-      return null;
-    }
-    return result as T;
+    console.error(`[max] ${method} /${endpoint}: ${lastError}`);
+    return null;
   }
 }

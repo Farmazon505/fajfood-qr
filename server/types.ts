@@ -304,6 +304,18 @@ export type MaxMessageRef = {
   kind: "call" | "warning";
 };
 
+export type NotificationDelivery = {
+  id: string;
+  callId: string;
+  channel: "telegram" | "max";
+  recipientId: string;
+  recipientRole: "waiter" | "admin" | "owner";
+  operation: "send" | "edit";
+  status: "delivered" | "failed";
+  externalMessageId: string;
+  createdAt: string;
+};
+
 export type CallReasonCount = {
   actionId: string;
   label: string;
@@ -442,5 +454,6 @@ export type AppData = {
   feedbacks: GuestFeedback[];
   popups: PopupNotification[];
   deliveryPickupAlerts: DeliveryPickupAlert[];
+  notificationDeliveries: NotificationDelivery[];
   updatedAt: string;
 };

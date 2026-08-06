@@ -6,6 +6,40 @@ import test from "node:test";
 import { CHECKLIST_ITEM_COOLDOWN_MS, Store } from "./store";
 import { TelegramService } from "./telegram";
 
+test("Telegram retries a transient API failure before reporting delivery failure", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-telegram-retry-"));
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = (async (_input, init) => {
+    attempts += 1;
+    if (attempts === 1) {
+      return new Response(JSON.stringify({ ok: false, error_code: 502, description: "Bad Gateway" }), {
+        status: 502,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    const payload = JSON.parse(String(init?.body || "{}")) as { chat_id?: string };
+    return new Response(JSON.stringify({
+      ok: true,
+      result: { message_id: 77, chat: { id: payload.chat_id } }
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const telegram = new TelegramService(store, "test-token");
+    const result = await (telegram as unknown as {
+      request<T>(method: string, payload: unknown): Promise<T | null>;
+    }).request<{ message_id: number }>("sendMessage", { chat_id: "10101", text: "test" });
+    assert.equal(result?.message_id, 77);
+    assert.equal(attempts, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Telegram manages a shift and keeps one live message per table", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-telegram-"));
   const originalFetch = globalThis.fetch;

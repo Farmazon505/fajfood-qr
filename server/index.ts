@@ -1078,6 +1078,7 @@ app.post("/api/admin/upload", logoUploadParser, async (request, response) => {
 
 app.get("/api/admin/overview", (request, response) => {
   const data = store.snapshot();
+  const { notificationDeliveries: _notificationDeliveries, ...overviewData } = data;
   const auth = getAdminAuth(request);
   const isOwner = auth?.role === "owner";
   const visibleWaiters = isOwner
@@ -1096,7 +1097,7 @@ app.get("/api/admin/overview", (request, response) => {
     .filter((role) => isOwner || (role.kind !== "admin" && role.kind !== "owner"))
     .map((role) => role.id);
   response.json({
-    ...data,
+    ...overviewData,
     ownerNotifications: isOwner
       ? data.ownerNotifications
       : {
@@ -1350,7 +1351,7 @@ app.post("/api/admin/shift-tasks", async (request, response) => {
     date: parsed.data.date,
     title: parsed.data.title,
     description: parsed.data.description,
-    requiredForCalls: parsed.data.requiredForCalls,
+    requiredForCalls: role.kind === "waiter" && parsed.data.requiredForCalls,
     countsForRating: parsed.data.countsForRating
   });
   // Если задание на сегодня и для конкретного сотрудника — отправить уведомление немедленно

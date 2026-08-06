@@ -161,7 +161,7 @@ type TipTarget = {
   message?: string;
 };
 
-type AdminData = AppData & {
+type AdminData = Omit<AppData, "notificationDeliveries"> & {
   publicBaseUrl: string;
   telegramEnabled: boolean;
   telegramBotUrl: string;
@@ -3190,12 +3190,17 @@ function ChecklistEditor({
   const [taskCountsForRating, setTaskCountsForRating] = useState(true);
   const [taskBusy, setTaskBusy] = useState(false);
   const [taskNotice, setTaskNotice] = useState("");
+  const selectedRole = availableRoles.find((role) => role.id === roleId);
+  const isWaiterRole = selectedRole?.kind === "waiter";
 
   useEffect(() => {
     if (!availableRoles.some((role) => role.id === roleId)) setRoleId(preferredRoleId);
   }, [availableRoles, preferredRoleId, roleId]);
 
-  useEffect(() => setTaskWaiterId(""), [roleId]);
+  useEffect(() => {
+    setTaskWaiterId("");
+    if (availableRoles.find((role) => role.id === roleId)?.kind !== "waiter") setTaskRequired(false);
+  }, [roleId]);
 
   const roleEntries = items
     .map((item, globalIndex) => ({ item, globalIndex }))
@@ -3236,7 +3241,7 @@ function ChecklistEditor({
           date: taskDate,
           title: taskTitle.trim(),
           description: taskDescription.trim(),
-          requiredForCalls: taskRequired,
+          requiredForCalls: isWaiterRole && taskRequired,
           countsForRating: taskCountsForRating
         })
       });
@@ -3333,7 +3338,9 @@ function ChecklistEditor({
             <span className="checklist-window-value">{formatChecklistWindow(windows[templatePhase])}</span>
           </div>
           <div className="section-toolbar">
-            <p className="muted">{templatePhase === "closing"
+            <p className="muted">{!isWaiterRole
+              ? `Чек-лист контролирует работу должности «${selectedRole?.name || "Сотрудник"}», но не влияет на вызовы со столов. Уведомления гостей получают только официанты.`
+              : templatePhase === "closing"
               ? "Все пункты закрытия необходимо выполнить до ручного завершения смены. Автозакрытие выполняется в 02:00."
               : templatePhase === "evening"
                 ? "Этот чек-лист назначается сотруднику, который открывает вечернюю смену. Обязательные пункты блокируют рабочие уведомления до выполнения."
@@ -3371,7 +3378,7 @@ function ChecklistEditor({
                 <Field label="Задача" value={item.title} onChange={(value) => updateItem(globalIndex, { title: value })} textarea autoGrow />
                 <Field label="Пояснение" value={item.description} onChange={(value) => updateItem(globalIndex, { description: value })} textarea autoGrow />
                 <div className="checklist-template-options">
-                  {templatePhase !== "closing" && <label className="toggle-row">
+                  {isWaiterRole && templatePhase !== "closing" && <label className="toggle-row">
                     <input type="checkbox" checked={item.requiredForCalls} onChange={(event) => updateItem(globalIndex, { requiredForCalls: event.target.checked })} />
                     Обязателен для допуска
                   </label>}
@@ -3412,10 +3419,10 @@ function ChecklistEditor({
             </label>
             <Field label="Задание" value={taskTitle} onChange={setTaskTitle} placeholder="Например: проверить летнюю веранду" textarea autoGrow />
             <Field label="Пояснение" value={taskDescription} onChange={setTaskDescription} placeholder="Что именно нужно сделать" textarea autoGrow />
-            <label className="toggle-row shift-task-required">
+            {isWaiterRole && <label className="toggle-row shift-task-required">
               <input type="checkbox" checked={taskRequired} onChange={(event) => setTaskRequired(event.target.checked)} />
               Обязательно для допуска
-            </label>
+            </label>}
             <label className="toggle-row shift-task-required">
               <input type="checkbox" checked={taskCountsForRating} onChange={(event) => setTaskCountsForRating(event.target.checked)} />
               Учитывать в рейтинге

@@ -17,6 +17,7 @@ import type {
   GuestFeedback,
   LoyaltyLead,
   MaxMessageRef,
+  NotificationDelivery,
   Offer,
   OwnerNotificationSettings,
   PerformanceAnalytics,
@@ -324,6 +325,7 @@ const createDefaultData = (): AppData => ({
   feedbacks: [],
   popups: [],
   deliveryPickupAlerts: [],
+  notificationDeliveries: [],
   updatedAt: now()
 });
 
@@ -336,6 +338,7 @@ const normalizeSlug = (value: string) =>
     .replace(/^-|-$/g, "");
 
 const uniqueIds = (ids: string[]) => Array.from(new Set(ids.map((id) => id.trim()).filter(Boolean)));
+const roleCanBlockTableCalls = (role: StaffRoleDefinition | null | undefined) => role?.kind === "waiter";
 
 const tableWaiterIds = (table: Partial<DiningTable>) =>
   uniqueIds(Array.isArray(table.waiterIds) ? table.waiterIds : table.waiterId ? [table.waiterId] : []);
@@ -381,6 +384,7 @@ export class Store {
         feedbacks: stored.feedbacks ?? [],
         popups: stored.popups ?? [],
         deliveryPickupAlerts: stored.deliveryPickupAlerts ?? [],
+        notificationDeliveries: stored.notificationDeliveries ?? [],
         loyaltyLeads: stored.loyaltyLeads ?? [],
         ownerNotifications: migratedOwnerNotifications,
         settings: {
@@ -388,8 +392,11 @@ export class Store {
           ...(stored.settings ?? {})
         }
       };
+      const beforeNormalization = structuredClone(this.data);
       const removedOrphanedTaskItems = this.normalizeData();
-      if (removedOrphanedTaskItems > 0) await this.persist();
+      if (removedOrphanedTaskItems > 0 || !isDeepStrictEqual(beforeNormalization, this.data)) {
+        await this.persist();
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await this.persist();
@@ -780,6 +787,52 @@ export class Store {
     return this.data.deliveryPickupAlerts.find((alert) => alert.externalId === externalId) ?? null;
   }
 
+  async recordNotificationDelivery(
+    delivery: Omit<NotificationDelivery, "id" | "createdAt">,
+    createdAt = new Date()
+  ) {
+    const entry: NotificationDelivery = {
+      ...delivery,
+      id: randomUUID(),
+      createdAt: createdAt.toISOString()
+    };
+    this.data.notificationDeliveries.push(entry);
+    this.data.notificationDeliveries = this.data.notificationDeliveries.slice(-5000);
+    await this.persist();
+    return structuredClone(entry);
+  }
+
+  callsNeedingNotificationRetry(at: number, retryIntervalMs = 15_000) {
+    return this.data.calls
+      .filter((call) => call.status === "new" || call.status === "accepted")
+      .filter((call) => {
+        const role = call.routingStage;
+        const hasReference = call.telegramMessages.some(
+          (message) => message.kind === "call" && message.recipientRole === role
+        ) || call.maxMessages.some(
+          (message) => message.kind === "call" && message.recipientRole === role
+        );
+        if (hasReference) return false;
+
+        const attempts = this.data.notificationDeliveries.filter(
+          (delivery) => delivery.callId === call.id && delivery.recipientRole === role
+        );
+        if (attempts.some((delivery) => delivery.status === "delivered")) return false;
+        const latestAttemptAt = attempts.reduce(
+          (latest, delivery) => Math.max(latest, new Date(delivery.createdAt).getTime() || 0),
+          0
+        );
+        const stageStartedAt = role === "admin"
+          ? call.adminEscalationStartedAt
+          : role === "owner"
+            ? call.ownerEscalatedAt
+            : call.lastRequestedAt;
+        const referenceTime = Math.max(latestAttemptAt, new Date(stageStartedAt || call.createdAt).getTime() || 0);
+        return referenceTime > 0 && at - referenceTime >= retryIntervalMs;
+      })
+      .map((call) => structuredClone(call));
+  }
+
   async createDeliveryPickupAlert(input: Omit<
     DeliveryPickupAlert,
     | "id"
@@ -1018,7 +1071,7 @@ export class Store {
       if (!removedFromShift) continue;
       removed += removedFromShift;
       if (shift.status !== "ended") {
-        const requiredComplete = shift.checklist.every(
+        const requiredComplete = shift.roleKind !== "waiter" || shift.checklist.every(
           (item) => item.phase === "closing" || !item.requiredForCalls || item.completedAt
         );
         if (requiredComplete && shift.status === "checklist") {
@@ -1079,7 +1132,9 @@ export class Store {
             phase: normalizeChecklistPhase(item.phase),
             title: item.title,
             description: item.description,
-            requiredForCalls: item.requiredForCalls,
+            requiredForCalls: shift.roleKind === "waiter"
+              && normalizeChecklistPhase(item.phase) !== "closing"
+              && item.requiredForCalls,
             countsForRating: item.countsForRating,
             sort: item.sort,
             completedAt: existing?.completedAt ?? null,
@@ -1098,7 +1153,7 @@ export class Store {
       if (isDeepStrictEqual(nextChecklist, shift.checklist)) continue;
 
       shift.checklist = nextChecklist;
-      const requiredComplete = shift.checklist.every(
+      const requiredComplete = shift.roleKind !== "waiter" || shift.checklist.every(
         (item) => item.phase === "closing" || !item.requiredForCalls || Boolean(item.completedAt)
       );
       if (requiredComplete) {
@@ -1139,7 +1194,9 @@ export class Store {
         phase: normalizeChecklistPhase(item.phase),
         title: item.title?.trim() || `Пункт ${index + 1}`,
         description: item.description ?? "",
-        requiredForCalls: item.requiredForCalls ?? true,
+        requiredForCalls: (this.findRole(item.roleId) ?? this.findRole("waiter"))?.kind === "waiter"
+          && normalizeChecklistPhase(item.phase) !== "closing"
+          && (item.requiredForCalls ?? true),
         countsForRating: item.countsForRating ?? true,
         active: item.active ?? true,
         sort: Number.isFinite(item.sort) ? item.sort : (index + 1) * 10
@@ -1158,7 +1215,8 @@ export class Store {
         date,
         title: task.title?.trim() || "Задание",
         description: task.description ?? "",
-        requiredForCalls: task.requiredForCalls ?? false,
+        requiredForCalls: (this.findRole(task.roleId) ?? this.findRole("waiter"))?.kind === "waiter"
+          && Boolean(task.requiredForCalls),
         countsForRating: task.countsForRating ?? true,
         notified: task.notified ?? false,
         completedAt,
@@ -1198,6 +1256,23 @@ export class Store {
       }))
       .filter((alert) => alert.externalId && alert.deliveryOrderId)
       .slice(-500);
+    this.data.notificationDeliveries = (this.data.notificationDeliveries ?? [])
+      .map((delivery) => ({
+        ...delivery,
+        id: delivery.id || randomUUID(),
+        callId: String(delivery.callId || ""),
+        channel: delivery.channel === "max" ? "max" as const : "telegram" as const,
+        recipientId: String(delivery.recipientId || ""),
+        recipientRole: (["waiter", "admin", "owner"] as const).includes(delivery.recipientRole)
+          ? delivery.recipientRole
+          : "waiter" as const,
+        operation: delivery.operation === "edit" ? "edit" as const : "send" as const,
+        status: delivery.status === "delivered" ? "delivered" as const : "failed" as const,
+        externalMessageId: String(delivery.externalMessageId || ""),
+        createdAt: delivery.createdAt || now()
+      }))
+      .filter((delivery) => delivery.callId && delivery.recipientId)
+      .slice(-5000);
     this.normalizeShiftTaskLineage();
     this.data.waiters = this.data.waiters.map((waiter) => ({
       ...waiter,
@@ -1243,7 +1318,9 @@ export class Store {
           phase: normalizeChecklistPhase(item.phase),
           title: item.title || `Пункт ${index + 1}`,
           description: item.description ?? "",
-          requiredForCalls: item.requiredForCalls ?? true,
+          requiredForCalls: role?.kind === "waiter"
+            && normalizeChecklistPhase(item.phase) !== "closing"
+            && (item.requiredForCalls ?? true),
           countsForRating: item.countsForRating ?? true,
           sort: Number.isFinite(item.sort) ? item.sort : (index + 1) * 10,
           completedAt: item.completedAt ?? null,
@@ -1422,7 +1499,9 @@ export class Store {
         phase: normalizeChecklistPhase(item.phase),
         title: item.title.trim() || `Пункт ${index + 1}`,
         description: item.description.trim(),
-        requiredForCalls: Boolean(item.requiredForCalls),
+        requiredForCalls: (this.findRole(item.roleId) ?? this.findRole("waiter"))?.kind === "waiter"
+          && normalizeChecklistPhase(item.phase) !== "closing"
+          && Boolean(item.requiredForCalls),
         countsForRating: item.countsForRating ?? true,
         active: Boolean(item.active),
         sort: Number.isFinite(item.sort) ? item.sort : (index + 1) * 10
@@ -1529,7 +1608,9 @@ export class Store {
         phase: normalizeChecklistPhase(item.phase),
         title: item.title,
         description: item.description,
-        requiredForCalls: item.requiredForCalls,
+        requiredForCalls: role.kind === "waiter"
+          && normalizeChecklistPhase(item.phase) !== "closing"
+          && item.requiredForCalls,
         countsForRating: item.countsForRating,
         sort: item.sort,
         completedAt: null as string | null,
@@ -1553,7 +1634,7 @@ export class Store {
         phase: openingPhase as ChecklistPhase,
         title: task.title,
         description: task.description,
-        requiredForCalls: task.requiredForCalls,
+        requiredForCalls: role.kind === "waiter" && task.requiredForCalls,
         countsForRating: task.countsForRating,
         sort: 10000 + idx * 10,
         completedAt: null as string | null,
@@ -1566,7 +1647,7 @@ export class Store {
         reviewedByUsername: ""
       }));
     const checklist = [...templateItems, ...todayTasks];
-    const requiredComplete = checklist.every(
+    const requiredComplete = role.kind !== "waiter" || checklist.every(
       (item) => item.phase === "closing" || !item.requiredForCalls
     );
     const timestamp = startedAt.toISOString();
@@ -1675,7 +1756,7 @@ export class Store {
         this.markShiftTaskCompleted(task, completedAt);
       }
     }
-    const requiredComplete = shift.checklist.every(
+    const requiredComplete = shift.roleKind !== "waiter" || shift.checklist.every(
       (entry) => entry.phase === "closing" || !entry.requiredForCalls || entry.completedAt
     );
     if (requiredComplete && shift.status === "checklist") {
@@ -1894,7 +1975,8 @@ export class Store {
         }
         const startedAt = new Date(shift.startedAt).getTime();
         if (!Number.isFinite(startedAt) || at - startedAt < timeoutMs) return false;
-        return shift.checklist.some((item) => item.requiredForCalls && !item.completedAt);
+        return shift.roleKind === "waiter"
+          && shift.checklist.some((item) => item.requiredForCalls && !item.completedAt);
       })
       .map((shift) => structuredClone(shift));
   }
@@ -2536,7 +2618,7 @@ export class Store {
         ),
         title: task.title,
         description: task.description,
-        requiredForCalls: task.requiredForCalls,
+        requiredForCalls: shift.roleKind === "waiter" && task.requiredForCalls,
         countsForRating: task.countsForRating,
         sort: 10_000 + shift.checklist.filter((item) => item.itemId.startsWith("task-")).length * 10,
         completedAt: null,
@@ -2548,7 +2630,7 @@ export class Store {
         reviewedByRole: null,
         reviewedByUsername: ""
       });
-      if (task.requiredForCalls) {
+      if (shift.roleKind === "waiter" && task.requiredForCalls) {
         shift.status = "checklist";
         shift.readyAt = null;
       }
@@ -2570,6 +2652,7 @@ export class Store {
     const newTask: ShiftTask = {
       ...task,
       id,
+      requiredForCalls: roleCanBlockTableCalls(this.findRole(task.roleId)) && task.requiredForCalls,
       notified: false,
       completedAt: null,
       completedDate: null,
@@ -2610,7 +2693,7 @@ export class Store {
       if (!item) continue;
       if (!item.completedAt) item.completedAt = timestamp;
       if (shift.status !== "ended") {
-        const requiredComplete = shift.checklist.every(
+        const requiredComplete = shift.roleKind !== "waiter" || shift.checklist.every(
           (entry) => entry.phase === "closing" || !entry.requiredForCalls || entry.completedAt
         );
         if (requiredComplete && shift.status === "checklist") {

@@ -141,6 +141,116 @@ test("waiter receives table calls only after required checklist is complete", as
   });
 });
 
+test("barista and cleaning checklists never block waiter table notifications", async () => {
+  await withStore(async (store) => {
+    const baseWaiter = store.snapshot().waiters[0];
+    const waiter = { ...baseWaiter, telegramChatId: "10101" };
+    const barista = {
+      id: "barista-independent",
+      name: "Бариста",
+      roleId: "barista",
+      telegramChatId: "20202",
+      maxUserId: "",
+      tipUrl: "",
+      active: true
+    };
+    const cleaning = {
+      id: "cleaning-independent",
+      name: "Клининг",
+      roleId: "cleaning",
+      telegramChatId: "30303",
+      maxUserId: "",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([waiter, barista, cleaning]);
+    await store.replaceChecklistConfiguration([
+      ...store.snapshot().checklistItems,
+      {
+        id: "barista-required-legacy",
+        roleId: "barista",
+        phase: "opening",
+        title: "Подготовить бар",
+        description: "",
+        requiredForCalls: true,
+        countsForRating: true,
+        active: true,
+        sort: 10
+      },
+      {
+        id: "cleaning-required-legacy",
+        roleId: "cleaning",
+        phase: "opening",
+        title: "Убрать зал",
+        description: "",
+        requiredForCalls: true,
+        countsForRating: true,
+        active: true,
+        sort: 10
+      }
+    ], TEST_CHECKLIST_WINDOWS);
+
+    assert.equal(store.snapshot().checklistItems.find((item) => item.id === "barista-required-legacy")?.requiredForCalls, false);
+    assert.equal(store.snapshot().checklistItems.find((item) => item.id === "cleaning-required-legacy")?.requiredForCalls, false);
+
+    const zone = store.listZones()[0];
+    const waiterShift = await store.startWaiterShift(waiter.id, [zone]);
+    const baristaShift = await store.startWaiterShift(barista.id, [zone]);
+    const cleaningShift = await store.startWaiterShift(cleaning.id, [zone]);
+    assert.ok(waiterShift);
+    assert.ok(baristaShift);
+    assert.ok(cleaningShift);
+    assert.equal(waiterShift.shift.status, "checklist");
+    assert.equal(baristaShift.shift.status, "active");
+    assert.equal(cleaningShift.shift.status, "active");
+    assert.ok(baristaShift.shift.checklist.length > 0);
+    assert.ok(cleaningShift.shift.checklist.length > 0);
+
+    const table = store.snapshot().tables.find((item) => item.zone === zone);
+    assert.ok(table);
+    assert.deepEqual(table.waiterIds, [waiter.id]);
+    assert.equal(store.waitersForTable(table).length, 0);
+    await completeChecklistItems(store, waiterShift.shift, waiter.id);
+    assert.deepEqual(store.waitersForTable(table).map((member) => member.id), [waiter.id]);
+  });
+});
+
+test("notification delivery journal survives reload and throttles retries", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-delivery-journal-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const call = await store.upsertCall({
+      table: store.snapshot().tables[0],
+      action: store.snapshot().actions[0],
+      comment: "",
+      guestName: "",
+      assignedWaiterId: store.snapshot().waiters[0].id,
+      routingStage: "waiter",
+      routingReason: ""
+    });
+    const attemptedAt = new Date();
+    await store.recordNotificationDelivery({
+      callId: call.id,
+      channel: "telegram",
+      recipientId: "10101",
+      recipientRole: "waiter",
+      operation: "send",
+      status: "failed",
+      externalMessageId: ""
+    }, attemptedAt);
+    assert.equal(store.callsNeedingNotificationRetry(attemptedAt.getTime() + 14_999).length, 0);
+    assert.equal(store.callsNeedingNotificationRetry(attemptedAt.getTime() + 15_000).length, 1);
+
+    const reloaded = new Store(directory);
+    await reloaded.init();
+    assert.equal(reloaded.snapshot().notificationDeliveries.length, 1);
+    assert.equal(reloaded.snapshot().notificationDeliveries[0].status, "failed");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a supervisor can end only an unassigned waiter shift", async () => {
   await withStore(async (store) => {
     const waiter = store.snapshot().waiters[0];

@@ -304,6 +304,9 @@ export class MessagingService {
     this.escalationRunning = true;
     try {
       await this.processDailyMaintenance(at);
+      for (const call of this.store.callsNeedingNotificationRetry(at)) {
+        await this.syncCall(call);
+      }
       for (const dueCall of this.store.callsDueForAdminEscalation(at)) {
         const table = this.store.findTableById(dueCall.tableId);
         if (!table) continue;

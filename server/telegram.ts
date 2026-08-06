@@ -24,6 +24,8 @@ type TelegramResponse<T> = {
   ok: boolean;
   result?: T;
   description?: string;
+  error_code?: number;
+  parameters?: { retry_after?: number };
 };
 
 type TelegramMessage = {
@@ -71,6 +73,10 @@ const callReasonIcon = (label: string) => {
 };
 
 const REPEAT_ALERT_LIFETIME_MS = 8_000;
+const OUTBOUND_REQUEST_TIMEOUT_MS = 8_000;
+const POLLING_REQUEST_TIMEOUT_MS = 35_000;
+const RETRY_DELAYS_MS = [250, 1_000];
+const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 const menuKeyboard = {
   keyboard: [
@@ -86,6 +92,7 @@ export class TelegramService {
   private token: string;
   private offset = 0;
   private polling = false;
+  private lastPollingRetryAfterMs = 0;
   private escalationTimer: ReturnType<typeof setInterval> | null = null;
   private escalationRunning = false;
   private callQueues = new Map<string, Promise<TelegramMessageRef[]>>();
@@ -1134,6 +1141,15 @@ export class TelegramService {
           text,
           reply_markup: this.callKeyboard(call)
         });
+        await this.store.recordNotificationDelivery({
+          callId: call.id,
+          channel: "telegram",
+          recipientId: chatId,
+          recipientRole: recipient.recipientRole,
+          operation: "edit",
+          status: edited ? "delivered" : "failed",
+          externalMessageId: edited ? String(existing.messageId) : ""
+        });
         if (edited) {
           refs.push(existing);
           if (call.status === "new" && notificationEvent.status === "new") {
@@ -1148,6 +1164,15 @@ export class TelegramService {
         text,
         disable_notification: false,
         reply_markup: this.callKeyboard(call)
+      });
+      await this.store.recordNotificationDelivery({
+        callId: call.id,
+        channel: "telegram",
+        recipientId: chatId,
+        recipientRole: recipient.recipientRole,
+        operation: "send",
+        status: sent?.message_id ? "delivered" : "failed",
+        externalMessageId: sent?.message_id ? String(sent.message_id) : ""
       });
       if (sent?.message_id) {
         refs.push({
@@ -1334,6 +1359,7 @@ export class TelegramService {
   }
 
   private async pollLoop() {
+    let consecutiveFailures = 0;
     while (this.polling) {
       try {
         const updates = await this.request<TelegramUpdate[]>("getUpdates", {
@@ -1342,33 +1368,59 @@ export class TelegramService {
           allowed_updates: ["message", "callback_query"]
         });
 
-        for (const update of updates || []) {
+        if (!updates) {
+          consecutiveFailures += 1;
+          const backoff = Math.min(30_000, 1_000 * (2 ** Math.min(consecutiveFailures - 1, 5)));
+          await wait(Math.max(backoff, this.lastPollingRetryAfterMs));
+          continue;
+        }
+        consecutiveFailures = 0;
+        this.lastPollingRetryAfterMs = 0;
+
+        for (const update of updates) {
           this.offset = update.update_id + 1;
           await this.handleUpdate(update);
         }
       } catch (error) {
         console.error("[telegram polling]", error);
-        await new Promise((resolve) => setTimeout(resolve, 5000));
+        consecutiveFailures += 1;
+        await wait(Math.min(30_000, 1_000 * (2 ** Math.min(consecutiveFailures - 1, 5))));
       }
     }
   }
 
   private async request<T>(method: string, payload: unknown): Promise<T | null> {
     if (!this.enabled()) return null;
+    const maxAttempts = method === "getUpdates" ? 1 : RETRY_DELAYS_MS.length + 1;
+    let lastError = "unknown error";
 
-    const response = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload)
-    });
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        const response = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(method === "getUpdates" ? POLLING_REQUEST_TIMEOUT_MS : OUTBOUND_REQUEST_TIMEOUT_MS)
+        });
+        const json = (await response.json()) as TelegramResponse<T>;
+        if (json.ok) return json.result ?? null;
+        if (json.description?.includes("message is not modified")) return true as T;
 
-    const json = (await response.json()) as TelegramResponse<T>;
-    if (!json.ok) {
-      if (json.description?.includes("message is not modified")) return true as T;
-      console.error(`[telegram] ${method}:`, json.description);
-      return null;
+        const retryAfterMs = Math.max(0, Number(json.parameters?.retry_after || 0) * 1_000);
+        if (method === "getUpdates") this.lastPollingRetryAfterMs = retryAfterMs;
+        lastError = `${json.error_code || response.status} ${json.description || response.statusText}`.trim();
+        const retryable = json.error_code === 429 || response.status === 429
+          || Number(json.error_code || response.status) >= 500;
+        if (!retryable || attempt === maxAttempts - 1) break;
+        await wait(Math.max(retryAfterMs, RETRY_DELAYS_MS[attempt] || RETRY_DELAYS_MS.at(-1)!));
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        if (attempt === maxAttempts - 1) break;
+        await wait(RETRY_DELAYS_MS[attempt] || RETRY_DELAYS_MS.at(-1)!);
+      }
     }
 
-    return json.result ?? null;
+    console.error(`[telegram] ${method}: ${lastError}`);
+    return null;
   }
 }
