@@ -50,6 +50,101 @@ test("MAX retries a transient API failure before reporting delivery failure", as
   }
 });
 
+test("MAX lets an admin end immediately and manage an unclosed employee shift", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-max-admin-end-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const waiter = { ...store.snapshot().waiters[0], telegramChatId: "", maxUserId: "51001" };
+    const admin = {
+      id: "max-admin-end",
+      name: "Администратор",
+      roleId: "admin",
+      telegramChatId: "",
+      maxUserId: "52002",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([waiter, admin]);
+    const zone = store.listZones()[0];
+    const waiterShift = await store.startWaiterShift(waiter.id, [zone]);
+    const adminShift = await store.startWaiterShift(admin.id, [zone]);
+    assert.ok(waiterShift);
+    assert.ok(adminShift);
+
+    const requests: Array<{ method: string; endpoint: string; options: Record<string, any> }> = [];
+    const max = new MaxService(store, "test-token");
+    let messageCounter = 0;
+    (max as unknown as { request: (method: string, endpoint: string, options: Record<string, any>) => Promise<any> }).request =
+      async (method, endpoint, options = {}) => {
+        requests.push({ method, endpoint, options });
+        if (method === "POST" && endpoint === "messages") {
+          messageCounter += 1;
+          return {
+            message: {
+              recipient: { chat_id: null, chat_type: "dialog" },
+              body: { mid: `admin-shift-message-${messageCounter}`, text: "" }
+            }
+          };
+        }
+        return { success: true };
+      };
+
+    await max.handleUpdate({
+      update_type: "message_callback",
+      timestamp: Date.now(),
+      callback: {
+        callback_id: "max-admin-end",
+        payload: "shift:end",
+        user: { user_id: Number(admin.maxUserId) }
+      }
+    });
+    assert.equal(store.currentShiftForWaiter(admin.id), null);
+    assert.ok(store.currentShiftForWaiter(waiter.id));
+    const warning = requests.find((request) =>
+      request.endpoint === "messages"
+      && request.options.query?.user_id === admin.maxUserId
+      && String(request.options.body?.text).includes("Сотрудник не закрыл смену")
+    );
+    assert.ok(warning);
+    const warningBody = JSON.stringify(warning.options.body);
+    assert.match(warningBody, new RegExp(`shift:admin-close:${waiterShift.shift.id}`));
+    assert.match(warningBody, new RegExp(`shift:admin-remind:${waiterShift.shift.id}`));
+
+    await max.handleUpdate({
+      update_type: "message_callback",
+      timestamp: Date.now(),
+      callback: {
+        callback_id: "max-admin-remind",
+        payload: `shift:admin-remind:${waiterShift.shift.id}`,
+        user: { user_id: Number(admin.maxUserId) }
+      }
+    });
+    assert.ok(requests.some((request) =>
+      request.endpoint === "messages"
+      && request.options.query?.user_id === waiter.maxUserId
+      && String(request.options.body?.text).includes("Напоминание о завершении смены")
+    ));
+
+    await max.handleUpdate({
+      update_type: "message_callback",
+      timestamp: Date.now(),
+      callback: {
+        callback_id: "max-admin-close",
+        payload: `shift:admin-close:${waiterShift.shift.id}`,
+        user: { user_id: Number(admin.maxUserId) }
+      }
+    });
+    assert.equal(store.currentShiftForWaiter(waiter.id), null);
+    assert.ok(requests.some((request) =>
+      request.endpoint === "answers"
+      && String(request.options.body?.message?.text).includes("закрыта администратором")
+    ));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("MAX delivers a call and handles accept and done callbacks", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-max-"));
   try {

@@ -25,6 +25,8 @@ class FakeTransport {
   approvalTexts: string[] = [];
   pickupAlerts: DeliveryPickupAlert[] = [];
   shiftTaskRollovers: Array<{ task: ShiftTask; record: ShiftTaskRolloverRecord }> = [];
+  shiftClosureReminders: WaiterShift[] = [];
+  clearedEmployeeIds: string[] = [];
 
   enabled() {
     return true;
@@ -76,7 +78,61 @@ class FakeTransport {
     this.pickupAlerts.push(structuredClone(alert));
     return 1;
   }
+
+  async notifyEmployeeShiftClosureReminder(shift: WaiterShift) {
+    this.shiftClosureReminders.push(structuredClone(shift));
+    return 1;
+  }
+
+  async clearEmployeeCallNotifications(waiterId: string) {
+    this.clearedEmployeeIds.push(waiterId);
+  }
 }
+
+test("admin reminder and forced employee shift close are synchronized across both messengers", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-admin-shift-actions-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const waiter = { ...store.snapshot().waiters[0], telegramChatId: "61001", maxUserId: "61002" };
+    const admin = {
+      id: "admin-shift-actions",
+      name: "Администратор",
+      roleId: "admin",
+      telegramChatId: "62001",
+      maxUserId: "62002",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([waiter, admin]);
+    const zone = store.listZones()[0];
+    const waiterShift = await store.startWaiterShift(waiter.id, [zone]);
+    const adminShift = await store.startWaiterShift(admin.id, [zone]);
+    assert.ok(waiterShift);
+    assert.ok(adminShift);
+    assert.equal((await store.requestEndWaiterShift(admin.id)).status, "ended");
+
+    const telegram = new FakeTransport();
+    const max = new FakeTransport();
+    const messaging = new MessagingService(
+      store,
+      telegram as unknown as TelegramService,
+      max as unknown as MaxService
+    );
+    const reminder = await messaging.notifyEmployeeShiftClosureReminder(admin.id, waiterShift.shift.id);
+    assert.equal(reminder.delivered, 2);
+    assert.deepEqual(telegram.shiftClosureReminders.map((shift) => shift.id), [waiterShift.shift.id]);
+    assert.deepEqual(max.shiftClosureReminders.map((shift) => shift.id), [waiterShift.shift.id]);
+
+    const closed = await messaging.closeEmployeeShiftByAdmin(admin.id, waiterShift.shift.id);
+    assert.equal(closed.status, "ended");
+    assert.deepEqual(telegram.clearedEmployeeIds, [waiter.id]);
+    assert.deepEqual(max.clearedEmployeeIds, [waiter.id]);
+    assert.equal(store.currentShiftForWaiter(waiter.id), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("delivery correction code is sent only when an administrator is on shift", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-correction-approval-"));

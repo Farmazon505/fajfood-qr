@@ -89,6 +89,12 @@ export type ShiftEndResult =
   | { status: "employee_shifts_active"; shift: WaiterShift; activeCount: number }
   | { status: "admin_reviews_incomplete"; shift: WaiterShift; missingCount: number };
 
+export type AdminEmployeeShiftEndResult =
+  | { status: "ended"; shift: WaiterShift }
+  | { status: "not_found" }
+  | { status: "already_ended" }
+  | { status: "forbidden" };
+
 export type WaiterDeletionResult =
   | { status: "deleted"; waiter: Waiter }
   | { status: "not_found" }
@@ -1810,6 +1816,51 @@ export class Store {
     });
   }
 
+  unclosedEmployeeShiftsForAdmin(adminId: string) {
+    const adminShift = this.data.shifts.find(
+      (shift) => shift.waiterId === adminId && shift.roleKind === "admin" && shift.status !== "ended"
+    );
+    if (!adminShift) return [];
+    return this.data.shifts
+      .filter((shift) => {
+        if (shift.id === adminShift.id || shift.status === "ended") return false;
+        if (shift.morningGreetingDate !== adminShift.morningGreetingDate) return false;
+        if (shift.roleKind === "admin" || shift.roleKind === "owner") return false;
+        return shift.zones.some((zone) => adminShift.zones.includes(zone));
+      })
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+      .map((shift) => structuredClone(shift));
+  }
+
+  employeeShiftForAdminAction(adminId: string, shiftId: string) {
+    const target = this.data.shifts.find((shift) => shift.id === shiftId);
+    if (!target || target.status === "ended" || target.roleKind === "admin" || target.roleKind === "owner") return null;
+    const administrator = this.data.waiters.find((member) => member.id === adminId && member.active);
+    if (!administrator || this.roleForWaiter(administrator)?.kind !== "admin") return null;
+    const matchingAdminShift = this.data.shifts.find(
+      (shift) => shift.waiterId === adminId
+        && shift.roleKind === "admin"
+        && shift.morningGreetingDate === target.morningGreetingDate
+        && shift.zones.some((zone) => target.zones.includes(zone))
+    );
+    return matchingAdminShift ? structuredClone(target) : null;
+  }
+
+  async endEmployeeShiftByAdmin(adminId: string, shiftId: string): Promise<AdminEmployeeShiftEndResult> {
+    const target = this.data.shifts.find((shift) => shift.id === shiftId);
+    if (!target) return { status: "not_found" };
+    if (target.status === "ended") return { status: "already_ended" };
+    if (!this.employeeShiftForAdminAction(adminId, shiftId)) return { status: "forbidden" };
+
+    this.finalizeShift(target, new Date(), false);
+    this.data.tables = this.data.tables.map((table) => {
+      const waiterIds = tableWaiterIds(table).filter((id) => id !== target.waiterId);
+      return { ...table, waiterIds, waiterId: waiterIds[0] ?? null };
+    });
+    await this.persist();
+    return { status: "ended", shift: structuredClone(target) };
+  }
+
   adminsForClosingShift(employeeShift: WaiterShift) {
     const memberIds = new Set(
       this.data.shifts
@@ -1856,7 +1907,7 @@ export class Store {
     if (!shift) return { status: "not_found" };
 
     const automatic = Boolean(options.automatic);
-    if (!automatic) {
+    if (!automatic && shift.roleKind !== "admin") {
       const pendingClosing = closingItems(shift).filter((item) => !item.completedAt);
       if (pendingClosing.length) {
         return {
@@ -1864,27 +1915,6 @@ export class Store {
           shift: structuredClone(shift),
           pendingCount: pendingClosing.length
         };
-      }
-      if (shift.roleKind === "admin") {
-        const targets = this.closingReviewTargetsForAdmin(shift);
-        const activeTargets = targets.filter((target) => target.status !== "ended");
-        if (activeTargets.length) {
-          return {
-            status: "employee_shifts_active",
-            shift: structuredClone(shift),
-            activeCount: activeTargets.length
-          };
-        }
-        const missingReviews = targets
-          .flatMap((target) => closingItems(target))
-          .filter((item) => !isAdminReviewComplete(item));
-        if (missingReviews.length) {
-          return {
-            status: "admin_reviews_incomplete",
-            shift: structuredClone(shift),
-            missingCount: missingReviews.length
-          };
-        }
       }
     }
 

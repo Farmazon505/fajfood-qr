@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { venueOperationalDateKey, type ShiftEndResult, type Store } from "./store";
+import {
+  venueOperationalDateKey,
+  type AdminEmployeeShiftEndResult,
+  type ShiftEndResult,
+  type Store
+} from "./store";
 import type {
   DeliveryPickupAlert,
   DiningTable,
@@ -52,6 +57,11 @@ type TelegramCallCoordinator = {
   notifyAdminShiftSummary?(shift: WaiterShift): Promise<void>;
   processEndedShiftTasks?(shift: WaiterShift): Promise<ShiftTask[]>;
   acknowledgeDeliveryPickupAlert?(alertId: string, waiterId: string): Promise<any>;
+  closeEmployeeShiftByAdmin?(adminId: string, shiftId: string): Promise<AdminEmployeeShiftEndResult>;
+  notifyEmployeeShiftClosureReminder?(
+    adminId: string,
+    shiftId: string
+  ): Promise<{ shift: WaiterShift | null; delivered: number }>;
 };
 
 const formatTime = (value: string) =>
@@ -381,6 +391,31 @@ export class TelegramService {
     return delivered;
   }
 
+  async notifyEmployeeShiftClosureReminder(shift: WaiterShift) {
+    if (!this.enabled() || shift.status === "ended") return 0;
+    const employee = this.store.findWaiterById(shift.waiterId);
+    const chatId = employee?.telegramChatId.trim();
+    if (!chatId) return 0;
+    const sent = await this.request<TelegramMessage>("sendMessage", {
+      chat_id: chatId,
+      text: [
+        "⚠️ Напоминание о завершении смены",
+        `${shift.waiterName}, администратор просит завершить вашу смену.`,
+        `Должность: ${shift.roleName}`,
+        `Дата смены: ${shift.morningGreetingDate}`,
+        "Проверьте чек-лист закрытия и нажмите «Закончить смену»."
+      ].join("\n"),
+      disable_notification: false,
+      reply_markup: { inline_keyboard: [[{ text: "Закончить смену", callback_data: "shift:end" }]] }
+    });
+    return sent?.message_id ? 1 : 0;
+  }
+
+  async clearEmployeeCallNotifications(waiterId: string) {
+    const employee = this.store.findWaiterById(waiterId);
+    if (employee?.telegramChatId.trim()) await this.clearWaiterCallMessages(employee);
+  }
+
   async notifyAdminShiftSummary(shift: WaiterShift) {
     if (!this.enabled() || shift.roleKind !== "admin") return 0;
     const admin = this.store.findWaiterById(shift.waiterId);
@@ -426,6 +461,11 @@ export class TelegramService {
     if (query.data === "shift:end") {
       await this.answerCallback(query.id);
       await this.finishShift(query.message.chat.id);
+      return;
+    }
+
+    if (query.data.startsWith("shift:admin-close:") || query.data.startsWith("shift:admin-remind:")) {
+      await this.handleAdminEmployeeShiftAction(query.id, query.message, query.data);
       return;
     }
 
@@ -868,9 +908,97 @@ export class TelegramService {
     await this.sendChecklist(chatId, shift);
   }
 
+  private unclosedShiftWarningText(shift: WaiterShift, reminderSent = false) {
+    return [
+      "⚠️ Сотрудник не закрыл смену",
+      `Сотрудник: ${shift.waiterName}`,
+      `Должность: ${shift.roleName}`,
+      `Дата смены: ${shift.morningGreetingDate}`,
+      `Начало: ${formatTime(shift.startedAt)}`,
+      reminderSent ? "✅ Напоминание сотруднику отправлено." : "Выберите действие."
+    ].join("\n");
+  }
+
+  private unclosedShiftKeyboard(shiftId: string) {
+    return {
+      inline_keyboard: [
+        [{ text: "Закрыть смену", callback_data: `shift:admin-close:${shiftId}` }],
+        [{ text: "Уведомить сотрудника", callback_data: `shift:admin-remind:${shiftId}` }]
+      ]
+    };
+  }
+
+  private async sendUnclosedShiftWarnings(chatId: string | number, shifts: WaiterShift[]) {
+    for (const shift of shifts) {
+      await this.request("sendMessage", {
+        chat_id: chatId,
+        text: this.unclosedShiftWarningText(shift),
+        disable_notification: false,
+        reply_markup: this.unclosedShiftKeyboard(shift.id)
+      });
+    }
+  }
+
+  private async handleAdminEmployeeShiftAction(
+    callbackId: string,
+    message: TelegramMessage,
+    data: string
+  ) {
+    const administrator = await this.requireWaiter(message.chat.id, callbackId);
+    if (!administrator) return;
+    if (this.store.findRole(administrator.roleId)?.kind !== "admin") {
+      await this.answerCallback(callbackId, "Действие доступно только администратору", true);
+      return;
+    }
+    const closeAction = data.startsWith("shift:admin-close:");
+    const prefix = closeAction ? "shift:admin-close:" : "shift:admin-remind:";
+    const shiftId = data.slice(prefix.length);
+    const target = this.store.employeeShiftForAdminAction(administrator.id, shiftId);
+    if (!target) {
+      await this.answerCallback(callbackId, "Смена уже закрыта или недоступна", true);
+      return;
+    }
+
+    if (closeAction) {
+      const result = this.coordinator?.closeEmployeeShiftByAdmin
+        ? await this.coordinator.closeEmployeeShiftByAdmin(administrator.id, shiftId)
+        : await this.store.endEmployeeShiftByAdmin(administrator.id, shiftId);
+      if (result.status !== "ended") {
+        await this.answerCallback(callbackId, "Не удалось закрыть смену сотрудника", true);
+        return;
+      }
+      await this.answerCallback(callbackId, `Смена ${result.shift.waiterName} закрыта`);
+      await this.request("editMessageText", {
+        chat_id: message.chat.id,
+        message_id: message.message_id,
+        text: `✅ Смена сотрудника ${result.shift.waiterName} закрыта администратором.`,
+        reply_markup: { inline_keyboard: [] }
+      });
+      return;
+    }
+
+    const reminder = this.coordinator?.notifyEmployeeShiftClosureReminder
+      ? await this.coordinator.notifyEmployeeShiftClosureReminder(administrator.id, shiftId)
+      : { shift: target, delivered: await this.notifyEmployeeShiftClosureReminder(target) };
+    if (!reminder.shift || reminder.delivered < 1) {
+      await this.answerCallback(callbackId, "Не удалось доставить напоминание сотруднику", true);
+      return;
+    }
+    await this.answerCallback(callbackId, "Напоминание отправлено");
+    await this.request("editMessageText", {
+      chat_id: message.chat.id,
+      message_id: message.message_id,
+      text: this.unclosedShiftWarningText(reminder.shift, true),
+      reply_markup: this.unclosedShiftKeyboard(reminder.shift.id)
+    });
+  }
+
   private async finishShift(chatId: string | number) {
     const waiter = await this.requireWaiter(chatId);
     if (!waiter) return;
+    const unclosedEmployeeShifts = this.store.findRole(waiter.roleId)?.kind === "admin"
+      ? this.store.unclosedEmployeeShiftsForAdmin(waiter.id)
+      : [];
     const result: ShiftEndResult = await this.store.requestEndWaiterShift(waiter.id);
     if (result.status === "not_found") {
       await this.sendText(chatId, "У вас нет активной смены.");
@@ -905,6 +1033,7 @@ export class TelegramService {
     if (shift.roleKind === "admin") {
       if (this.coordinator?.notifyAdminShiftSummary) await this.coordinator.notifyAdminShiftSummary(shift);
       else await this.notifyAdminShiftSummary(shift);
+      await this.sendUnclosedShiftWarnings(chatId, unclosedEmployeeShifts);
     }
     if (this.coordinator?.processEndedShiftTasks) {
       await this.coordinator.processEndedShiftTasks(shift);

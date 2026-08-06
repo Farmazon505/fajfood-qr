@@ -612,7 +612,7 @@ test("late closing item cannot receive more than four stars", async () => {
   });
 });
 
-test("admin cannot end shift until every waiter closing item has a photo and score", async () => {
+test("admin can end at any time and then close an employee shift separately", async () => {
   await withStore(async (store) => {
     const waiter = store.snapshot().waiters[0];
     const admin = {
@@ -649,36 +649,24 @@ test("admin cannot end shift until every waiter closing item has a photo and sco
     );
     assert.equal(firstCompleted.status, "completed");
 
-    const activeBlocked = await store.requestEndWaiterShift(admin.id);
-    assert.equal(activeBlocked.status, "employee_shifts_active");
-    const waiterEnded = await store.requestEndWaiterShift(waiter.id, { automatic: true });
-    assert.equal(waiterEnded.status, "ended");
-    const blocked = await store.requestEndWaiterShift(admin.id);
-    assert.equal(blocked.status, "admin_reviews_incomplete");
-    if (blocked.status === "admin_reviews_incomplete") assert.equal(blocked.missingCount, 2);
-
-    await store.reviewShiftChecklist(waiterStarted.shift.id, [
-      {
-        itemId: "manual-closing-1",
-        score: 5,
-        comment: "Выполнено вовремя",
-        photoUrl: "/api/admin/review-media/review-1-00000000-0000-0000-0000-000000000001.jpg"
-      },
-      {
-        itemId: "manual-closing-2",
-        score: 4,
-        comment: "Закрыто администратором",
-        photoUrl: "/api/admin/review-media/review-2-00000000-0000-0000-0000-000000000002.jpg"
-      }
-    ], "admin", "admin");
+    assert.deepEqual(
+      store.unclosedEmployeeShiftsForAdmin(admin.id).map((shift) => shift.id),
+      [waiterStarted.shift.id]
+    );
     const ended = await store.requestEndWaiterShift(admin.id);
     assert.equal(ended.status, "ended");
     if (ended.status === "ended") {
       assert.equal(ended.shift.adminReviewRequiredCount, 2);
-      assert.equal(ended.shift.adminReviewMissingCount, 0);
+      assert.equal(ended.shift.adminReviewMissingCount, 1);
       assert.equal(ended.shift.adminPenaltyAmount, 20);
-      assert.equal(ended.shift.score, 5);
+      assert.equal(ended.shift.score, 2.5);
     }
+    assert.ok(store.currentShiftForWaiter(waiter.id));
+
+    const employeeEnded = await store.endEmployeeShiftByAdmin(admin.id, waiterStarted.shift.id);
+    assert.equal(employeeEnded.status, "ended");
+    assert.equal(store.currentShiftForWaiter(waiter.id), null);
+    assert.ok(store.snapshot().tables.every((table) => !table.waiterIds.includes(waiter.id)));
   });
 });
 

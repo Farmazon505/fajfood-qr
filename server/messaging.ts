@@ -1,5 +1,5 @@
 import type { MaxService } from "./max";
-import { venueOperationalDateKey, type Store } from "./store";
+import { venueOperationalDateKey, type AdminEmployeeShiftEndResult, type Store } from "./store";
 import type { TelegramService } from "./telegram";
 import type { DeliveryPickupAlert, DiningTable, ServiceCall, ShiftTask, ShiftTaskRolloverRecord, VenueSettings, Waiter, WaiterShift } from "./types";
 import { config } from "./config";
@@ -43,6 +43,12 @@ export class MessagingService {
       },
       acknowledgeDeliveryPickupAlert: async (alertId: string, waiterId: string) => {
         return this.acknowledgeDeliveryPickupAlert(alertId, waiterId);
+      },
+      closeEmployeeShiftByAdmin: async (adminId: string, shiftId: string) => {
+        return this.closeEmployeeShiftByAdmin(adminId, shiftId);
+      },
+      notifyEmployeeShiftClosureReminder: async (adminId: string, shiftId: string) => {
+        return this.notifyEmployeeShiftClosureReminder(adminId, shiftId);
       }
     };
     this.telegram.setCallCoordinator(coordinator);
@@ -251,6 +257,42 @@ export class MessagingService {
     for (const result of results) {
       if (result.status === "rejected") console.error("[messaging] Ошибка доставки итогов смены администратора:", result.reason);
     }
+  }
+
+  async notifyEmployeeShiftClosureReminder(adminId: string, shiftId: string) {
+    const shift = this.store.employeeShiftForAdminAction(adminId, shiftId);
+    if (!shift || shift.status === "ended") return { shift: null, delivered: 0 };
+    const results = await Promise.allSettled([
+      this.telegram.notifyEmployeeShiftClosureReminder(shift),
+      this.max.notifyEmployeeShiftClosureReminder(shift)
+    ]);
+    for (const result of results) {
+      if (result.status === "rejected") console.error("[messaging] Ошибка напоминания о незакрытой смене:", result.reason);
+    }
+    return {
+      shift,
+      delivered: results.reduce(
+        (total, result) => total + (result.status === "fulfilled" ? result.value : 0),
+        0
+      )
+    };
+  }
+
+  async closeEmployeeShiftByAdmin(
+    adminId: string,
+    shiftId: string
+  ): Promise<AdminEmployeeShiftEndResult> {
+    const result = await this.store.endEmployeeShiftByAdmin(adminId, shiftId);
+    if (result.status !== "ended") return result;
+    const cleanupResults = await Promise.allSettled([
+      this.telegram.clearEmployeeCallNotifications(result.shift.waiterId),
+      this.max.clearEmployeeCallNotifications(result.shift.waiterId)
+    ]);
+    for (const cleanup of cleanupResults) {
+      if (cleanup.status === "rejected") console.error("[messaging] Ошибка очистки уведомлений закрытой смены:", cleanup.reason);
+    }
+    await this.processEndedShiftTasks(result.shift);
+    return result;
   }
 
   start() {

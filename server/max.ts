@@ -5,7 +5,7 @@ import { Agent as HttpsAgent } from "node:https";
 import path from "node:path";
 import fetch from "node-fetch";
 import { config, publicBaseUrl } from "./config";
-import type { ShiftEndResult, Store } from "./store";
+import type { AdminEmployeeShiftEndResult, ShiftEndResult, Store } from "./store";
 import type {
   DeliveryPickupAlert,
   DiningTable,
@@ -73,6 +73,11 @@ type MaxCallCoordinator = {
   notifyAdminShiftSummary?(shift: WaiterShift): Promise<void>;
   processEndedShiftTasks?(shift: WaiterShift): Promise<ShiftTask[]>;
   acknowledgeDeliveryPickupAlert?(alertId: string, waiterId: string): Promise<any>;
+  closeEmployeeShiftByAdmin?(adminId: string, shiftId: string): Promise<AdminEmployeeShiftEndResult>;
+  notifyEmployeeShiftClosureReminder?(
+    adminId: string,
+    shiftId: string
+  ): Promise<{ shift: WaiterShift | null; delivered: number }>;
 };
 
 type MaxApiRequest = {
@@ -259,6 +264,10 @@ export class MaxService {
     }
     if (payload === "shift:end") {
       await this.finishShift(userId, callbackId);
+      return;
+    }
+    if (payload.startsWith("shift:admin-close:") || payload.startsWith("shift:admin-remind:")) {
+      await this.handleAdminEmployeeShiftAction(callbackId, userId, payload);
       return;
     }
     if (payload.startsWith("shift:zone:")) {
@@ -492,6 +501,30 @@ export class MaxService {
       if (sent) delivered += 1;
     }
     return delivered;
+  }
+
+  async notifyEmployeeShiftClosureReminder(shift: WaiterShift) {
+    if (!this.enabled() || shift.status === "ended") return 0;
+    const employee = this.store.findWaiterById(shift.waiterId);
+    const userId = employee?.maxUserId.trim();
+    if (!userId) return 0;
+    const sent = await this.sendMessage(userId, {
+      text: [
+        "⚠️ Напоминание о завершении смены",
+        `${shift.waiterName}, администратор просит завершить вашу смену.`,
+        `Должность: ${shift.roleName}`,
+        `Дата смены: ${shift.morningGreetingDate}`,
+        "Проверьте чек-лист закрытия и нажмите «Закончить смену»."
+      ].join("\n"),
+      attachments: this.keyboard([[this.callbackButton("Закончить смену", "shift:end", "negative")]]),
+      notify: true
+    });
+    return sent ? 1 : 0;
+  }
+
+  async clearEmployeeCallNotifications(waiterId: string) {
+    const employee = this.store.findWaiterById(waiterId);
+    if (employee?.maxUserId.trim()) await this.clearWaiterCallMessages(employee);
   }
 
   async notifyAdminShiftSummary(shift: WaiterShift) {
@@ -882,9 +915,77 @@ export class MaxService {
     await this.sendChecklist(userId, shift, callbackId);
   }
 
+  private unclosedShiftWarningBody(shift: WaiterShift, reminderSent = false): MaxMessageBody {
+    return {
+      text: [
+        "⚠️ Сотрудник не закрыл смену",
+        `Сотрудник: ${shift.waiterName}`,
+        `Должность: ${shift.roleName}`,
+        `Дата смены: ${shift.morningGreetingDate}`,
+        `Начало: ${formatTime(shift.startedAt)}`,
+        reminderSent ? "✅ Напоминание сотруднику отправлено." : "Выберите действие."
+      ].join("\n"),
+      attachments: this.keyboard([
+        [this.callbackButton("Закрыть смену", `shift:admin-close:${shift.id}`, "negative")],
+        [this.callbackButton("Уведомить сотрудника", `shift:admin-remind:${shift.id}`)]
+      ]),
+      notify: true
+    };
+  }
+
+  private async sendUnclosedShiftWarnings(userId: number, shifts: WaiterShift[]) {
+    for (const shift of shifts) {
+      await this.sendMessage(String(userId), this.unclosedShiftWarningBody(shift));
+    }
+  }
+
+  private async handleAdminEmployeeShiftAction(callbackId: string, userId: number, payload: string) {
+    const administrator = await this.requireWaiter(userId, callbackId);
+    if (!administrator) return;
+    if (this.store.findRole(administrator.roleId)?.kind !== "admin") {
+      await this.answerCallback(callbackId, "Действие доступно только администратору");
+      return;
+    }
+    const closeAction = payload.startsWith("shift:admin-close:");
+    const prefix = closeAction ? "shift:admin-close:" : "shift:admin-remind:";
+    const shiftId = payload.slice(prefix.length);
+    const target = this.store.employeeShiftForAdminAction(administrator.id, shiftId);
+    if (!target) {
+      await this.answerCallback(callbackId, "Смена уже закрыта или недоступна");
+      return;
+    }
+
+    if (closeAction) {
+      const result = this.coordinator?.closeEmployeeShiftByAdmin
+        ? await this.coordinator.closeEmployeeShiftByAdmin(administrator.id, shiftId)
+        : await this.store.endEmployeeShiftByAdmin(administrator.id, shiftId);
+      if (result.status !== "ended") {
+        await this.answerCallback(callbackId, "Не удалось закрыть смену сотрудника");
+        return;
+      }
+      await this.answerCallback(callbackId, undefined, {
+        text: `✅ Смена сотрудника ${result.shift.waiterName} закрыта администратором.`,
+        attachments: []
+      });
+      return;
+    }
+
+    const reminder = this.coordinator?.notifyEmployeeShiftClosureReminder
+      ? await this.coordinator.notifyEmployeeShiftClosureReminder(administrator.id, shiftId)
+      : { shift: target, delivered: await this.notifyEmployeeShiftClosureReminder(target) };
+    if (!reminder.shift || reminder.delivered < 1) {
+      await this.answerCallback(callbackId, "Не удалось доставить напоминание сотруднику");
+      return;
+    }
+    await this.answerCallback(callbackId, undefined, this.unclosedShiftWarningBody(reminder.shift, true));
+  }
+
   private async finishShift(userId: number, callbackId?: string) {
     const waiter = await this.requireWaiter(userId, callbackId);
     if (!waiter) return;
+    const unclosedEmployeeShifts = this.store.findRole(waiter.roleId)?.kind === "admin"
+      ? this.store.unclosedEmployeeShiftsForAdmin(waiter.id)
+      : [];
     const result: ShiftEndResult = await this.store.requestEndWaiterShift(waiter.id);
     if (result.status === "not_found") {
       await this.respond(userId, callbackId, {
@@ -927,6 +1028,7 @@ export class MaxService {
     if (shift.roleKind === "admin") {
       if (this.coordinator?.notifyAdminShiftSummary) await this.coordinator.notifyAdminShiftSummary(shift);
       else await this.notifyAdminShiftSummary(shift);
+      await this.sendUnclosedShiftWarnings(userId, unclosedEmployeeShifts);
     }
     if (this.coordinator?.processEndedShiftTasks) {
       await this.coordinator.processEndedShiftTasks(shift);

@@ -40,6 +40,98 @@ test("Telegram retries a transient API failure before reporting delivery failure
   }
 });
 
+test("Telegram lets an admin end immediately and manage an unclosed employee shift", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-telegram-admin-end-"));
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ method: string; payload: Record<string, unknown> }> = [];
+  let messageId = 900;
+  globalThis.fetch = (async (input, init) => {
+    const method = String(input).split("/").pop() || "";
+    const payload = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+    requests.push({ method, payload });
+    messageId += 1;
+    return new Response(JSON.stringify({
+      ok: true,
+      result: method === "sendMessage" || method === "editMessageText"
+        ? { message_id: Number(payload.message_id || messageId), chat: { id: payload.chat_id } }
+        : true
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const waiter = { ...store.snapshot().waiters[0], telegramChatId: "41001" };
+    const admin = {
+      id: "telegram-admin-end",
+      name: "Администратор",
+      roleId: "admin",
+      telegramChatId: "42002",
+      maxUserId: "",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([waiter, admin]);
+    const zone = store.listZones()[0];
+    const waiterShift = await store.startWaiterShift(waiter.id, [zone]);
+    const adminShift = await store.startWaiterShift(admin.id, [zone]);
+    assert.ok(waiterShift);
+    assert.ok(adminShift);
+    const telegram = new TelegramService(store, "test-token");
+
+    await telegram.handleUpdate({
+      update_id: 100,
+      callback_query: {
+        id: "admin-end",
+        data: "shift:end",
+        message: { message_id: 1, chat: { id: admin.telegramChatId } }
+      }
+    });
+    assert.equal(store.currentShiftForWaiter(admin.id), null);
+    assert.ok(store.currentShiftForWaiter(waiter.id));
+    const warning = requests.find((request) =>
+      request.method === "sendMessage"
+      && request.payload.chat_id === admin.telegramChatId
+      && String(request.payload.text).includes("Сотрудник не закрыл смену")
+    );
+    assert.ok(warning);
+    const warningMarkup = JSON.stringify(warning.payload.reply_markup);
+    assert.match(warningMarkup, new RegExp(`shift:admin-close:${waiterShift.shift.id}`));
+    assert.match(warningMarkup, new RegExp(`shift:admin-remind:${waiterShift.shift.id}`));
+
+    await telegram.handleUpdate({
+      update_id: 101,
+      callback_query: {
+        id: "admin-remind",
+        data: `shift:admin-remind:${waiterShift.shift.id}`,
+        message: { message_id: 2, chat: { id: admin.telegramChatId } }
+      }
+    });
+    assert.ok(requests.some((request) =>
+      request.method === "sendMessage"
+      && request.payload.chat_id === waiter.telegramChatId
+      && String(request.payload.text).includes("Напоминание о завершении смены")
+    ));
+
+    await telegram.handleUpdate({
+      update_id: 102,
+      callback_query: {
+        id: "admin-close-employee",
+        data: `shift:admin-close:${waiterShift.shift.id}`,
+        message: { message_id: 2, chat: { id: admin.telegramChatId } }
+      }
+    });
+    assert.equal(store.currentShiftForWaiter(waiter.id), null);
+    assert.ok(requests.some((request) =>
+      request.method === "editMessageText"
+      && String(request.payload.text).includes("закрыта администратором")
+    ));
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Telegram manages a shift and keeps one live message per table", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-telegram-"));
   const originalFetch = globalThis.fetch;
