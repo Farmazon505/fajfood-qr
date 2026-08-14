@@ -256,14 +256,33 @@ test("Telegram manages a shift and keeps one live message per table", async () =
     await telegram.handleUpdate({
       update_id: 3,
       callback_query: {
-        id: "zone-1",
-        data: "shift:zone:0",
+        id: "period-full",
+        data: "shift:period:full",
         message: { message_id: 3, chat: { id: "10001" } }
+      }
+    });
+    const periodPicker = requests.find((request) =>
+      request.method === "sendMessage" && String(request.payload.text).includes("Выберите период смены")
+    );
+    assert.ok(periodPicker);
+    assert.match(JSON.stringify(periodPicker.payload.reply_markup), /shift:period:full/);
+    assert.ok(requests.some((request) =>
+      request.method === "sendMessage"
+      && String(request.payload.text).includes("На каком этаже")
+      && JSON.stringify(request.payload.reply_markup).includes("shift:zone:full:0")
+    ));
+    await telegram.handleUpdate({
+      update_id: 4,
+      callback_query: {
+        id: "zone-1",
+        data: "shift:zone:full:0",
+        message: { message_id: 4, chat: { id: "10001" } }
       }
     });
 
     const startedShift = store.currentShiftForWaiter(waiter.id);
     assert.ok(startedShift);
+    assert.equal(startedShift.shiftPeriod, "full");
     assert.equal(startedShift.status, "checklist");
     assert.ok(startedShift.checklist.length >= 2);
     const checklistMessage = requests
@@ -399,8 +418,16 @@ test("Telegram manages a shift and keeps one live message per table", async () =
     await telegram.handleUpdate({
       update_id: 25,
       callback_query: {
+        id: "waiter-period-again",
+        data: "shift:period:full",
+        message: { message_id: 7, chat: { id: "10001" } }
+      }
+    });
+    await telegram.handleUpdate({
+      update_id: 251,
+      callback_query: {
         id: "waiter-zone-again",
-        data: "shift:zone:0",
+        data: "shift:zone:full:0",
         message: { message_id: 7, chat: { id: "10001" } }
       }
     });
@@ -413,8 +440,16 @@ test("Telegram manages a shift and keeps one live message per table", async () =
     await telegram.handleUpdate({
       update_id: 27,
       callback_query: {
+        id: "admin-period",
+        data: "shift:period:full",
+        message: { message_id: 9, chat: { id: "20001" } }
+      }
+    });
+    await telegram.handleUpdate({
+      update_id: 271,
+      callback_query: {
         id: "admin-zone",
-        data: "shift:zone:0",
+        data: "shift:zone:full:0",
         message: { message_id: 9, chat: { id: "20001" } }
       }
     });

@@ -1,7 +1,7 @@
 import type { MaxService } from "./max";
 import { venueOperationalDateKey, type AdminEmployeeShiftEndResult, type Store } from "./store";
 import type { TelegramService } from "./telegram";
-import type { DeliveryPickupAlert, DiningTable, ServiceCall, ShiftTask, ShiftTaskRolloverRecord, VenueSettings, Waiter, WaiterShift } from "./types";
+import type { AdminShiftSummaryStage, DeliveryPickupAlert, DiningTable, ServiceCall, ShiftTask, ShiftTaskRolloverRecord, VenueSettings, Waiter, WaiterShift } from "./types";
 import { config } from "./config";
 import type { OwnerWebPushService } from "./web-push";
 import { nextDateKey } from "../shared/shift-tasks";
@@ -35,8 +35,8 @@ export class MessagingService {
       notifyClosingChecklistIncomplete: async (shift: WaiterShift) => {
         await this.notifyClosingChecklistIncomplete(shift);
       },
-      notifyAdminShiftSummary: async (shift: WaiterShift) => {
-        await this.notifyAdminShiftSummary(shift);
+      notifyAdminShiftSummary: async (shift: WaiterShift, stage?: AdminShiftSummaryStage) => {
+        await this.notifyAdminShiftSummary(shift, stage);
       },
       processEndedShiftTasks: async (shift: WaiterShift) => {
         return this.processEndedShiftTasks(shift);
@@ -249,13 +249,49 @@ export class MessagingService {
     }
   }
 
-  async notifyAdminShiftSummary(shift: WaiterShift) {
+  async notifyClosingChecklistAvailable(shift: WaiterShift) {
     const results = await Promise.allSettled([
-      this.telegram.notifyAdminShiftSummary(shift),
-      this.max.notifyAdminShiftSummary(shift)
+      this.telegram.notifyClosingChecklistAvailable(shift),
+      this.max.notifyClosingChecklistAvailable(shift)
+    ]);
+    for (const result of results) {
+      if (result.status === "rejected") console.error("[messaging] Ошибка уведомления о доступности чек-листа закрытия:", result.reason);
+    }
+    return results.reduce(
+      (total, result) => total + (result.status === "fulfilled" ? result.value : 0),
+      0
+    );
+  }
+
+  async notifyAdminShiftSummary(shift: WaiterShift, stage: AdminShiftSummaryStage = "final") {
+    const results = await Promise.allSettled([
+      this.telegram.notifyAdminShiftSummary(shift, stage),
+      this.max.notifyAdminShiftSummary(shift, stage)
     ]);
     for (const result of results) {
       if (result.status === "rejected") console.error("[messaging] Ошибка доставки итогов смены администратора:", result.reason);
+    }
+    return results.reduce(
+      (total, result) => total + (result.status === "fulfilled" ? result.value : 0),
+      0
+    );
+  }
+
+  private async processScheduledShiftNotifications(currentTime: Date) {
+    for (const shift of this.store.shiftsNeedingClosingChecklistNotification(currentTime)) {
+      const delivered = await this.notifyClosingChecklistAvailable(shift);
+      if (delivered > 0) await this.store.markClosingChecklistAvailableNotified(shift.id, currentTime);
+    }
+
+    for (const stage of ["preliminary", "final"] as const) {
+      for (const adminShift of this.store.adminClosingReportsDue(stage, currentTime)) {
+        const refreshedShift = await this.store.refreshAdminClosingMetrics(adminShift.id);
+        if (!refreshedShift) continue;
+        const delivered = await this.notifyAdminShiftSummary(refreshedShift, stage);
+        if (delivered > 0) {
+          await this.store.markAdminClosingReportNotified(refreshedShift.id, stage, currentTime);
+        }
+      }
     }
   }
 
@@ -317,6 +353,7 @@ export class MessagingService {
     this.dailyMaintenanceRunning = true;
     try {
       const currentTime = new Date(at);
+      await this.processScheduledShiftNotifications(currentTime);
       const currentDateKey = venueOperationalDateKey(currentTime);
       const endedShifts = await this.store.endOpenShiftsBeforeDate(currentDateKey, currentTime);
       for (const shift of endedShifts) {
@@ -327,7 +364,11 @@ export class MessagingService {
         await this.processEndedShiftTasks(shift, currentTime);
       }
       for (const shift of endedShifts.filter((item) => item.roleKind === "admin")) {
-        await this.notifyAdminShiftSummary(shift);
+        if (shift.adminFinalSummaryNotifiedAt) continue;
+        const delivered = await this.notifyAdminShiftSummary(shift, "final");
+        if (delivered > 0) {
+          await this.store.markAdminClosingReportNotified(shift.id, "final", currentTime);
+        }
       }
       const additionallyCarried = await this.store.rolloverIncompleteShiftTasks(currentDateKey, currentTime);
       for (const task of additionallyCarried) {

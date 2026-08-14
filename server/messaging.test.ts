@@ -14,14 +14,16 @@ import {
   venueOperationalDateKey
 } from "./store";
 import type { TelegramService } from "./telegram";
-import type { DeliveryPickupAlert, ServiceCall, ShiftTask, ShiftTaskRolloverRecord, WaiterShift } from "./types";
+import type { AdminShiftSummaryStage, DeliveryPickupAlert, ServiceCall, ShiftTask, ShiftTaskRolloverRecord, WaiterShift } from "./types";
 import type { OwnerWebPushService } from "./web-push";
 
 class FakeTransport {
   notifications: ServiceCall[] = [];
   ownerAlerts: string[] = [];
   closingAlerts: WaiterShift[] = [];
+  closingAvailable: WaiterShift[] = [];
   adminSummaries: WaiterShift[] = [];
+  adminSummaryStages: AdminShiftSummaryStage[] = [];
   approvalTexts: string[] = [];
   pickupAlerts: DeliveryPickupAlert[] = [];
   shiftTaskRollovers: Array<{ task: ShiftTask; record: ShiftTaskRolloverRecord }> = [];
@@ -64,8 +66,14 @@ class FakeTransport {
     return 1;
   }
 
-  async notifyAdminShiftSummary(shift: WaiterShift) {
+  async notifyClosingChecklistAvailable(shift: WaiterShift) {
+    this.closingAvailable.push(structuredClone(shift));
+    return 1;
+  }
+
+  async notifyAdminShiftSummary(shift: WaiterShift, stage: AdminShiftSummaryStage = "final") {
     this.adminSummaries.push(structuredClone(shift));
+    this.adminSummaryStages.push(stage);
     return 1;
   }
 
@@ -412,6 +420,119 @@ test("messaging daily maintenance closes a shift from the previous venue date", 
     assert.equal(telegram.shiftTaskRollovers[0].record.fromTaskId, datedTask.id);
     assert.equal(telegram.shiftTaskRollovers[0].record.reason, "");
     assert.equal(store.pendingShiftTaskRolloverReasons(waiter.id).length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("messaging opens closing at 23:00 and sends preliminary and final admin control reports", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-closing-schedule-"));
+  try {
+    const store = new Store(directory);
+    await store.init();
+    const original = store.snapshot().waiters[0];
+    const eveningWaiter = { ...original, id: "closing-evening", name: "Вечерний официант", telegramChatId: "31001" };
+    const fullWaiter = { ...original, id: "closing-full", name: "Официант полного дня", telegramChatId: "31002" };
+    const admin = {
+      id: "closing-admin",
+      name: "Администратор закрытия",
+      roleId: "admin",
+      telegramChatId: "32001",
+      maxUserId: "32001",
+      tipUrl: "",
+      active: true
+    };
+    await store.replaceWaiters([eveningWaiter, fullWaiter, admin]);
+    await store.replaceChecklistConfiguration([
+      {
+        id: "scheduled-opening",
+        roleId: "waiter",
+        phase: "opening",
+        title: "Открыть зал",
+        description: "",
+        requiredForCalls: true,
+        countsForRating: true,
+        active: true,
+        sort: 10
+      },
+      {
+        id: "scheduled-evening",
+        roleId: "waiter",
+        phase: "evening",
+        title: "Открыть вечернюю смену",
+        description: "",
+        requiredForCalls: true,
+        countsForRating: true,
+        active: true,
+        sort: 20
+      },
+      {
+        id: "scheduled-closing",
+        roleId: "waiter",
+        phase: "closing",
+        title: "Закрыть зал",
+        description: "",
+        requiredForCalls: false,
+        countsForRating: true,
+        active: true,
+        sort: 30
+      }
+    ], {
+      opening: { start: "10:00", end: "12:30" },
+      evening: { start: "18:00", end: "19:00" },
+      closing: { start: "23:00", end: "01:00" }
+    });
+    const zone = store.listZones()[0];
+    const evening = await store.startWaiterShift(
+      eveningWaiter.id,
+      [zone],
+      "evening",
+      new Date("2026-08-04T14:00:00.000Z")
+    );
+    const full = await store.startWaiterShift(
+      fullWaiter.id,
+      [zone],
+      "full",
+      new Date("2026-08-04T07:00:00.000Z")
+    );
+    const adminShift = await store.startWaiterShift(
+      admin.id,
+      [zone],
+      "full",
+      new Date("2026-08-04T07:00:00.000Z")
+    );
+    assert.ok(evening);
+    assert.ok(full);
+    assert.ok(adminShift);
+
+    const telegram = new FakeTransport();
+    const max = new FakeTransport();
+    const messaging = new MessagingService(
+      store,
+      telegram as unknown as TelegramService,
+      max as unknown as MaxService
+    );
+
+    await messaging.processEscalations(new Date("2026-08-04T18:59:59.000Z").getTime());
+    assert.equal(telegram.closingAvailable.length, 0);
+    await messaging.processEscalations(new Date("2026-08-04T19:00:00.000Z").getTime());
+    assert.deepEqual(
+      telegram.closingAvailable.map((shift) => shift.shiftPeriod).sort(),
+      ["evening", "full"]
+    );
+    assert.equal(max.closingAvailable.length, 2);
+    await messaging.processEscalations(new Date("2026-08-04T19:10:00.000Z").getTime());
+    assert.equal(telegram.closingAvailable.length, 2);
+
+    await messaging.processEscalations(new Date("2026-08-04T20:00:00.000Z").getTime());
+    assert.deepEqual(telegram.adminSummaryStages, ["preliminary"]);
+    assert.equal(telegram.adminSummaries[0].adminPenaltyAmount, 40);
+    await messaging.processEscalations(new Date("2026-08-04T21:00:00.000Z").getTime());
+    assert.deepEqual(telegram.adminSummaryStages, ["preliminary", "final"]);
+    assert.deepEqual(max.adminSummaryStages, ["preliminary", "final"]);
+    assert.ok(store.currentShiftForWaiter(eveningWaiter.id));
+    assert.ok(store.currentShiftForWaiter(fullWaiter.id));
+    assert.ok(store.findShiftById(adminShift.shift.id)?.adminFinalSummaryNotifiedAt);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

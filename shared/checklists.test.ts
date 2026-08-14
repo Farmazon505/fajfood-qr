@@ -11,7 +11,7 @@ import type { ShiftChecklistEntry } from "../server/types";
 
 const atAstrakhan = (localIso: string) => new Date(`${localIso}+04:00`);
 
-test("checklist defaults expose morning, evening and overnight closing windows", () => {
+test("checklist defaults expose morning, evening and 23:00–01:00 closing windows", () => {
   assert.deepEqual(normalizeChecklistWindows(undefined), DEFAULT_CHECKLIST_WINDOWS);
   assert.equal(
     checklistWindowStatus("opening", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-04T10:00:00"), "Europe/Astrakhan"),
@@ -34,19 +34,19 @@ test("checklist defaults expose morning, evening and overnight closing windows",
     "closed"
   );
   assert.equal(
-    checklistWindowStatus("closing", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-04T21:59:00"), "Europe/Astrakhan"),
+    checklistWindowStatus("closing", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-04T22:59:00"), "Europe/Astrakhan"),
     "not_started"
   );
   assert.equal(
-    checklistWindowStatus("closing", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-04T22:00:00"), "Europe/Astrakhan"),
+    checklistWindowStatus("closing", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-04T23:00:00"), "Europe/Astrakhan"),
     "available"
   );
   assert.equal(
-    checklistWindowStatus("closing", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-05T01:59:00"), "Europe/Astrakhan"),
+    checklistWindowStatus("closing", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-05T01:00:00"), "Europe/Astrakhan"),
     "available"
   );
   assert.equal(
-    checklistWindowStatus("closing", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-05T02:01:00"), "Europe/Astrakhan"),
+    checklistWindowStatus("closing", DEFAULT_CHECKLIST_WINDOWS, "2026-08-04", atAstrakhan("2026-08-05T01:01:00"), "Europe/Astrakhan"),
     "closed"
   );
 });

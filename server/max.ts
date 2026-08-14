@@ -7,18 +7,26 @@ import fetch from "node-fetch";
 import { config, publicBaseUrl } from "./config";
 import type { AdminEmployeeShiftEndResult, ShiftEndResult, Store } from "./store";
 import type {
+  AdminShiftSummaryStage,
   DeliveryPickupAlert,
   DiningTable,
   MaxMessageRef,
   ServiceCall,
   ShiftTask,
   ShiftTaskRolloverRecord,
+  ShiftPeriod,
   VenueSettings,
   Waiter,
   WaiterShift
 } from "./types";
 import { shiftChecklistText, shiftStartedText, shiftTaskRolloverText, shiftTaskText } from "./shift-messages";
-import { CHECKLIST_PHASE_META, formatChecklistWindow } from "../shared/checklists";
+import {
+  CHECKLIST_PHASE_META,
+  SHIFT_PERIOD_META,
+  SHIFT_PERIODS,
+  formatChecklistWindow,
+  normalizeShiftPeriod
+} from "../shared/checklists";
 import { nextDateKey } from "../shared/shift-tasks";
 
 type MaxUser = {
@@ -70,7 +78,7 @@ type MaxCallCoordinator = {
   syncCall(call: ServiceCall): Promise<void>;
   closeCall(call: ServiceCall): Promise<void>;
   notifyClosingChecklistIncomplete?(shift: WaiterShift): Promise<void>;
-  notifyAdminShiftSummary?(shift: WaiterShift): Promise<void>;
+  notifyAdminShiftSummary?(shift: WaiterShift, stage?: AdminShiftSummaryStage): Promise<void>;
   processEndedShiftTasks?(shift: WaiterShift): Promise<ShiftTask[]>;
   acknowledgeDeliveryPickupAlert?(alertId: string, waiterId: string): Promise<any>;
   closeEmployeeShiftByAdmin?(adminId: string, shiftId: string): Promise<AdminEmployeeShiftEndResult>;
@@ -206,7 +214,7 @@ export class MaxService {
         return;
       }
       if (["/shift", "начать смену"].includes(text)) {
-        await this.showZonePicker(userId);
+        await this.showShiftPeriodPicker(userId);
         return;
       }
       if (["/end_shift", "закончить смену"].includes(text)) {
@@ -255,7 +263,15 @@ export class MaxService {
     const callbackId = update.callback.callback_id;
     const userId = update.callback.user.user_id;
     if (payload === "shift:start") {
-      await this.showZonePicker(userId, callbackId);
+      await this.showShiftPeriodPicker(userId, callbackId);
+      return;
+    }
+    if (payload.startsWith("shift:period:")) {
+      await this.showZonePicker(
+        userId,
+        normalizeShiftPeriod(payload.slice("shift:period:".length)),
+        callbackId
+      );
       return;
     }
     if (payload === "shift:status") {
@@ -503,6 +519,19 @@ export class MaxService {
     return delivered;
   }
 
+  async notifyClosingChecklistAvailable(shift: WaiterShift) {
+    if (!this.enabled() || shift.status === "ended") return 0;
+    const employee = this.store.findWaiterById(shift.waiterId);
+    const userId = employee?.maxUserId.trim();
+    if (!userId) return 0;
+    const window = this.store.snapshot().checklistWindows.closing;
+    const sent = await this.sendMessage(userId, this.checklistBody(
+      shift,
+      `🌙 Чек-лист закрытия доступен\nЗаполните его с ${window.start} до ${window.end} текущей смены. После 01:00 отметить пункты будет нельзя.`
+    ));
+    return sent ? 1 : 0;
+  }
+
   async notifyEmployeeShiftClosureReminder(shift: WaiterShift) {
     if (!this.enabled() || shift.status === "ended") return 0;
     const employee = this.store.findWaiterById(shift.waiterId);
@@ -527,16 +556,42 @@ export class MaxService {
     if (employee?.maxUserId.trim()) await this.clearWaiterCallMessages(employee);
   }
 
-  async notifyAdminShiftSummary(shift: WaiterShift) {
+  async notifyAdminShiftSummary(shift: WaiterShift, stage: AdminShiftSummaryStage = "final") {
     if (!this.enabled() || shift.roleKind !== "admin") return 0;
     const admin = this.store.findWaiterById(shift.waiterId);
     const userId = admin?.maxUserId.trim();
     if (!userId) return 0;
     const card = this.store.snapshot().ownerNotifications.sberCardNumber.trim();
+    const closingShifts = this.store.closingShiftsForAdmin(shift.id);
+    const employeeRows = closingShifts.map((employeeShift) => {
+      const closing = employeeShift.checklist.filter((item) => item.phase === "closing");
+      const completed = closing.filter((item) => item.completedAt).length;
+      return `${completed === closing.length ? "✅" : "⚠️"} ${employeeShift.waiterName}: ${completed}/${closing.length}`;
+    });
+    if (stage === "preliminary") {
+      const sent = await this.sendMessage(userId, {
+        text: [
+          "⏳ Предварительный контроль закрытия",
+          `Дата: ${shift.morningGreetingDate}`,
+          employeeRows.length ? employeeRows.join("\n") : "Смен с чек-листом закрытия нет.",
+          `Предварительная оценка администратора: ${shift.score} из 5 ★`,
+          `Предварительный штраф: ${shift.adminPenaltyAmount} ₽`,
+          "До 01:00 напомните сотрудникам о пунктах, а невыполненные пункты примите в «Контроле сотрудников» с фото и оценкой."
+        ].join("\n")
+      });
+      if (sent) {
+        await this.sendUnclosedShiftWarnings(
+          Number(userId),
+          closingShifts.filter((employeeShift) => employeeShift.status !== "ended")
+        );
+      }
+      return sent ? 1 : 0;
+    }
     const sent = await this.sendMessage(userId, {
       text: [
         "📊 Итоги смены администратора",
         `Дата: ${shift.morningGreetingDate}`,
+        employeeRows.length ? employeeRows.join("\n") : "Смен с чек-листом закрытия нет.",
         `Оценка: ${shift.score} из 5 ★`,
         shift.adminRatingPenaltyStars > 0 ? `Снижение за неподтверждённые пункты: −${shift.adminRatingPenaltyStars} ★` : "Неподтверждённых пунктов нет.",
         `Невыполненных пунктов сотрудников: ${shift.adminPenaltyItemCount}`,
@@ -689,7 +744,28 @@ export class MaxService {
     });
   }
 
-  private async showZonePicker(userId: number, callbackId?: string) {
+  private async showShiftPeriodPicker(userId: number, callbackId?: string) {
+    const waiter = await this.requireWaiter(userId, callbackId);
+    if (!waiter) return;
+
+    const current = this.store.currentShiftForWaiter(waiter.id);
+    if (current) {
+      await this.sendChecklist(userId, current, callbackId, "Смена уже начата.");
+      return;
+    }
+
+    await this.respond(userId, callbackId, {
+      text: "Выберите период смены:",
+      attachments: this.keyboard(SHIFT_PERIODS.map((period) => [
+        this.callbackButton(
+          `${SHIFT_PERIOD_META[period].title} · ${SHIFT_PERIOD_META[period].time}`,
+          `shift:period:${period}`
+        )
+      ]))
+    });
+  }
+
+  private async showZonePicker(userId: number, shiftPeriod: ShiftPeriod, callbackId?: string) {
     const waiter = await this.requireWaiter(userId, callbackId);
     if (!waiter) return;
 
@@ -709,18 +785,26 @@ export class MaxService {
     }
 
     const buttons = zones.map((zone, index) => [
-      this.callbackButton(zone, `shift:zone:${index}`)
+      this.callbackButton(zone, `shift:zone:${shiftPeriod}:${index}`)
     ]);
-    if (zones.length > 1) buttons.push([this.callbackButton("Все этажи", "shift:zone:all")]);
+    if (zones.length > 1) buttons.push([this.callbackButton("Все этажи", `shift:zone:${shiftPeriod}:all`)]);
     await this.respond(userId, callbackId, {
-      text: "На каком этаже вы начинаете смену?",
+      text: `${SHIFT_PERIOD_META[shiftPeriod].title} · ${SHIFT_PERIOD_META[shiftPeriod].time}\nНа каком этаже вы начинаете смену?`,
       attachments: this.keyboard(buttons)
     });
   }
 
-  private async handleZoneSelection(callbackId: string, userId: number, selection: string) {
+  private async handleZoneSelection(callbackId: string, userId: number, payload: string) {
     const waiter = await this.requireWaiter(userId, callbackId);
     if (!waiter) return;
+
+    const [rawPeriod, selection] = payload.split(":");
+    if (!SHIFT_PERIODS.includes(rawPeriod as ShiftPeriod) || !selection) {
+      await this.answerCallback(callbackId, "Сначала выберите период смены");
+      await this.showShiftPeriodPicker(userId);
+      return;
+    }
+    const shiftPeriod = normalizeShiftPeriod(rawPeriod);
 
     const zones = this.store.listZones();
     const selectedZones = selection === "all" ? zones : [zones[Number(selection)]].filter(Boolean);
@@ -729,7 +813,7 @@ export class MaxService {
       return;
     }
 
-    const result = await this.store.startWaiterShift(waiter.id, selectedZones);
+    const result = await this.store.startWaiterShift(waiter.id, selectedZones, shiftPeriod);
     if (!result) {
       await this.answerCallback(callbackId, "Не удалось начать смену");
       return;
@@ -1019,15 +1103,16 @@ export class MaxService {
     const shift = result.shift;
 
     await this.clearWaiterCallMessages(waiter);
-    await this.respond(userId, callbackId, {
-      text: shift.checklist.some((item) => item.countsForRating !== false)
+    const completionText = shift.roleKind === "admin"
+      ? "Смена администратора завершена. Предварительный контроль придёт в 00:00, итоговая оценка и штраф — в 01:00."
+      : shift.checklist.some((item) => item.countsForRating !== false)
         ? `Смена завершена. Столы сняты, уведомления отключены.\nРейтинг смены: ${shift.score} из 5 ★.`
-        : "Смена завершена. Столы сняты, уведомления отключены.\nВ этой смене не было заданий, влияющих на рейтинг.",
+        : "Смена завершена. Столы сняты, уведомления отключены.\nВ этой смене не было заданий, влияющих на рейтинг.";
+    await this.respond(userId, callbackId, {
+      text: completionText,
       attachments: this.menuKeyboard(false)
     });
     if (shift.roleKind === "admin") {
-      if (this.coordinator?.notifyAdminShiftSummary) await this.coordinator.notifyAdminShiftSummary(shift);
-      else await this.notifyAdminShiftSummary(shift);
       await this.sendUnclosedShiftWarnings(userId, unclosedEmployeeShifts);
     }
     if (this.coordinator?.processEndedShiftTasks) {

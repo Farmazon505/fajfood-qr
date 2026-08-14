@@ -400,6 +400,91 @@ test("operational shift date changes at 02:00 venue time", () => {
   assert.equal(venueOperationalDateKey(new Date("2026-08-03T22:00:00.000Z")), "2026-08-04");
 });
 
+test("selected shift period assigns only its checklists and limits full-shift opening to one hour", async () => {
+  await withStore(async (store) => {
+    const templates = ([
+      ["opening-period", "opening", "Открытие"],
+      ["evening-period", "evening", "Открытие вечерней смены"],
+      ["closing-period", "closing", "Закрытие"]
+    ] as const).map(([id, phase, title], index) => ({
+      id,
+      roleId: "waiter",
+      phase,
+      title,
+      description: "",
+      requiredForCalls: phase !== "closing",
+      countsForRating: true,
+      active: true,
+      sort: (index + 1) * 10
+    }));
+    await store.replaceChecklistConfiguration(templates, {
+      opening: { start: "10:00", end: "12:30" },
+      evening: { start: "18:00", end: "19:00" },
+      closing: { start: "23:00", end: "01:00" }
+    });
+
+    const original = store.snapshot().waiters[0];
+    const dayWaiter = { ...original, id: "period-day", name: "Дневной официант" };
+    const eveningWaiter = { ...original, id: "period-evening", name: "Вечерний официант" };
+    const fullWaiter = { ...original, id: "period-full", name: "Официант полного дня" };
+    await store.replaceWaiters([dayWaiter, eveningWaiter, fullWaiter]);
+    const zone = store.listZones()[0];
+
+    const day = await store.startWaiterShift(
+      dayWaiter.id,
+      [zone],
+      "day",
+      new Date("2026-08-04T07:00:00.000Z") // 11:00 Astrakhan
+    );
+    const evening = await store.startWaiterShift(
+      eveningWaiter.id,
+      [zone],
+      "evening",
+      new Date("2026-08-04T14:00:00.000Z") // 18:00 Astrakhan
+    );
+    const full = await store.startWaiterShift(
+      fullWaiter.id,
+      [zone],
+      "full",
+      new Date("2026-08-04T07:00:00.000Z") // 11:00 Astrakhan
+    );
+    assert.ok(day);
+    assert.ok(evening);
+    assert.ok(full);
+    assert.deepEqual(day.shift.checklist.map((item) => item.phase), ["opening"]);
+    assert.deepEqual(evening.shift.checklist.map((item) => item.phase), ["evening", "closing"]);
+    assert.deepEqual(full.shift.checklist.map((item) => item.phase), ["opening", "closing"]);
+    assert.equal((await store.requestEndWaiterShift(dayWaiter.id)).status, "ended");
+
+    assert.deepEqual(store.checklistPhaseWindow(full.shift, "opening"), { start: "11:00", end: "12:00" });
+    assert.equal(
+      store.checklistPhaseWindowStatus(full.shift, "opening", new Date("2026-08-04T08:00:00.000Z")),
+      "available"
+    );
+    const lateOpening = await store.completeShiftChecklistItem(
+      full.shift.id,
+      fullWaiter.id,
+      0,
+      new Date("2026-08-04T08:00:00.001Z")
+    );
+    assert.equal(lateOpening.status, "outside_window");
+    if (lateOpening.status === "outside_window") assert.equal(lateOpening.windowStatus, "closed");
+
+    assert.equal(
+      store.checklistPhaseWindowStatus(evening.shift, "closing", new Date("2026-08-04T18:59:59.000Z")),
+      "not_started"
+    );
+    assert.equal(
+      store.checklistPhaseWindowStatus(evening.shift, "closing", new Date("2026-08-04T19:00:00.000Z")),
+      "available"
+    );
+    assert.equal(
+      store.checklistPhaseWindowStatus(evening.shift, "closing", new Date("2026-08-04T21:01:00.000Z")),
+      "closed"
+    );
+  });
+});
+
 test("shift receives the correct opening phase and checklist completion is limited by its time window", async () => {
   await withStore(async (store) => {
     const windows: ChecklistWindows = {
@@ -475,7 +560,7 @@ test("shift receives the correct opening phase and checklist completion is limit
   });
 });
 
-test("adding an evening template updates an already open evening shift", async () => {
+test("an explicit evening shift never receives the morning checklist and synchronizes when its template is added", async () => {
   await withStore(async (store) => {
     const windows: ChecklistWindows = {
       opening: { start: "10:00", end: "12:30" },
@@ -502,10 +587,12 @@ test("adding an evening template updates an already open evening shift", async (
     const started = await store.startWaiterShift(
       waiter.id,
       [store.listZones()[0]],
+      "evening",
       new Date("2026-08-04T14:02:00.000Z") // 18:02 Astrakhan
     );
     assert.ok(started);
-    assert.deepEqual(started.shift.checklist.map((item) => item.phase), ["opening", "closing"]);
+    assert.equal(started.shift.shiftPeriod, "evening");
+    assert.deepEqual(started.shift.checklist.map((item) => item.phase), ["closing"]);
 
     await store.replaceChecklistConfiguration([
       template("morning", "opening"),

@@ -6,6 +6,7 @@ import { config } from "./config";
 import type {
   AppData,
   AdminAccessRole,
+  AdminShiftSummaryStage,
   CallAction,
   CallRoutingStage,
   CallStatus,
@@ -24,6 +25,7 @@ import type {
   ServiceCall,
   ShiftTask,
   ShiftTaskRolloverRecord,
+  ShiftPeriod,
   StaffRoleDefinition,
   StaffRoleKind,
   TelegramMessageRef,
@@ -36,9 +38,14 @@ import {
   CHECKLIST_PHASES,
   DEFAULT_CHECKLIST_WINDOWS,
   checklistWindowStatus,
+  formatVenueTime,
   normalizeChecklistPhase,
+  normalizeShiftPeriod,
   normalizeChecklistWindows,
   openingPhaseForShiftStart,
+  SHIFT_PERIOD_META,
+  shiftPeriodForStart,
+  venueClock,
   validateChecklistWindows
 } from "../shared/checklists";
 import { dateKeyDistance, nextDateKey } from "../shared/shift-tasks";
@@ -50,6 +57,10 @@ export const WAITER_ACCEPT_TIMEOUT_MS = 60_000;
 export const WAITER_COMPLETE_TIMEOUT_MS = 2 * 60_000;
 export const ADMIN_ACK_TIMEOUT_MS = 60_000;
 export const CHECKLIST_OVERDUE_TIMEOUT_MS = config.CHECKLIST_OVERDUE_MINUTES * 60_000;
+export const FULL_SHIFT_OPENING_WINDOW_MS = 60 * 60_000;
+export const CLOSING_CHECKLIST_AVAILABLE_MINUTE = 23 * 60;
+export const ADMIN_PRELIMINARY_SUMMARY_MINUTE = 24 * 60;
+export const ADMIN_FINAL_SUMMARY_MINUTE = 25 * 60;
 
 export type ChecklistCompletionResult =
   | { status: "completed"; shift: WaiterShift }
@@ -108,6 +119,26 @@ export const SHIFT_AUTO_CLOSE_HOUR = 2;
 export const ADMIN_FINE_PER_INCOMPLETE_ITEM = 20;
 export const venueOperationalDateKey = (value = new Date()) =>
   venueDateKey(new Date(value.getTime() - SHIFT_AUTO_CLOSE_HOUR * 60 * 60 * 1000));
+
+const operationalMinuteAt = (value: Date) => {
+  const clock = venueClock(value, config.VENUE_TIME_ZONE);
+  return clock.minutes < SHIFT_AUTO_CLOSE_HOUR * 60 ? clock.minutes + 24 * 60 : clock.minutes;
+};
+
+const inferStoredShiftPeriod = (shift: Pick<WaiterShift, "checklist" | "startedAt">): ShiftPeriod => {
+  const phases = new Set(shift.checklist.map((item) => normalizeChecklistPhase(item.phase)));
+  if (phases.has("evening")) return "evening";
+  if (!phases.has("closing")) return "day";
+  return shiftPeriodForStart(new Date(shift.startedAt), config.VENUE_TIME_ZONE);
+};
+
+const normalizeStoredChecklistWindows = (value: unknown) => {
+  const windows = normalizeChecklistWindows(value);
+  if (windows.closing.start === "22:00" && windows.closing.end === "02:00") {
+    windows.closing = { ...DEFAULT_CHECKLIST_WINDOWS.closing };
+  }
+  return windows;
+};
 
 const roundStars = (value: number) => Math.round(value * 100) / 100;
 const clampStars = (value: number) => roundStars(Math.max(1, Math.min(5, value)));
@@ -384,7 +415,7 @@ export class Store {
         ...stored,
         staffRoles: stored.staffRoles ?? defaultStaffRoles,
         checklistItems: stored.checklistItems ?? defaultChecklistItems,
-        checklistWindows: normalizeChecklistWindows(stored.checklistWindows),
+        checklistWindows: normalizeStoredChecklistWindows(stored.checklistWindows),
         shiftTasks: stored.shiftTasks ?? [],
         shifts: stored.shifts ?? [],
         feedbacks: stored.feedbacks ?? [],
@@ -405,6 +436,7 @@ export class Store {
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      this.normalizeData();
       await this.persist();
     }
   }
@@ -499,7 +531,37 @@ export class Store {
     return shift ? structuredClone(shift) : null;
   }
 
-  checklistPhaseWindowStatus(shift: Pick<WaiterShift, "morningGreetingDate">, phase: ChecklistPhase, at = new Date()) {
+  checklistPhaseWindow(
+    shift: Pick<WaiterShift, "morningGreetingDate"> & Partial<Pick<WaiterShift, "shiftPeriod" | "startedAt" | "openingChecklistAvailableUntil">>,
+    phase: ChecklistPhase
+  ) {
+    if (phase === "opening" && shift.shiftPeriod === "full" && shift.startedAt) {
+      const startedAt = new Date(shift.startedAt);
+      const availableUntil = new Date(
+        shift.openingChecklistAvailableUntil
+          ?? startedAt.getTime() + FULL_SHIFT_OPENING_WINDOW_MS
+      );
+      return {
+        start: formatVenueTime(startedAt, config.VENUE_TIME_ZONE),
+        end: formatVenueTime(availableUntil, config.VENUE_TIME_ZONE)
+      };
+    }
+    return structuredClone(this.data.checklistWindows[phase]);
+  }
+
+  checklistPhaseWindowStatus(
+    shift: Pick<WaiterShift, "morningGreetingDate"> & Partial<Pick<WaiterShift, "shiftPeriod" | "startedAt" | "openingChecklistAvailableUntil">>,
+    phase: ChecklistPhase,
+    at = new Date()
+  ) {
+    if (phase === "opening" && shift.shiftPeriod === "full" && shift.startedAt) {
+      const startedAt = new Date(shift.startedAt).getTime();
+      const availableUntil = shift.openingChecklistAvailableUntil
+        ? new Date(shift.openingChecklistAvailableUntil).getTime()
+        : startedAt + FULL_SHIFT_OPENING_WINDOW_MS;
+      if (at.getTime() < startedAt) return "not_started" as const;
+      return at.getTime() <= availableUntil ? "available" as const : "closed" as const;
+    }
     return checklistWindowStatus(
       phase,
       this.data.checklistWindows,
@@ -1110,16 +1172,15 @@ export class Store {
 
       const roleTemplates = this.data.checklistItems
         .filter((item) => item.active && item.roleId === shift.roleId);
-      const preferredOpeningPhase = openingPhaseForShiftStart(
-        this.data.checklistWindows,
-        shift.morningGreetingDate,
-        new Date(shift.startedAt),
-        config.VENUE_TIME_ZONE
-      );
-      const openingPhase = preferredOpeningPhase === "evening"
-        && !roleTemplates.some((item) => normalizeChecklistPhase(item.phase) === "evening")
-        ? "opening"
-        : preferredOpeningPhase;
+      const legacyOpeningPhase = shift.checklist.some((item) => normalizeChecklistPhase(item.phase) === "evening")
+        ? "evening"
+        : "opening";
+      const openingPhase = shift.shiftPeriodSelected
+        ? SHIFT_PERIOD_META[shift.shiftPeriod].openingPhase
+        : legacyOpeningPhase;
+      const includesClosing = shift.shiftPeriodSelected
+        ? SHIFT_PERIOD_META[shift.shiftPeriod].includesClosing
+        : shift.checklist.some((item) => normalizeChecklistPhase(item.phase) === "closing");
       const existingTemplates = new Map(
         shift.checklist
           .filter((item) => !item.itemId.startsWith("task-"))
@@ -1128,7 +1189,7 @@ export class Store {
       const templateItems = roleTemplates
         .filter((item) => {
           const phase = normalizeChecklistPhase(item.phase);
-          return phase === "closing" || phase === openingPhase;
+          return phase === openingPhase || (includesClosing && phase === "closing");
         })
         .sort(checklistOrder)
         .map((item) => {
@@ -1191,7 +1252,7 @@ export class Store {
       roleMap.set(role.id, { ...role, ...(roleMap.get(role.id) ?? {}), kind: role.kind, system: true });
     }
     this.data.staffRoles = Array.from(roleMap.values());
-    this.data.checklistWindows = normalizeChecklistWindows(this.data.checklistWindows);
+    this.data.checklistWindows = normalizeStoredChecklistWindows(this.data.checklistWindows);
     this.data.checklistItems = (this.data.checklistItems ?? defaultChecklistItems)
       .map((item, index) => ({
         ...item,
@@ -1208,6 +1269,27 @@ export class Store {
         sort: Number.isFinite(item.sort) ? item.sort : (index + 1) * 10
       }))
       .sort(checklistOrder);
+    const rolesWithEveningTemplates = new Set(
+      this.data.checklistItems
+        .filter((item) => normalizeChecklistPhase(item.phase) === "evening")
+        .map((item) => item.roleId)
+    );
+    const existingChecklistIds = new Set(this.data.checklistItems.map((item) => item.id));
+    const generatedEveningTemplates = this.data.checklistItems
+      .filter((item) => normalizeChecklistPhase(item.phase) === "opening" && !rolesWithEveningTemplates.has(item.roleId))
+      .map((item) => {
+        const proposedId = `evening-${item.id}`;
+        const id = existingChecklistIds.has(proposedId) ? randomUUID() : proposedId;
+        existingChecklistIds.add(id);
+        return {
+          ...item,
+          id,
+          phase: "evening" as const
+        };
+      });
+    if (generatedEveningTemplates.length) {
+      this.data.checklistItems = [...this.data.checklistItems, ...generatedEveningTemplates].sort(checklistOrder);
+    }
     this.data.shiftTasks = (this.data.shiftTasks ?? []).map((task) => {
       const date = task.date ?? venueDateKey();
       const completedAt = task.completedAt ?? null;
@@ -1309,6 +1391,7 @@ export class Store {
     this.data.shifts = (this.data.shifts ?? []).map((shift) => {
       const member = this.data.waiters.find((waiter) => waiter.id === shift.waiterId);
       const role = member ? this.roleForWaiter(member) : this.findRole(shift.roleId) ?? this.findRole("waiter");
+      const shiftPeriod = normalizeShiftPeriod(shift.shiftPeriod, inferStoredShiftPeriod(shift));
       const normalized: WaiterShift = {
         ...shift,
         waiterName:
@@ -1340,11 +1423,20 @@ export class Store {
           reviewedByRole: item.reviewedByRole ?? null,
           reviewedByUsername: item.reviewedByUsername ?? ""
         })),
+        shiftPeriod,
+        shiftPeriodSelected: Boolean(shift.shiftPeriodSelected),
+        openingChecklistAvailableUntil: shift.openingChecklistAvailableUntil
+          ?? (shiftPeriod === "full"
+            ? new Date(new Date(shift.startedAt).getTime() + FULL_SHIFT_OPENING_WINDOW_MS).toISOString()
+            : null),
         readyAt: shift.readyAt ?? null,
         endedAt: shift.endedAt ?? null,
         morningGreetingDate: shift.morningGreetingDate || venueDateKey(new Date(shift.startedAt)),
         checklistOverdueNotifiedAt: shift.checklistOverdueNotifiedAt ?? null,
+        closingChecklistAvailableNotifiedAt: shift.closingChecklistAvailableNotifiedAt ?? null,
         closingChecklistIncompleteNotifiedAt: shift.closingChecklistIncompleteNotifiedAt ?? null,
+        adminPreliminarySummaryNotifiedAt: shift.adminPreliminarySummaryNotifiedAt ?? null,
+        adminFinalSummaryNotifiedAt: shift.adminFinalSummaryNotifiedAt ?? null,
         endedAutomatically: Boolean(shift.endedAutomatically),
         adminReviewRequiredCount: Number.isFinite(shift.adminReviewRequiredCount) ? shift.adminReviewRequiredCount : 0,
         adminReviewMissingCount: Number.isFinite(shift.adminReviewMissingCount) ? shift.adminReviewMissingCount : 0,
@@ -1576,7 +1668,21 @@ export class Store {
     return { status: "deleted", waiter: structuredClone(waiter) };
   }
 
-  async startWaiterShift(waiterId: string, requestedZones: string[], startedAt = new Date()) {
+  async startWaiterShift(
+    waiterId: string,
+    requestedZones: string[],
+    shiftPeriodOrStartedAt?: ShiftPeriod | Date,
+    explicitlyStartedAt?: Date
+  ) {
+    const shiftPeriodSelected = typeof shiftPeriodOrStartedAt === "string";
+    const startedAt = shiftPeriodOrStartedAt instanceof Date
+      ? shiftPeriodOrStartedAt
+      : explicitlyStartedAt ?? new Date();
+    const shiftPeriod = shiftPeriodSelected
+      ? normalizeShiftPeriod(shiftPeriodOrStartedAt)
+      : shiftPeriodOrStartedAt instanceof Date
+        ? shiftPeriodForStart(startedAt, config.VENUE_TIME_ZONE)
+        : "full";
     const waiter = this.data.waiters.find((item) => item.id === waiterId && item.active);
     if (!waiter) return null;
     const role = this.roleForWaiter(waiter);
@@ -1593,21 +1699,14 @@ export class Store {
     const firstShiftToday = !this.data.shifts.some(
       (shift) => shift.waiterId === waiterId && shift.morningGreetingDate === dateKey
     );
-    const preferredOpeningPhase = openingPhaseForShiftStart(
-      this.data.checklistWindows,
-      dateKey,
-      startedAt,
-      config.VENUE_TIME_ZONE
-    );
-    const openingPhase = preferredOpeningPhase === "evening"
-      && !this.data.checklistItems.some(
-        (item) => item.active && item.roleId === role.id && normalizeChecklistPhase(item.phase) === "evening"
-      )
-      ? "opening"
-      : preferredOpeningPhase;
+    const periodMeta = SHIFT_PERIOD_META[shiftPeriod];
+    const openingPhase = periodMeta.openingPhase;
     const templateItems = this.data.checklistItems
       .filter((item) => item.active && item.roleId === role.id)
-      .filter((item) => normalizeChecklistPhase(item.phase) === "closing" || normalizeChecklistPhase(item.phase) === openingPhase)
+      .filter((item) => {
+        const phase = normalizeChecklistPhase(item.phase);
+        return phase === openingPhase || (periodMeta.includesClosing && phase === "closing");
+      })
       .sort(checklistOrder)
       .map((item) => ({
         itemId: item.id,
@@ -1669,11 +1768,19 @@ export class Store {
       checklist,
       score: 0,
       startedAt: timestamp,
+      shiftPeriod,
+      shiftPeriodSelected,
+      openingChecklistAvailableUntil: shiftPeriod === "full"
+        ? new Date(startedAt.getTime() + FULL_SHIFT_OPENING_WINDOW_MS).toISOString()
+        : null,
       readyAt: requiredComplete ? timestamp : null,
       endedAt: null,
       morningGreetingDate: dateKey,
       checklistOverdueNotifiedAt: null,
+      closingChecklistAvailableNotifiedAt: null,
       closingChecklistIncompleteNotifiedAt: null,
+      adminPreliminarySummaryNotifiedAt: null,
+      adminFinalSummaryNotifiedAt: null,
       endedAutomatically: false,
       adminReviewRequiredCount: 0,
       adminReviewMissingCount: 0,
@@ -1715,19 +1822,13 @@ export class Store {
     }
 
     if (!item.itemId.startsWith("task-")) {
-      const windowStatus = checklistWindowStatus(
-        item.phase,
-        this.data.checklistWindows,
-        shift.morningGreetingDate,
-        completedAt,
-        config.VENUE_TIME_ZONE
-      );
+      const windowStatus = this.checklistPhaseWindowStatus(shift, item.phase, completedAt);
       if (windowStatus !== "available") {
         return {
           status: "outside_window",
           shift: structuredClone(shift),
           phase: item.phase,
-          window: structuredClone(this.data.checklistWindows[item.phase]),
+          window: this.checklistPhaseWindow(shift, item.phase),
           windowStatus
         };
       }
@@ -1875,6 +1976,85 @@ export class Store {
     return this.data.waiters
       .filter((member) => member.active && memberIds.has(member.id) && this.roleForWaiter(member)?.kind === "admin")
       .map((member) => structuredClone(member));
+  }
+
+  shiftsNeedingClosingChecklistNotification(at = new Date()) {
+    const currentDateKey = venueOperationalDateKey(at);
+    return this.data.shifts
+      .filter((shift) => {
+        if (shift.status === "ended" || shift.roleKind !== "waiter") return false;
+        if (shift.morningGreetingDate !== currentDateKey || shift.closingChecklistAvailableNotifiedAt) return false;
+        if (shift.shiftPeriod !== "evening" && shift.shiftPeriod !== "full") return false;
+        if (!closingItems(shift).length) return false;
+        return this.checklistPhaseWindowStatus(shift, "closing", at) === "available";
+      })
+      .map((shift) => structuredClone(shift));
+  }
+
+  async markClosingChecklistAvailableNotified(shiftId: string, at = new Date()) {
+    const shift = this.data.shifts.find((item) => item.id === shiftId);
+    if (!shift || shift.closingChecklistAvailableNotifiedAt) return false;
+    shift.closingChecklistAvailableNotifiedAt = at.toISOString();
+    await this.persist();
+    return true;
+  }
+
+  closingShiftsForAdmin(adminShiftId: string) {
+    const adminShift = this.data.shifts.find((shift) => shift.id === adminShiftId && shift.roleKind === "admin");
+    if (!adminShift) return [];
+    return this.closingReviewTargetsForAdmin(adminShift)
+      .filter((shift) => closingItems(shift).length > 0)
+      .sort((left, right) => left.waiterName.localeCompare(right.waiterName, "ru"))
+      .map((shift) => structuredClone(shift));
+  }
+
+  adminClosingReportsDue(stage: AdminShiftSummaryStage, at = new Date()) {
+    const minute = operationalMinuteAt(at);
+    const due = stage === "preliminary"
+      ? minute >= ADMIN_PRELIMINARY_SUMMARY_MINUTE && minute < ADMIN_FINAL_SUMMARY_MINUTE
+      : minute >= ADMIN_FINAL_SUMMARY_MINUTE;
+    if (!due) return [];
+
+    const currentDateKey = venueOperationalDateKey(at);
+    const latestByAdmin = new Map<string, WaiterShift>();
+    for (const shift of this.data.shifts) {
+      if (shift.roleKind !== "admin" || shift.morningGreetingDate !== currentDateKey) continue;
+      const current = latestByAdmin.get(shift.waiterId);
+      if (!current || current.startedAt < shift.startedAt) latestByAdmin.set(shift.waiterId, shift);
+    }
+
+    return Array.from(latestByAdmin.values())
+      .filter((shift) => stage === "preliminary"
+        ? !shift.adminPreliminarySummaryNotifiedAt
+        : !shift.adminFinalSummaryNotifiedAt)
+      .map((shift) => structuredClone(shift));
+  }
+
+  async refreshAdminClosingMetrics(shiftId: string) {
+    const shift = this.data.shifts.find((item) => item.id === shiftId && item.roleKind === "admin");
+    if (!shift) return null;
+    this.applyAdminClosingMetrics(shift);
+    shift.score = calculateShiftScore(shift);
+    await this.persist();
+    return structuredClone(shift);
+  }
+
+  async markAdminClosingReportNotified(
+    shiftId: string,
+    stage: AdminShiftSummaryStage,
+    at = new Date()
+  ) {
+    const shift = this.data.shifts.find((item) => item.id === shiftId && item.roleKind === "admin");
+    if (!shift) return false;
+    const field = stage === "preliminary"
+      ? "adminPreliminarySummaryNotifiedAt"
+      : "adminFinalSummaryNotifiedAt";
+    if (shift[field]) return false;
+    this.applyAdminClosingMetrics(shift);
+    shift.score = calculateShiftScore(shift);
+    shift[field] = at.toISOString();
+    await this.persist();
+    return true;
   }
 
   private applyAdminClosingMetrics(shift: WaiterShift) {

@@ -9,11 +9,13 @@ import {
   type Store
 } from "./store";
 import type {
+  AdminShiftSummaryStage,
   DeliveryPickupAlert,
   DiningTable,
   ServiceCall,
   ShiftTask,
   ShiftTaskRolloverRecord,
+  ShiftPeriod,
   TelegramMessageRef,
   VenueSettings,
   Waiter,
@@ -24,7 +26,13 @@ import { createAiProxyAgent } from "./ai-proxy";
 import type { CrmStaffReservation } from "./crm-reservations";
 import { generatePerformanceInsights } from "./performance-ai";
 import { shiftChecklistText, shiftStartedText, shiftTaskRolloverText, shiftTaskText } from "./shift-messages";
-import { CHECKLIST_PHASE_META, formatChecklistWindow } from "../shared/checklists";
+import {
+  CHECKLIST_PHASE_META,
+  SHIFT_PERIOD_META,
+  SHIFT_PERIODS,
+  formatChecklistWindow,
+  normalizeShiftPeriod
+} from "../shared/checklists";
 import { nextDateKey } from "../shared/shift-tasks";
 
 type TelegramResponse<T> = {
@@ -56,7 +64,7 @@ type TelegramCallCoordinator = {
   syncCall(call: ServiceCall): Promise<void>;
   closeCall(call: ServiceCall): Promise<void>;
   notifyClosingChecklistIncomplete?(shift: WaiterShift): Promise<void>;
-  notifyAdminShiftSummary?(shift: WaiterShift): Promise<void>;
+  notifyAdminShiftSummary?(shift: WaiterShift, stage?: AdminShiftSummaryStage): Promise<void>;
   processEndedShiftTasks?(shift: WaiterShift): Promise<ShiftTask[]>;
   acknowledgeDeliveryPickupAlert?(alertId: string, waiterId: string): Promise<any>;
   closeEmployeeShiftByAdmin?(adminId: string, shiftId: string): Promise<AdminEmployeeShiftEndResult>;
@@ -402,6 +410,27 @@ export class TelegramService {
     return delivered;
   }
 
+  async notifyClosingChecklistAvailable(shift: WaiterShift) {
+    if (!this.enabled() || shift.status === "ended") return 0;
+    const employee = this.store.findWaiterById(shift.waiterId);
+    const chatId = employee?.telegramChatId.trim();
+    if (!chatId) return 0;
+    const window = this.store.snapshot().checklistWindows.closing;
+    const sent = await this.request<TelegramMessage>("sendMessage", {
+      chat_id: chatId,
+      text: [
+        "🌙 Чек-лист закрытия доступен",
+        `Заполните его с ${window.start} до ${window.end} текущей смены.`,
+        "После 01:00 отметить пункты будет нельзя.",
+        "",
+        shiftChecklistText(shift, this.store.snapshot().checklistWindows, config.VENUE_TIME_ZONE)
+      ].join("\n"),
+      disable_notification: false,
+      reply_markup: this.checklistKeyboard(shift)
+    });
+    return sent?.message_id ? 1 : 0;
+  }
+
   async notifyEmployeeShiftClosureReminder(shift: WaiterShift) {
     if (!this.enabled() || shift.status === "ended") return 0;
     const employee = this.store.findWaiterById(shift.waiterId);
@@ -427,15 +456,43 @@ export class TelegramService {
     if (employee?.telegramChatId.trim()) await this.clearWaiterCallMessages(employee);
   }
 
-  async notifyAdminShiftSummary(shift: WaiterShift) {
+  async notifyAdminShiftSummary(shift: WaiterShift, stage: AdminShiftSummaryStage = "final") {
     if (!this.enabled() || shift.roleKind !== "admin") return 0;
     const admin = this.store.findWaiterById(shift.waiterId);
     const chatId = admin?.telegramChatId.trim();
     if (!chatId) return 0;
     const card = this.store.snapshot().ownerNotifications.sberCardNumber.trim();
+    const closingShifts = this.store.closingShiftsForAdmin(shift.id);
+    const employeeRows = closingShifts.map((employeeShift) => {
+      const closing = employeeShift.checklist.filter((item) => item.phase === "closing");
+      const completed = closing.filter((item) => item.completedAt).length;
+      return `${completed === closing.length ? "✅" : "⚠️"} ${employeeShift.waiterName}: ${completed}/${closing.length}`;
+    });
+    if (stage === "preliminary") {
+      const sent = await this.request<TelegramMessage>("sendMessage", {
+        chat_id: chatId,
+        text: [
+          "⏳ Предварительный контроль закрытия",
+          `Дата: ${shift.morningGreetingDate}`,
+          employeeRows.length ? employeeRows.join("\n") : "Смен с чек-листом закрытия нет.",
+          `Предварительная оценка администратора: ${shift.score} из 5 ★`,
+          `Предварительный штраф: ${shift.adminPenaltyAmount} ₽`,
+          "До 01:00 напомните сотрудникам о пунктах, а невыполненные пункты примите в «Контроле сотрудников» с фото и оценкой."
+        ].join("\n"),
+        disable_notification: false
+      });
+      if (sent?.message_id) {
+        await this.sendUnclosedShiftWarnings(
+          chatId,
+          closingShifts.filter((employeeShift) => employeeShift.status !== "ended")
+        );
+      }
+      return sent?.message_id ? 1 : 0;
+    }
     const text = [
       "📊 Итоги смены администратора",
       `Дата: ${shift.morningGreetingDate}`,
+      employeeRows.length ? employeeRows.join("\n") : "Смен с чек-листом закрытия нет.",
       `Оценка: ${shift.score} из 5 ★`,
       shift.adminRatingPenaltyStars > 0 ? `Снижение за неподтверждённые пункты: −${shift.adminRatingPenaltyStars} ★` : "Неподтверждённых пунктов нет.",
       `Невыполненных пунктов сотрудников: ${shift.adminPenaltyItemCount}`,
@@ -465,7 +522,16 @@ export class TelegramService {
 
     if (query.data === "shift:start") {
       await this.answerCallback(query.id);
-      await this.showZonePicker(query.message.chat.id);
+      await this.showShiftPeriodPicker(query.message.chat.id);
+      return;
+    }
+
+    if (query.data.startsWith("shift:period:")) {
+      await this.answerCallback(query.id);
+      await this.showZonePicker(
+        query.message.chat.id,
+        normalizeShiftPeriod(query.data.slice("shift:period:".length))
+      );
       return;
     }
 
@@ -571,7 +637,7 @@ export class TelegramService {
       return;
     }
     if (normalized === "/shift" || normalized === "начать смену") {
-      await this.showZonePicker(message.chat.id);
+      await this.showShiftPeriodPicker(message.chat.id);
       return;
     }
     if (normalized === "/end_shift" || normalized === "закончить смену") {
@@ -672,7 +738,29 @@ export class TelegramService {
     });
   }
 
-  private async showZonePicker(chatId: string | number) {
+  private async showShiftPeriodPicker(chatId: string | number) {
+    const waiter = await this.requireWaiter(chatId);
+    if (!waiter) return;
+
+    const current = this.store.currentShiftForWaiter(waiter.id);
+    if (current) {
+      await this.sendChecklist(chatId, current, "Смена уже начата.");
+      return;
+    }
+
+    await this.request("sendMessage", {
+      chat_id: chatId,
+      text: "Выберите период смены:",
+      reply_markup: {
+        inline_keyboard: SHIFT_PERIODS.map((period) => [{
+          text: `${SHIFT_PERIOD_META[period].title} · ${SHIFT_PERIOD_META[period].time}`,
+          callback_data: `shift:period:${period}`
+        }])
+      }
+    });
+  }
+
+  private async showZonePicker(chatId: string | number, shiftPeriod: ShiftPeriod) {
     const waiter = await this.requireWaiter(chatId);
     if (!waiter) return;
 
@@ -688,28 +776,36 @@ export class TelegramService {
       return;
     }
 
-    const keyboard = zones.map((zone, index) => [{ text: zone, callback_data: `shift:zone:${index}` }]);
-    if (zones.length > 1) keyboard.push([{ text: "Все этажи", callback_data: "shift:zone:all" }]);
+    const keyboard = zones.map((zone, index) => [{ text: zone, callback_data: `shift:zone:${shiftPeriod}:${index}` }]);
+    if (zones.length > 1) keyboard.push([{ text: "Все этажи", callback_data: `shift:zone:${shiftPeriod}:all` }]);
     await this.request("sendMessage", {
       chat_id: chatId,
-      text: "На каком этаже вы начинаете смену?",
+      text: `${SHIFT_PERIOD_META[shiftPeriod].title} · ${SHIFT_PERIOD_META[shiftPeriod].time}\nНа каком этаже вы начинаете смену?`,
       reply_markup: { inline_keyboard: keyboard }
     });
   }
 
-  private async handleZoneSelection(callbackId: string, message: TelegramMessage, selection: string) {
+  private async handleZoneSelection(callbackId: string, message: TelegramMessage, payload: string) {
     const waiter = await this.requireWaiter(message.chat.id, callbackId);
     if (!waiter) return;
+
+    const [rawPeriod, selection] = payload.split(":");
+    if (!SHIFT_PERIODS.includes(rawPeriod as ShiftPeriod) || !selection) {
+      await this.answerCallback(callbackId, "Сначала выберите период смены", true);
+      await this.showShiftPeriodPicker(message.chat.id);
+      return;
+    }
+    const shiftPeriod = normalizeShiftPeriod(rawPeriod);
 
     const zones = this.store.listZones();
     const selectedZones = selection === "all" ? zones : [zones[Number(selection)]].filter(Boolean);
     if (!selectedZones.length) {
       await this.answerCallback(callbackId, "Список этажей изменился. Выберите заново.", true);
-      await this.showZonePicker(message.chat.id);
+      await this.showZonePicker(message.chat.id, shiftPeriod);
       return;
     }
 
-    const result = await this.store.startWaiterShift(waiter.id, selectedZones);
+    const result = await this.store.startWaiterShift(waiter.id, selectedZones, shiftPeriod);
     if (!result) {
       await this.answerCallback(callbackId, "Не удалось начать смену", true);
       return;
@@ -719,7 +815,7 @@ export class TelegramService {
     await this.request("editMessageText", {
       chat_id: message.chat.id,
       message_id: message.message_id,
-      text: `Смена: ${result.shift.zones.join(", ")}`
+      text: `${SHIFT_PERIOD_META[result.shift.shiftPeriod].title}: ${result.shift.zones.join(", ")}`
     });
 
     if (result.created && result.firstShiftToday) await this.sendMorningGreeting(message.chat.id, waiter);
@@ -1034,16 +1130,17 @@ export class TelegramService {
     const shift = result.shift;
 
     await this.clearWaiterCallMessages(waiter);
+    const completionText = shift.roleKind === "admin"
+      ? "Смена администратора завершена. Предварительный контроль придёт в 00:00, итоговая оценка и штраф — в 01:00."
+      : shift.checklist.some((item) => item.countsForRating !== false)
+        ? `Смена завершена. Столы сняты, уведомления отключены.\nРейтинг смены: ${shift.score} из 5 ★.`
+        : "Смена завершена. Столы сняты, уведомления отключены.\nВ этой смене не было заданий, влияющих на рейтинг.";
     await this.request("sendMessage", {
       chat_id: chatId,
-      text: shift.checklist.some((item) => item.countsForRating !== false)
-        ? `Смена завершена. Столы сняты, уведомления отключены.\nРейтинг смены: ${shift.score} из 5 ★.`
-        : "Смена завершена. Столы сняты, уведомления отключены.\nВ этой смене не было заданий, влияющих на рейтинг.",
+      text: completionText,
       reply_markup: menuKeyboard
     });
     if (shift.roleKind === "admin") {
-      if (this.coordinator?.notifyAdminShiftSummary) await this.coordinator.notifyAdminShiftSummary(shift);
-      else await this.notifyAdminShiftSummary(shift);
       await this.sendUnclosedShiftWarnings(chatId, unclosedEmployeeShifts);
     }
     if (this.coordinator?.processEndedShiftTasks) {

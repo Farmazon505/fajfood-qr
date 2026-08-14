@@ -95,6 +95,7 @@ import type {
 import {
   CHECKLIST_PHASE_META,
   CHECKLIST_PHASES,
+  SHIFT_PERIOD_META,
   formatChecklistWindow,
   groupChecklistByPhase
 } from "../shared/checklists";
@@ -3341,10 +3342,10 @@ function ChecklistEditor({
             <p className="muted">{!isWaiterRole
               ? `Чек-лист контролирует работу должности «${selectedRole?.name || "Сотрудник"}», но не влияет на вызовы со столов. Уведомления гостей получают только официанты.`
               : templatePhase === "closing"
-              ? "Все пункты закрытия необходимо выполнить до ручного завершения смены. Автозакрытие выполняется в 02:00."
+              ? "Чек-лист закрытия доступен вечерним и полным сменам с 23:00 до 01:00. Автозакрытие выполняется в 02:00."
               : templatePhase === "evening"
                 ? "Этот чек-лист назначается сотруднику, который открывает вечернюю смену. Обязательные пункты блокируют рабочие уведомления до выполнения."
-                : "Этот чек-лист назначается сотруднику утренней смены. Обязательные пункты блокируют рабочие уведомления официанта до выполнения."}</p>
+                : "Этот чек-лист назначается дневной и полной смене. Для полной смены он доступен только один час после регистрации."}</p>
             <div className="button-row">
               <button
                 className="ghost-button"
@@ -3941,7 +3942,7 @@ function EmployeeControl({
                 return (
                   <article className="employee-shift-control" key={shift.id}>
                     <div className="employee-shift-summary">
-                      <div><strong>{shift.roleName} · {shift.status === "ended" ? "смена завершена" : shift.status === "active" ? "на линии" : "выполняет чек-лист"}</strong><span>Начало: {formatDate(shift.startedAt)}{shift.endedAt ? ` · завершение: ${formatDate(shift.endedAt)}` : ""}</span></div>
+                      <div><strong>{shift.roleName} · {shift.status === "ended" ? "смена завершена" : shift.status === "active" ? "на линии" : "выполняет чек-лист"}</strong><span>{SHIFT_PERIOD_META[shift.shiftPeriod].title} · {SHIFT_PERIOD_META[shift.shiftPeriod].time} · начало: {formatDate(shift.startedAt)}{shift.endedAt ? ` · завершение: ${formatDate(shift.endedAt)}` : ""}</span></div>
                       <strong>{completed} / {total}</strong>
                     </div>
                     <div className="employee-progress-track"><span style={{ width: `${progress}%` }} /></div>
@@ -4039,7 +4040,7 @@ function EmployeeControl({
               {employeeShifts.slice(0, 30).map((shift) => {
                 const completed = shift.checklist.filter((item) => item.completedAt).length;
                 const reviewed = shift.checklist.filter((item) => item.adminScore !== null).length;
-                return <article key={shift.id}><div><strong>{shift.morningGreetingDate}</strong><span>{shift.roleName} · {shift.status === "ended" ? "завершена" : "в работе"}</span></div><div><strong>{completed} / {shift.checklist.length}</strong><span>выполнено</span></div><div><strong>{reviewed}</strong><span>оценено</span></div><div><strong>{shift.score ? `${shift.score} ★` : "—"}</strong><span>рейтинг смены</span></div></article>;
+                return <article key={shift.id}><div><strong>{shift.morningGreetingDate}</strong><span>{shift.roleName} · {SHIFT_PERIOD_META[shift.shiftPeriod].title} · {shift.status === "ended" ? "завершена" : "в работе"}</span></div><div><strong>{completed} / {shift.checklist.length}</strong><span>выполнено</span></div><div><strong>{reviewed}</strong><span>оценено</span></div><div><strong>{shift.score ? `${shift.score} ★` : "—"}</strong><span>рейтинг смены</span></div></article>;
               })}
               {!employeeShifts.length && <p className="muted">История смен пока отсутствует.</p>}
             </div>
@@ -4344,7 +4345,7 @@ function ShiftsAndRatings({
               <summary>
                 <span>
                   <strong>{shift.waiterName} · {shift.roleName}</strong>
-                  <small>{statusText(shift)} · {formatDate(shift.startedAt)} · {shift.zones.join(", ")}</small>
+                  <small>{SHIFT_PERIOD_META[shift.shiftPeriod].title} · {SHIFT_PERIOD_META[shift.shiftPeriod].time} · {statusText(shift)} · {formatDate(shift.startedAt)} · {shift.zones.join(", ")}</small>
                 </span>
                 <span className="shift-score">{shift.checklist.some((item) => item.countsForRating !== false) ? `${shift.score} / 5 ★` : "Без оценки"}</span>
               </summary>

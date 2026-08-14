@@ -2,6 +2,7 @@ import type {
   ChecklistPhase,
   ChecklistTimeWindow,
   ChecklistWindows,
+  ShiftPeriod,
   ShiftChecklistEntry
 } from "../server/types";
 
@@ -10,8 +11,24 @@ export const CHECKLIST_PHASES: ChecklistPhase[] = ["opening", "evening", "closin
 export const DEFAULT_CHECKLIST_WINDOWS: ChecklistWindows = {
   opening: { start: "10:00", end: "12:30" },
   evening: { start: "18:00", end: "19:00" },
-  closing: { start: "22:00", end: "02:00" }
+  closing: { start: "23:00", end: "01:00" }
 };
+
+export const SHIFT_PERIODS: ShiftPeriod[] = ["day", "evening", "full"];
+
+export const SHIFT_PERIOD_META: Record<ShiftPeriod, {
+  title: string;
+  time: string;
+  openingPhase: "opening" | "evening";
+  includesClosing: boolean;
+}> = {
+  day: { title: "Дневная смена", time: "11:00–18:00", openingPhase: "opening", includesClosing: false },
+  evening: { title: "Вечерняя смена", time: "18:00–24:00", openingPhase: "evening", includesClosing: true },
+  full: { title: "Полная смена", time: "11:00–24:00", openingPhase: "opening", includesClosing: true }
+};
+
+export const normalizeShiftPeriod = (value: unknown, fallback: ShiftPeriod = "full"): ShiftPeriod =>
+  value === "day" || value === "evening" || value === "full" ? value : fallback;
 
 export const CHECKLIST_PHASE_META: Record<ChecklistPhase, {
   icon: string;
@@ -74,7 +91,7 @@ const nextDateKey = (dateKey: string) => {
   return date.toISOString().slice(0, 10);
 };
 
-const venueClock = (at: Date, timeZone: string) => {
+export const venueClock = (at: Date, timeZone: string) => {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone,
     year: "numeric",
@@ -90,6 +107,17 @@ const venueClock = (at: Date, timeZone: string) => {
     minutes: Number(part("hour")) * 60 + Number(part("minute"))
   };
 };
+
+export const shiftPeriodForStart = (at: Date, timeZone: string): ShiftPeriod =>
+  venueClock(at, timeZone).minutes >= 18 * 60 ? "evening" : "full";
+
+export const formatVenueTime = (at: Date, timeZone: string) =>
+  new Intl.DateTimeFormat("ru-RU", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).format(at);
 
 export const checklistWindowStatus = (
   phase: ChecklistPhase,

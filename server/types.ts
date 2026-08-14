@@ -1,5 +1,7 @@
 export type CallStatus = "new" | "accepted" | "done" | "cancelled";
 export type ShiftStatus = "checklist" | "active" | "ended";
+export type ShiftPeriod = "day" | "evening" | "full";
+export type AdminShiftSummaryStage = "preliminary" | "final";
 export type AdminAccessRole = "admin" | "owner";
 export type AdminAccountSummary = {
   username: string;
@@ -174,11 +176,17 @@ export type WaiterShift = {
   checklist: ShiftChecklistEntry[];
   score: number;
   startedAt: string;
+  shiftPeriod: ShiftPeriod;
+  shiftPeriodSelected: boolean;
+  openingChecklistAvailableUntil: string | null;
   readyAt: string | null;
   endedAt: string | null;
   morningGreetingDate: string;
   checklistOverdueNotifiedAt: string | null;
+  closingChecklistAvailableNotifiedAt: string | null;
   closingChecklistIncompleteNotifiedAt: string | null;
+  adminPreliminarySummaryNotifiedAt: string | null;
+  adminFinalSummaryNotifiedAt: string | null;
   endedAutomatically: boolean;
   adminReviewRequiredCount: number;
   adminReviewMissingCount: number;

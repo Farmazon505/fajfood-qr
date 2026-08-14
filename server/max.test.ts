@@ -422,21 +422,35 @@ test("MAX manages a shift and shows the full checklist item text", async () => {
         user: { user_id: 20002 }
       }
     });
+    const periodPicker = requests.filter((request) => request.endpoint === "answers").at(-1);
+    assert.match(JSON.stringify(periodPicker?.options.body), /Полная смена/);
+    assert.match(JSON.stringify(periodPicker?.options.body), /shift:period:full/);
+
+    await max.handleUpdate({
+      update_type: "message_callback",
+      timestamp: Date.now(),
+      callback: {
+        callback_id: "choose-period",
+        payload: "shift:period:full",
+        user: { user_id: 20002 }
+      }
+    });
     const zonePicker = requests.filter((request) => request.endpoint === "answers").at(-1);
     assert.match(JSON.stringify(zonePicker?.options.body), /На каком этаже/);
-    assert.match(JSON.stringify(zonePicker?.options.body), /shift:zone:0/);
+    assert.match(JSON.stringify(zonePicker?.options.body), /shift:zone:full:0/);
 
     await max.handleUpdate({
       update_type: "message_callback",
       timestamp: Date.now(),
       callback: {
         callback_id: "start-shift",
-        payload: "shift:zone:0",
+        payload: "shift:zone:full:0",
         user: { user_id: 20002 }
       }
     });
     const shift = store.currentShiftForWaiter(waiter.id);
     assert.ok(shift);
+    assert.equal(shift.shiftPeriod, "full");
     assert.equal(shift.status, "checklist");
     const startedChecklist = requests.filter((request) => request.endpoint === "answers").at(-1);
     const startedBody = JSON.stringify(startedChecklist?.options.body);
