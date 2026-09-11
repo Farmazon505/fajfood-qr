@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, FormEvent, ReactNode } from "react";
 import { TableTentDesigner } from "./TableTentDesigner";
+import { isLoyaltyPopup, popupEligible, startMarketing, trackMarketing } from "./marketing";
+import { parseStoredVerification, VERIFICATION_STORAGE_KEY } from "./loyalty-verification-storage";
 import {
   adminSwipeAction,
   swipeAllowedTarget,
@@ -109,6 +111,7 @@ import {
 } from "../shared/shift-tasks";
 
 type Bootstrap = {
+  marketingEnabled?: boolean;
   settings: VenueSettings;
   offers: Offer[];
   actions: CallAction[];
@@ -269,7 +272,7 @@ type GuestView = "call" | "offers" | "loyalty" | "info" | "feedback";
 type SentAction = { id: string; label: string } | null;
 
 const guestViewFromPath = (path: string): GuestView => {
-  const view = path.split("/").filter(Boolean)[2];
+  const view = path.split("?")[0].split("/").filter(Boolean).at(-1);
   return view === "offers" || view === "loyalty" || view === "info" || view === "feedback" ? view : "call";
 };
 
@@ -280,7 +283,8 @@ export default function App() {
 }
 
 function GuestPage() {
-  const tableSlug = decodeURIComponent(window.location.pathname.replace(/^\/t\/?/, "").split("/")[0] || "");
+  const standalone = /^\/join\/?$/.test(window.location.pathname);
+  const tableSlug = standalone ? "" : decodeURIComponent(window.location.pathname.replace(/^\/t\/?/, "").split("/")[0] || "");
   const [data, setData] = useState<Bootstrap | null>(null);
   const [showPopups, setShowPopups] = useState(false);
   const [error, setError] = useState("");
@@ -291,7 +295,7 @@ function GuestPage() {
   const [tipBusy, setTipBusy] = useState(false);
   const [tipNotice, setTipNotice] = useState("");
   const [sentAction, setSentAction] = useState<SentAction>(null);
-  const [view, setView] = useState<GuestView>(() => guestViewFromPath(window.location.pathname));
+  const [view, setView] = useState<GuestView>(() => standalone ? "loyalty" : guestViewFromPath(window.location.pathname));
   const [loyalty, setLoyalty] = useState({
     name: "",
     phone: "",
@@ -300,10 +304,34 @@ function GuestPage() {
     marketingConsent: false
   });
   const [loyaltyProfile, setLoyaltyProfile] = useState<LoyaltyProfile | null>(null);
-  const [loyaltyVerification, setLoyaltyVerification] = useState<LoyaltyVerification | null>(null);
+  const [loyaltyVerification, setLoyaltyVerification] = useState<LoyaltyVerification | null>(() => {
+    try { return parseStoredVerification(sessionStorage.getItem(VERIFICATION_STORAGE_KEY)); } catch { return null; }
+  });
   const [loyaltyBusy, setLoyaltyBusy] = useState(false);
   const [loyaltyError, setLoyaltyError] = useState("");
   const [loyaltyStale, setLoyaltyStale] = useState(false);
+  const eligiblePopups = useMemo(() => (data?.popups || []).filter(popup => {
+    let lastSeen = 0;
+    try { lastSeen = Number(localStorage.getItem(`qrnastol.popupSeen:${popup.id}`) || 0); } catch { /* storage can be disabled */ }
+    let hasSavedCard = Boolean(loyaltyProfile);
+    try { hasSavedCard ||= Boolean(localStorage.getItem(LOYALTY_TOKEN_KEY)); } catch { /* storage can be disabled */ }
+    return popupEligible({ hasCard: hasSavedCard, isRegistering: view !== "call" || Boolean(loyaltyVerification) || loyaltyBusy || Boolean(busyAction || sentAction || orderModalAction),
+      isLoyalty: isLoyaltyPopup(popup), lastSeen, now: Date.now() });
+  }), [data?.popups, loyaltyProfile, loyaltyVerification, loyaltyBusy, view, busyAction, sentAction, orderModalAction]);
+
+  useEffect(() => {
+    try {
+      if (loyaltyVerification) sessionStorage.setItem(VERIFICATION_STORAGE_KEY, JSON.stringify(loyaltyVerification));
+      else sessionStorage.removeItem(VERIFICATION_STORAGE_KEY);
+    } catch { /* Some browsers disable persistent storage. The live session can still continue. */ }
+  }, [loyaltyVerification]);
+
+  useEffect(() => {
+    if (!data?.marketingEnabled || (!data.table && !standalone)) return;
+    let token: string | null = null;
+    try { token = localStorage.getItem(LOYALTY_TOKEN_KEY); } catch { /* optional persistent card */ }
+    startMarketing(data.table?.slug || "", token);
+  }, [data?.marketingEnabled, data?.table, standalone]);
 
   const [feedbackRating, setFeedbackRating] = useState(0);
   const [hoverRating, setHoverRating] = useState(0);
@@ -346,29 +374,27 @@ function GuestPage() {
   }, [loadGuest]);
 
   useEffect(() => {
-    const handlePopState = () => setView(guestViewFromPath(window.location.pathname));
+    const handlePopState = () => setView(/^\/join\/?$/.test(window.location.pathname) ? "loyalty" : guestViewFromPath(window.location.pathname));
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
   useEffect(() => {
-    if (!data || !data.popups || data.popups.length === 0) return;
-    const popupKey = `qrnastol.popupsSeen:${data.popups.map((popup) => popup.id).join(",")}`;
-    const seen = sessionStorage.getItem(popupKey) === "true";
-    if (!seen) {
-      const timer = setTimeout(() => setShowPopups(true), 600);
-      return () => clearTimeout(timer);
-    }
-  }, [data]);
+    if (!eligiblePopups.length) { setShowPopups(false); return; }
+    const timer = setTimeout(() => setShowPopups(true), 900);
+    return () => clearTimeout(timer);
+  }, [eligiblePopups]);
 
   const closePopups = () => {
-    if (data?.popups.length) {
-      sessionStorage.setItem(`qrnastol.popupsSeen:${data.popups.map((popup) => popup.id).join(",")}`, "true");
+    for (const popup of eligiblePopups) {
+      try { localStorage.setItem(`qrnastol.popupSeen:${popup.id}`, String(Date.now())); } catch { /* storage can be disabled */ }
     }
+    if (eligiblePopups.some(isLoyaltyPopup)) trackMarketing("popup_closed");
     setShowPopups(false);
   };
 
   const handlePopupAction = (url: string) => {
+    if (/(^|\/)loyalty\/?(?:\?|$)/.test(url)) trackMarketing("popup_clicked");
     closePopups();
     if (url.startsWith("http://") || url.startsWith("https://")) {
       window.open(url, "_blank", "noopener,noreferrer");
@@ -435,6 +461,7 @@ function GuestPage() {
           { headers: { authorization: `Bearer ${loyaltyVerification.accessToken}` } },
         );
         const result = await response.json().catch(() => ({}));
+        if (stopped) return;
         if (response.status === 202) {
           schedule();
           return;
@@ -467,6 +494,7 @@ function GuestPage() {
   }, [loyaltyVerification]);
 
   const navigateGuest = (nextView: GuestView) => {
+    if (standalone) return;
     const suffix = nextView === "call" ? "" : `/${nextView}`;
     window.history.pushState(null, "", `/t/${tableSlug}${suffix}`);
     setView(nextView);
@@ -521,14 +549,15 @@ function GuestPage() {
 
   const submitLoyalty = async (event: FormEvent) => {
     event.preventDefault();
-    if (!data?.table) return;
+    if (!data) return;
 
     setLoyaltyBusy(true);
+    trackMarketing("form_started");
     setLoyaltyError("");
     try {
       const result = await api<{ verification: LoyaltyVerification }>("/api/public/loyalty", {
         method: "POST",
-        body: JSON.stringify({ ...loyalty, tableSlug: data.table.slug })
+        body: JSON.stringify({ ...loyalty, tableSlug: data.table?.slug || "" })
       });
       setLoyaltyVerification(result.verification);
     } catch (requestError) {
@@ -597,7 +626,7 @@ function GuestPage() {
     );
   }
 
-  if (!data?.table) {
+  if (!data || (!data.table && !standalone)) {
     return (
       <main className="guest-shell empty-state">
         <QrCode size={34} />
@@ -619,17 +648,17 @@ function GuestPage() {
         }}
       >
         <div className="guest-hero__top">
-          <span className="table-badge">{table.name}</span>
-          <span className="service-pill">{table.zone}</span>
+          <span className="table-badge">{table?.name || "Карта гостя"}</span>
+          <span className="service-pill">{table?.zone || "Faj"}</span>
         </div>
         <div className="guest-hero__content">
-          <p>{settings.tagline}</p>
+          <p>{standalone ? "Бонусы в зале, на самовывоз и в доставке" : settings.tagline}</p>
           <h1>{settings.name}</h1>
           <span>{settings.description}</span>
         </div>
       </section>
 
-      {view !== "call" && (
+      {view !== "call" && !standalone && (
         <button className="back-link" onClick={() => navigateGuest("call")}>
           <ChevronLeft size={18} />
           На главную
@@ -899,7 +928,7 @@ function GuestPage() {
                   </button>
                 </div>
               ) : (
-              <form className="loyalty-form" onSubmit={submitLoyalty}>
+              <form className="loyalty-form" onSubmit={submitLoyalty} onFocusCapture={() => trackMarketing("form_started")}>
                 <input
                   required
                   autoComplete="name"
@@ -1073,7 +1102,7 @@ function GuestPage() {
         </section>
       )}
 
-      <nav className="guest-dock" aria-label="Навигация гостя">
+      {!standalone && <nav className="guest-dock" aria-label="Навигация гостя">
         <button className={view === "call" ? "active" : ""} onClick={() => navigateGuest("call")}>
           <BellRing size={18} />
           Вызов
@@ -1090,11 +1119,11 @@ function GuestPage() {
           <MapPin size={18} />
           Инфо
         </button>
-      </nav>
+      </nav>}
 
-      {showPopups && data?.popups && data.popups.length > 0 && (
+      {showPopups && eligiblePopups.length > 0 && (
         <GuestPopupGallery
-          popups={data.popups}
+          popups={eligiblePopups}
           onClose={closePopups}
           onAction={handlePopupAction}
         />
@@ -4718,6 +4747,15 @@ function GuestPopupGallery({
   const [index, setIndex] = useState(0);
   const [touchStart, setTouchStart] = useState<number | null>(null);
   const popup = popups[index];
+  const closeButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    closeButton.current?.focus();
+  }, []);
+  useEffect(() => {
+    if (!popup) return;
+    try { localStorage.setItem(`qrnastol.popupSeen:${popup.id}`, String(Date.now())); } catch { /* storage can be disabled */ }
+    if (isLoyaltyPopup(popup)) trackMarketing("popup_shown");
+  }, [popup]);
   if (!popup) return null;
 
   const finishSwipe = (clientX: number) => {
@@ -4732,6 +4770,18 @@ function GuestPopupGallery({
     <div className="popup-overlay" onClick={onClose}>
       <div
         className="popup-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="guest-popup-title"
+        onKeyDown={event => {
+          if (event.key === "Escape") onClose();
+          if (event.key === "Tab") {
+            const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+            const first = buttons[0], last = buttons.at(-1);
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+          }
+        }}
         onClick={(e) => e.stopPropagation()}
         onTouchStart={(event) => setTouchStart(event.touches[0]?.clientX ?? null)}
         onTouchEnd={(event) => finishSwipe(event.changedTouches[0]?.clientX ?? 0)}
@@ -4743,11 +4793,11 @@ function GuestPopupGallery({
             <Gift size={48} color="rgba(255,253,250,0.8)" />
           </div>
         )}
-        <button className="popup-close icon-button" onClick={onClose} aria-label="Закрыть">
+        <button ref={closeButton} className="popup-close icon-button" onClick={onClose} aria-label="Закрыть">
           <X size={20} />
         </button>
         <div className="popup-body">
-          <h2 className="popup-title">{popup.title}</h2>
+          <h2 id="guest-popup-title" className="popup-title">{popup.title}</h2>
           <p className="popup-text" style={{ whiteSpace: "pre-wrap" }}>{popup.body}</p>
 
           {popup.buttonText && (
@@ -4889,7 +4939,7 @@ function PopupsEditor({
       <div className="panel-heading">
         <h2>Всплывающие уведомления</h2>
         {!editingPopup && (
-          <button className="primary-button" onClick={() => setEditingPopup({ active: true })}>
+          <button className="primary-button" onClick={() => setEditingPopup({ active: false, purpose: "loyalty", title: "Карта гостя Faj", body: "Сохраняйте бонусы и пользуйтесь картой в зале, на самовывоз и в доставке. Оформите карту на телефоне — условия программы покажем перед регистрацией.", buttonText: "Оформить карту", buttonUrl: "/loyalty" })}>
             <Plus size={16} /> Создать уведомление
           </button>
         )}
@@ -4943,6 +4993,15 @@ function PopupsEditor({
                 onChange={(e) => setEditingPopup({ ...editingPopup, buttonText: e.target.value })}
                 placeholder="Например: Получить карту"
               />
+            </label>
+
+            <label>
+              <strong>Назначение предложения</strong>
+              <select value={editingPopup.purpose || "general"} onChange={e => setEditingPopup({ ...editingPopup, purpose: e.target.value as "general" | "loyalty" })}>
+                <option value="general">Общее уведомление</option>
+                <option value="loyalty">Оформление карты гостя</option>
+              </select>
+              <small>Предложение карты не показывается владельцу карты и во время регистрации. Для запуска требуется включённый пилот программы.</small>
             </label>
 
             <label>

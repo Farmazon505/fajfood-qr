@@ -366,6 +366,9 @@ export type ServiceCall = {
 };
 
 export type LoyaltyLead = {
+  marketingVisitTokens?: string[];
+  marketingSyncPending?: boolean;
+  marketingSyncError?: string;
   id: string;
   name: string;
   phone: string;
@@ -411,6 +414,7 @@ export type GuestFeedback = {
 };
 
 export type PopupNotification = {
+  purpose?: "general" | "loyalty";
   id: string;
   title: string;
   body: string;

@@ -28,6 +28,7 @@ import { OwnerWebPushService } from "./web-push";
 import { generatePerformanceInsights, isPerformanceAiConfigured } from "./performance-ai";
 import type { CallStatus, ChecklistItem } from "./types";
 import { crmLoyalty } from "./crm-loyalty";
+import { installMarketingRoutes, marketingEnabled, marketingTokens, retryMarketingRegistrations } from "./marketing";
 import {
   CrmReservationsClient,
   CrmReservationsError,
@@ -98,6 +99,8 @@ const publicLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false
 });
+
+installMarketingRoutes(app, store, rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false }));
 
 const adminLoginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -494,6 +497,8 @@ app.get("/api/public/bootstrap", (request, response) => {
     settings: snapshot.settings,
     offers: snapshot.offers,
     actions: snapshot.actions,
+    popups: snapshot.popups.filter(p => !(p.purpose === "loyalty" || /(^|\/)loyalty\/?(?:\?|$)/.test(p.buttonUrl)) || config.LOYALTY_POPUP_ENABLED === "true"),
+    marketingEnabled: marketingEnabled(),
     table,
     publicBaseUrl: publicBaseUrl(),
     legal: {
@@ -614,6 +619,9 @@ app.post("/api/public/loyalty", publicLimiter, loyaltyLimiter, async (request, r
   const acceptedAt = new Date().toISOString();
   const accessToken = randomBytes(32).toString("base64url");
   const commonLeadData = {
+    marketingVisitTokens: marketingEnabled() ? marketingTokens(request) : [],
+    marketingSyncPending: false,
+    marketingSyncError: "",
     name: parsed.data.name.trim(),
     phone,
     birthday: parsed.data.birthday,
@@ -744,9 +752,11 @@ app.get("/api/public/loyalty/verification/:verificationId", publicLimiter, async
       welcomeBonusStatus: profile.welcomeBonus.status,
       phoneVerificationChannel: verification.channel,
       phoneVerifiedAt: verification.verifiedAt,
+      marketingSyncPending: Boolean(lead.marketingVisitTokens?.length),
       syncError: "",
     });
     response.status(201).json({ ok: true, accessToken, profile });
+    void retryMarketingRegistrations(store);
   } catch (error) {
     const message = error instanceof Error ? error.message : "CRM временно недоступна";
     await store.updateLoyaltyLead(lead.id, { syncError: message });
@@ -1565,4 +1575,6 @@ app.listen(config.PORT, config.HOST, () => {
   reservationMonitor.start();
   void refreshOffersFromCrm();
   setInterval(() => void refreshOffersFromCrm(), 5 * 60 * 1000).unref();
+  void retryMarketingRegistrations(store);
+  setInterval(() => void retryMarketingRegistrations(store), 60_000).unref();
 });

@@ -81,6 +81,10 @@ export class CrmLoyaltyService {
     return data.profile;
   }
 
+  async marketing<T = { recorded: boolean }>(payload: unknown) {
+    return this.request<T>("/api/integrations/loyalty/marketing", { method: "POST", body: JSON.stringify(payload) }, 4000);
+  }
+
   async getProfile(userId: string) {
     const data = await this.request<{ profile: LoyaltyProfile }>(
       `/api/integrations/loyalty/members/${encodeURIComponent(userId)}`,
@@ -119,13 +123,13 @@ export class CrmLoyaltyService {
     return data.verification;
   }
 
-  private async request<T>(path: string, options: RequestInit): Promise<T> {
+  private async request<T>(path: string, options: RequestInit, timeoutMs = 20_000): Promise<T> {
     if (!this.configured()) {
       throw new Error("Интеграция с CRM пока не настроена");
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20_000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(`${config.CRM_BASE_URL.replace(/\/$/, "")}${path}`, {
         ...options,
