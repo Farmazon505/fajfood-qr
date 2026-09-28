@@ -2512,7 +2512,14 @@ export class Store {
     await this.persist();
   }
 
-  async acceptCall(callId: string, waiterId: string) {
+  async setCallWorkManaged(callId: string) {
+    const call = this.data.calls.find((item) => item.id === callId);
+    if (call?.status !== "accepted") return;
+    call.workManaged = true;
+    await this.persist();
+  }
+
+  async acceptCall(callId: string, waiterId: string, workManaged = false) {
     const call = this.data.calls.find((item) => item.id === callId);
     const table = call ? this.data.tables.find((item) => item.id === call.tableId) : null;
     const waiter = this.findWaiterById(waiterId);
@@ -2531,6 +2538,7 @@ export class Store {
     if (!allowed) return { call: structuredClone(call), accepted: false, allowed: false };
 
     call.status = "accepted";
+    call.workManaged = workManaged;
     call.acceptedAt = now();
     call.acceptedByStaffId = call.acceptedByStaffId || waiter.id;
     call.lastAcceptedByStaffId = waiter.id;

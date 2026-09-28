@@ -24,6 +24,7 @@ import { Store, venueOperationalDateKey } from "./store";
 import { TelegramService } from "./telegram";
 import { MaxService } from "./max";
 import { MessagingService } from "./messaging";
+import { installFajWorkRoutes } from "./faj-work";
 import { OwnerWebPushService } from "./web-push";
 import { generatePerformanceInsights, isPerformanceAiConfigured } from "./performance-ai";
 import type { CallStatus, ChecklistItem } from "./types";
@@ -176,6 +177,9 @@ const crmIntegrationAuthorized = (request: express.Request) => {
   if (configured.length < 32 || provided.length !== configured.length) return false;
   return timingSafeEqual(Buffer.from(configured), Buffer.from(provided));
 };
+
+app.use("/api/integrations/crm/work", rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: true, legacyHeaders: false }));
+installFajWorkRoutes(app, store, messaging, crmIntegrationAuthorized);
 
 const staffAccess = (request: express.Request) => {
   const identity = validateTelegramInitData(

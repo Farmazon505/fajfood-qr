@@ -5,6 +5,7 @@ import type { AdminShiftSummaryStage, DeliveryPickupAlert, DiningTable, ServiceC
 import { config } from "./config";
 import type { OwnerWebPushService } from "./web-push";
 import { nextDateKey } from "../shared/shift-tasks";
+import { crmWork } from "./crm-work";
 
 type CallNotification = {
   call: ServiceCall;
@@ -18,6 +19,7 @@ export class MessagingService {
   private escalationRunning = false;
   private dailyMaintenanceTimer: ReturnType<typeof setInterval> | null = null;
   private dailyMaintenanceRunning = false;
+  private workMaintenanceRunning = false;
 
   constructor(
     private store: Store,
@@ -90,6 +92,10 @@ export class MessagingService {
     for (const result of results) {
       if (result.status === "rejected") console.error("[messaging] Ошибка удаления сообщения:", result.reason);
     }
+  }
+
+  async clearEmployeeCallNotifications(waiterId: string) {
+    await Promise.allSettled([this.telegram.clearEmployeeCallNotifications(waiterId), this.max.clearEmployeeCallNotifications(waiterId)]);
   }
 
   async notifyOwnerEscalation(call: ServiceCall) {
@@ -386,6 +392,11 @@ export class MessagingService {
     if (this.escalationRunning) return;
     this.escalationRunning = true;
     try {
+      if (!this.workMaintenanceRunning) {
+        this.workMaintenanceRunning = true;
+        void Promise.allSettled([this.max.retryPendingDeletes?.(), crmWork.flush()])
+          .finally(() => { this.workMaintenanceRunning = false; });
+      }
       await this.processDailyMaintenance(at);
       for (const call of this.store.callsNeedingNotificationRetry(at)) {
         await this.syncCall(call);

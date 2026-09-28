@@ -306,6 +306,7 @@ export type TelegramMessageRef = {
 };
 
 export type MaxMessageRef = {
+  deletePending?: boolean;
   userId: string;
   messageId: string;
   recipientRole: "waiter" | "admin" | "owner" | "unknown";
@@ -331,6 +332,7 @@ export type CallReasonCount = {
 };
 
 export type ServiceCall = {
+  workManaged?: boolean;
   id: string;
   threadVersion: number;
   tableId: string;

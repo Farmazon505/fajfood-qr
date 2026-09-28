@@ -5,6 +5,8 @@ import { Agent as HttpsAgent } from "node:https";
 import path from "node:path";
 import fetch from "node-fetch";
 import { config, publicBaseUrl } from "./config";
+import { crmWork } from "./crm-work";
+import { workCallAccess } from "./faj-work";
 import type { AdminEmployeeShiftEndResult, ShiftEndResult, Store } from "./store";
 import type {
   AdminShiftSummaryStage,
@@ -120,6 +122,8 @@ export class MaxService {
   private rolloverReasonDrafts = new Map<number, string>();
   private coordinator: MaxCallCoordinator | null = null;
   private httpsAgent: HttpsAgent | undefined;
+  private deletionQueue: Promise<unknown> = Promise.resolve();
+  private nextDeletionAt = 0;
 
   constructor(
     private store: Store,
@@ -476,6 +480,7 @@ export class MaxService {
     const waiter = this.store.findWaiterById(task.waiterId);
     const userId = waiter?.maxUserId?.trim();
     if (!userId) return false;
+    if (await crmWork.notify(userId, `task:${task.id}`, this.shiftTaskBody(task).text)) return true;
     const sent = await this.sendMessage(userId, this.shiftTaskBody(task));
     return Boolean(sent);
   }
@@ -485,6 +490,7 @@ export class MaxService {
     const waiter = this.store.findWaiterById(task.waiterId);
     const userId = waiter?.maxUserId?.trim();
     if (!userId) return false;
+    if (await crmWork.notify(userId, `rollover:${record.id}`, shiftTaskRolloverText(task, record))) return true;
     const sent = await this.sendMessage(userId, {
       text: shiftTaskRolloverText(task, record),
       attachments: this.keyboard([[
@@ -525,6 +531,7 @@ export class MaxService {
     const userId = employee?.maxUserId.trim();
     if (!userId) return 0;
     const window = this.store.snapshot().checklistWindows.closing;
+    if (await crmWork.notify(userId, `closing:${shift.id}`, `Чек-лист закрытия доступен с ${window.start} до ${window.end}. Откройте FAJ Work → Чек-листы.`)) return 1;
     const sent = await this.sendMessage(userId, this.checklistBody(
       shift,
       `🌙 Чек-лист закрытия доступен\nЗаполните его с ${window.start} до ${window.end} текущей смены. После 01:00 отметить пункты будет нельзя.`
@@ -537,6 +544,7 @@ export class MaxService {
     const employee = this.store.findWaiterById(shift.waiterId);
     const userId = employee?.maxUserId.trim();
     if (!userId) return 0;
+    if (await crmWork.notify(userId, `end:${shift.id}:${Math.floor(Date.now() / 60_000)}`, "Администратор просит завершить смену. Проверьте чек-лист закрытия в FAJ Work.", "shift")) return 1;
     const sent = await this.sendMessage(userId, {
       text: [
         "⚠️ Напоминание о завершении смены",
@@ -618,10 +626,49 @@ export class MaxService {
   }
 
   async closeCallMessages(call: ServiceCall) {
-    for (const message of call.maxMessages) {
-      await this.request("DELETE", "messages", { query: { message_id: message.messageId } });
+    const previous = this.callQueues.get(call.id) ?? Promise.resolve([]);
+    const task = previous.catch(() => []).then(() => this.deleteCallRefs(call.id));
+    this.callQueues.set(call.id, task);
+    try { await task; } finally { if (this.callQueues.get(call.id) === task) this.callQueues.delete(call.id); }
+  }
+
+  private async deleteCallRefs(callId: string, predicate: (ref: MaxMessageRef) => boolean = () => true) {
+    const call = this.store.findCallById(callId);
+    if (!call) return [];
+    const refs = call.maxMessages.map((ref) => predicate(ref) ? { ...ref, deletePending: true } : ref);
+    await this.store.replaceMaxMessages(callId, refs);
+    const remaining: MaxMessageRef[] = [];
+    for (const ref of refs) {
+      if (!ref.deletePending || !await this.deleteMessageRef(ref)) remaining.push(ref);
     }
-    await this.store.replaceMaxMessages(call.id, []);
+    await this.store.replaceMaxMessages(callId, remaining);
+    return remaining;
+  }
+
+  private deleteMessageRef(ref: MaxMessageRef): Promise<boolean> {
+    const operation = this.deletionQueue.catch(() => undefined).then(async () => {
+      const delay = this.nextDeletionAt - Date.now();
+      if (delay > 0) await wait(delay);
+      this.nextDeletionAt = Date.now() + 550;
+      const result = await this.request<{ success: boolean }>("DELETE", "messages", { query: { message_id: ref.messageId } });
+      return result?.success === true;
+    });
+    this.deletionQueue = operation;
+    return operation;
+  }
+
+  async retryPendingDeletes() {
+    for (const call of this.store.snapshot().calls.filter((item) => item.maxMessages.length && (item.maxMessages.some((ref) => ref.deletePending)
+      || ["done", "cancelled"].includes(item.status) || (item.workManaged && item.status === "accepted" && item.routingStage === "waiter")))) {
+      const previous = this.callQueues.get(call.id) ?? Promise.resolve([]);
+      const task = previous.catch(() => []).then(() => this.deleteCallRefs(call.id, (ref) => {
+        const current = this.store.findCallById(call.id);
+        return Boolean(ref.deletePending) || ["done", "cancelled"].includes(current?.status || "")
+          || Boolean(current?.workManaged && current.status === "accepted" && current.routingStage === "waiter");
+      }));
+      this.callQueues.set(call.id, task);
+      try { await task; } finally { if (this.callQueues.get(call.id) === task) this.callQueues.delete(call.id); }
+    }
   }
 
   private async handleCallCallback(callbackId: string, userId: number, data: string) {
@@ -634,7 +681,8 @@ export class MaxService {
     const [, action, callId] = data.split(":");
     if (!callId) return;
     if (action === "accepted") {
-      const result = await this.store.acceptCall(callId, waiter.id);
+      const workManaged = await crmWork.linked(String(userId)).catch(() => false);
+      const result = await this.store.acceptCall(callId, waiter.id, workManaged);
       if (!result) {
         await this.answerCallback(callbackId, "Вызов не найден");
         return;
@@ -648,7 +696,7 @@ export class MaxService {
         : "другой сотрудник";
       await this.answerCallback(
         callbackId,
-        result.accepted ? "Вызов принят" : `Уже принял: ${acceptedBy || "другой сотрудник"}`
+        result.accepted ? (workManaged ? "Принято. Завершите в FAJ Work → Мои столы" : "Вызов принят") : `Уже принял: ${acceptedBy || "другой сотрудник"}`
       );
       if (this.coordinator) await this.coordinator.syncCall(result.call);
       else {
@@ -701,6 +749,10 @@ export class MaxService {
     const current = this.store.findCallById(callId);
     if (!current || current.status !== "accepted") {
       await this.answerCallback(callbackId, "Вызов уже закрыт");
+      return;
+    }
+    if (!workCallAccess(this.store, waiter, current).complete) {
+      await this.answerCallback(callbackId, "Завершить вызов может принявший сотрудник или администратор своей зоны");
       return;
     }
     const call = await this.store.completeCall(callId);
@@ -1214,6 +1266,9 @@ export class MaxService {
     recipients: Array<{ member: Waiter; recipientRole: "waiter" | "admin" | "owner" }>,
     settings: VenueSettings
   ) {
+    if (["done", "cancelled"].includes(call.status) || (call.workManaged && call.status === "accepted" && call.routingStage === "waiter")) {
+      return this.deleteCallRefs(call.id);
+    }
     const text = this.callText(call, table, settings);
     if (!this.enabled()) {
       console.log("[max disabled] waiter call:", text);
@@ -1223,23 +1278,13 @@ export class MaxService {
     const targetKeys = new Set(
       recipients.map((recipient) => `${recipient.member.maxUserId.trim()}:${recipient.recipientRole}`)
     );
-    const allWarningRefs = call.maxMessages.filter((message) => message.kind === "warning");
-    const warningRefs = call.adminWarningSentAt ? allWarningRefs : [];
-    if (!call.adminWarningSentAt) {
-      for (const message of allWarningRefs) {
-        await this.request("DELETE", "messages", { query: { message_id: message.messageId } });
-      }
-    }
-    const primaryRefs = call.maxMessages.filter((message) => message.kind === "call");
+    const currentRefs = await this.deleteCallRefs(call.id, (message) => Boolean(message.deletePending)
+      || (message.kind === "warning" ? !call.adminWarningSentAt : !targetKeys.has(`${message.userId}:${message.recipientRole}`)));
+    const warningRefs = currentRefs.filter((message) => message.kind === "warning" || message.deletePending);
+    const primaryRefs = currentRefs.filter((message) => message.kind === "call" && !message.deletePending);
     const existingByTarget = new Map(
       primaryRefs.map((message) => [`${message.userId}:${message.recipientRole}`, message])
     );
-
-    for (const message of primaryRefs) {
-      if (!targetKeys.has(`${message.userId}:${message.recipientRole}`)) {
-        await this.request("DELETE", "messages", { query: { message_id: message.messageId } });
-      }
-    }
 
     const refs: MaxMessageRef[] = [];
     for (const recipient of recipients) {
@@ -1269,6 +1314,10 @@ export class MaxService {
           refs.push(existing);
           continue;
         }
+        // A timeout does not prove the message disappeared. Keep its ID so
+        // retries do not accumulate duplicate cards in a waiter's dialogue.
+        refs.push(existing);
+        continue;
       }
 
       const sent = await this.sendMessage(userId, body);
@@ -1323,10 +1372,12 @@ export class MaxService {
 
   private async clearWaiterCallMessages(waiter: Waiter) {
     const refs = this.store.activeCallMessagesForMaxUser(waiter.maxUserId);
-    for (const ref of refs) {
-      await this.request("DELETE", "messages", { query: { message_id: ref.messageId } });
+    for (const callId of new Set(refs.map((ref) => ref.callId))) {
+      const previous = this.callQueues.get(callId) ?? Promise.resolve([]);
+      const task = previous.catch(() => []).then(() => this.deleteCallRefs(callId, (ref) => ref.userId === waiter.maxUserId));
+      this.callQueues.set(callId, task);
+      try { await task; } finally { if (this.callQueues.get(callId) === task) this.callQueues.delete(callId); }
     }
-    await this.store.removeMaxMessagesForUser(waiter.maxUserId);
   }
 
   private async requireWaiter(userId: number, callbackId?: string) {
