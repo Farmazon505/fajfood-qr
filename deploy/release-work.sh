@@ -28,7 +28,7 @@ mkdir -p "$STAGE" "$BACKUP"
 chmod 700 "$BACKUP"
 tar -xzf "$ARCHIVE" -C "$STAGE"
 chown -R qrnastol:qrnastol "$STAGE"
-runuser -u qrnastol -- bash -c 'cd "$1"; npm ci --ignore-scripts; npm run build; npm test' -- "$STAGE"
+runuser -u qrnastol -- bash -euc 'cd "$1"; npm ci --ignore-scripts; npm run build; npm test' -- "$STAGE"
 fingerprint() {
   python3 - <<'PY'
 import json,hashlib
