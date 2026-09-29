@@ -76,6 +76,7 @@ export function createLoyaltyRouter(options: {
       const verification = await crm.startVerification(payload(attempt));
       await store.updateLoyaltyVerification(leadId, attempt.id, { verificationId: verification.verificationId, verificationExpiresAt: verification.expiresAt });
       response.status(202).json({ ok: true, verification: { id: verification.verificationId, accessToken,
+        phoneMasked: `••• ${phone.slice(-4)}`,
         expiresAt: verification.expiresAt, channels: verification.channels } });
     } catch {
       response.status(502).json({ error: "Не удалось начать подтверждение номера. Повторите попытку позже." });

@@ -13,6 +13,13 @@ import {
 } from "./store";
 import type { ChecklistWindows, WaiterShift } from "./types";
 
+// Shift fixtures start during the operating day, independently of deploy time.
+// Midnight/closing boundaries below supply their own explicit dates.
+test.beforeEach(t => {
+  assert.ok("mock" in t);
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-29T08:00:00Z") });
+});
+
 const TEST_CHECKLIST_WINDOWS: ChecklistWindows = {
   opening: { start: "00:00", end: "23:59" },
   evening: { start: "18:00", end: "19:00" },

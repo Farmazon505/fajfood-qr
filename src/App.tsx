@@ -149,6 +149,7 @@ type LoyaltyProfile = {
 };
 
 type LoyaltyVerification = {
+  phoneMasked?: string;
   id: string;
   accessToken: string;
   expiresAt: string;
@@ -234,7 +235,9 @@ const api = async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
   });
 
   const json = await response.json().catch(() => ({}));
-  if (!response.ok) throw new ApiRequestError(json.error || "Ошибка запроса", response.status);
+  if (!response.ok) throw new ApiRequestError(json.error || (response.status === 429
+    ? "Слишком много попыток. Подождите несколько минут и повторите."
+    : "Не удалось выполнить запрос. Попробуйте ещё раз через несколько секунд."), response.status);
   return json as T;
 };
 
@@ -905,8 +908,8 @@ function GuestPage() {
                   <div className="phone-verification__heading">
                     <ShieldCheck size={22} />
                     <div>
-                      <strong>Подтвердите свой номер</strong>
-                      <span>Выберите удобный бесплатный способ. Карта появится здесь автоматически.</span>
+                      <strong>Подтвердите номер{loyaltyVerification.phoneMasked ? ` ${loyaltyVerification.phoneMasked}` : " телефона"}</strong>
+                      <span>Выберите мессенджер с этим номером. Поделитесь своим контактом в боте и вернитесь сюда — карта появится автоматически.</span>
                     </div>
                   </div>
                   <div className="verification-channel-grid">

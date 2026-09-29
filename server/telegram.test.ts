@@ -6,6 +6,11 @@ import test from "node:test";
 import { CHECKLIST_ITEM_COOLDOWN_MS, Store } from "./store";
 import { TelegramService } from "./telegram";
 
+test.beforeEach(t => {
+  assert.ok("mock" in t);
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-29T08:00:00Z") });
+});
+
 test("Telegram retries a transient API failure before reporting delivery failure", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "qrnastol-telegram-retry-"));
   const originalFetch = globalThis.fetch;

@@ -30,6 +30,7 @@ import { generatePerformanceInsights, isPerformanceAiConfigured } from "./perfor
 import type { CallStatus, ChecklistItem } from "./types";
 import { crmLoyalty } from "./crm-loyalty";
 import { createLoyaltyRouter } from "./loyalty-routes";
+import { createLoyaltyRateLimits } from "./loyalty-rate-limits";
 import { installMarketingRoutes, marketingEnabled, marketingTokens, retryMarketingRegistrations } from "./marketing";
 import {
   CrmReservationsClient,
@@ -111,12 +112,7 @@ const adminLoginLimiter = rateLimit({
   legacyHeaders: false
 });
 
-const loyaltyLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 5,
-  standardHeaders: true,
-  legacyHeaders: false
-});
+const loyaltyLimits = createLoyaltyRateLimits();
 
 const performanceAiLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -543,9 +539,9 @@ app.get("/api/public/tips", publicLimiter, (request, response) => {
   });
 });
 
-app.use("/api/public/loyalty", publicLimiter, createLoyaltyRouter({
+app.use("/api/public/loyalty", loyaltyLimits.reads, createLoyaltyRouter({
   store,
-  limiter: loyaltyLimiter,
+  limiter: loyaltyLimits.attempts,
   visitTokens: (request) => marketingEnabled() ? marketingTokens(request) : [],
   onRegistered: () => { void retryMarketingRegistrations(store); },
 }));

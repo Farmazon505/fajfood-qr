@@ -17,6 +17,11 @@ import type { TelegramService } from "./telegram";
 import type { AdminShiftSummaryStage, DeliveryPickupAlert, ServiceCall, ShiftTask, ShiftTaskRolloverRecord, WaiterShift } from "./types";
 import type { OwnerWebPushService } from "./web-push";
 
+test.beforeEach(t => {
+  assert.ok("mock" in t);
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-29T08:00:00Z") });
+});
+
 class FakeTransport {
   notifications: ServiceCall[] = [];
   ownerAlerts: string[] = [];
