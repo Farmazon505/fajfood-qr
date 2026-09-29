@@ -9,6 +9,8 @@ export type LoyaltyProfile = {
   cardNumber: string | null;
   bonusBalance: number;
   balanceUpdatedAt: string | null;
+  alreadyRegistered?: boolean;
+  balanceIsFresh?: boolean;
   welcomeBonus: {
     amount: number;
     status: string;

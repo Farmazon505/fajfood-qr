@@ -134,6 +134,8 @@ type LoyaltyProfile = {
   cardNumber: string | null;
   bonusBalance: number;
   balanceUpdatedAt: string | null;
+  alreadyRegistered?: boolean;
+  balanceIsFresh?: boolean;
   welcomeBonus: {
     amount: number;
     status: string;
@@ -470,7 +472,7 @@ function GuestPage() {
 
         localStorage.setItem(LOYALTY_TOKEN_KEY, loyaltyVerification.accessToken);
         setLoyaltyProfile(result.profile as LoyaltyProfile);
-        setLoyaltyStale(false);
+        setLoyaltyStale(Boolean(result.stale));
         setLoyaltyVerification(null);
         setLoyaltyError("");
         setLoyalty({
@@ -843,7 +845,7 @@ function GuestPage() {
               </div>
               <div className="loyalty-balance">
                 <span>Бонусный баланс</span>
-                <strong>{Math.round(loyaltyProfile.bonusBalance)} ₽</strong>
+                <strong>{loyaltyProfile.bonusBalance.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} бонусов</strong>
               </div>
               {loyaltyProfile.cardNumber ? (
                 <div className="loyalty-qr">
@@ -861,13 +863,16 @@ function GuestPage() {
                 <div className="error-line">Карта выпускается. Обновите баланс через несколько секунд.</div>
               )}
               <div className={`bonus-status status-${loyaltyProfile.welcomeBonus.status.toLowerCase()}`}>
-                {loyaltyProfile.welcomeBonus.status === "GRANTED" && (
+                {loyaltyProfile.alreadyRegistered && (
+                  <><CheckCircle2 size={17} /> Вы уже зарегистрированы в программе лояльности. Открыта ваша действующая карта.</>
+                )}
+                {!loyaltyProfile.alreadyRegistered && loyaltyProfile.welcomeBonus.status === "GRANTED" && (
                   <><CheckCircle2 size={17} /> Приветственные {Math.round(loyaltyProfile.welcomeBonus.amount)} ₽ начислены</>
                 )}
-                {loyaltyProfile.welcomeBonus.status === "SKIPPED_EXISTING_MEMBER" && (
-                  <>Карта подключена к существующему участнику программы</>
+                {!loyaltyProfile.alreadyRegistered && loyaltyProfile.welcomeBonus.status === "SKIPPED_EXISTING_MEMBER" && (
+                  <>Вы уже зарегистрированы в программе лояльности. Открыта ваша действующая карта.</>
                 )}
-                {!["GRANTED", "SKIPPED_EXISTING_MEMBER"].includes(loyaltyProfile.welcomeBonus.status) && (
+                {!loyaltyProfile.alreadyRegistered && !["GRANTED", "SKIPPED_EXISTING_MEMBER"].includes(loyaltyProfile.welcomeBonus.status) && (
                   <>Начисление бонусов обрабатывается</>
                 )}
               </div>
@@ -890,10 +895,10 @@ function GuestPage() {
             </div>
           ) : (
             <>
-              <p>{settings.loyaltyText}</p>
+              <p>Откройте свою карту или зарегистрируйтесь по номеру телефона. Одна карта действует в зале, на доставку и самовывоз.</p>
               <div className="welcome-bonus-note">
                 <Gift size={20} />
-                <span><strong>500 ₽</strong> после первой регистрации в программе</span>
+                <span><strong>500 бонусов</strong> новым участникам — один раз. Если карта уже есть, откроем её с вашим балансом.</span>
               </div>
               {loyaltyVerification ? (
                 <div className="phone-verification">
@@ -976,7 +981,7 @@ function GuestPage() {
                   </span>
                 </label>
                 <button type="submit" className="primary-button" disabled={loyaltyBusy || !loyalty.personalDataConsent}>
-                  {loyaltyBusy ? "Создаем карту" : "Получить карту и 500 ₽"}
+                  {loyaltyBusy ? "Проверяем номер" : "Открыть или получить карту"}
                 </button>
               </form>
               )}

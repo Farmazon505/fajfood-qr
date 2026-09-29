@@ -17,6 +17,7 @@ import type {
   DeliveryPickupAlert,
   GuestFeedback,
   LoyaltyLead,
+  LoyaltyVerificationAttempt,
   MaxMessageRef,
   NotificationDelivery,
   Offer,
@@ -2598,7 +2599,63 @@ export class Store {
   }
 
   findLoyaltyLeadByTokenHash(accessTokenHash: string) {
-    return this.data.loyaltyLeads.find((lead) => lead.accessTokenHash === accessTokenHash) ?? null;
+    if (!accessTokenHash) return null;
+    return this.data.loyaltyLeads.find((lead) => lead.phoneVerifiedAt && (
+      lead.accessTokenHash === accessTokenHash || lead.accessTokenHashes?.includes(accessTokenHash)
+    )) ?? null;
+  }
+
+  async beginLoyaltyVerification(input: Omit<LoyaltyVerificationAttempt, "id" | "createdAt" | "completedAt" | "alreadyRegistered">) {
+    const timestamp = now();
+    let lead = this.data.loyaltyLeads.find((item) => item.phone === input.phone);
+    if (!lead) {
+      lead = { ...input, id: randomUUID(), accessTokenHash: "", createdAt: timestamp, updatedAt: timestamp };
+      this.data.loyaltyLeads.unshift(lead);
+    }
+    const attempt: LoyaltyVerificationAttempt = { ...input, id: randomUUID(), createdAt: timestamp,
+      completedAt: null, alreadyRegistered: false };
+    // Keep the guest and verified tokens intact until the new number is proved.
+    lead.verificationAttempts = [...(lead.verificationAttempts || []).slice(-19), attempt];
+    await this.persist();
+    return { leadId: lead.id, attempt: structuredClone(attempt) };
+  }
+
+  findLoyaltyVerification(verificationId: string) {
+    for (const lead of this.data.loyaltyLeads) {
+      const attempt = lead.verificationAttempts?.find((item) => item.verificationId === verificationId);
+      if (attempt) return { leadId: lead.id, attempt: structuredClone(attempt) };
+      // Preserve already issued cards and verification links from the previous release.
+      if (lead.verificationId === verificationId) {
+        return { leadId: lead.id, attempt: { ...structuredClone(lead), completedAt: lead.phoneVerifiedAt,
+          alreadyRegistered: Boolean(lead.phoneVerifiedAt) } as LoyaltyVerificationAttempt };
+      }
+    }
+    return null;
+  }
+
+  async updateLoyaltyVerification(leadId: string, attemptId: string, patch: Partial<LoyaltyVerificationAttempt>) {
+    const lead = this.data.loyaltyLeads.find((item) => item.id === leadId);
+    if (!lead) throw new Error("Регистрация не найдена");
+    const attempt = lead.verificationAttempts?.find((item) => item.id === attemptId);
+    if (attempt) Object.assign(attempt, patch);
+    else if (lead.id === attemptId) Object.assign(lead, patch);
+    else throw new Error("Подтверждение номера не найдено");
+    await this.persist();
+  }
+
+  async completeLoyaltyVerification(leadId: string, attempt: LoyaltyVerificationAttempt, patch: Partial<LoyaltyLead>, alreadyRegistered: boolean) {
+    const lead = this.data.loyaltyLeads.find((item) => item.id === leadId);
+    if (!lead || !patch.phoneVerifiedAt || !patch.crmUserId) throw new Error("Номер ещё не подтверждён");
+    const tokens = [...(lead.accessTokenHashes || []), ...(lead.phoneVerifiedAt && lead.accessTokenHash ? [lead.accessTokenHash] : []), attempt.accessTokenHash];
+    const { id: _id, createdAt: _createdAt, completedAt: _completedAt, alreadyRegistered: _alreadyRegistered, ...details } = attempt;
+    const marketingVisitTokens = [...new Set([...(lead.marketingVisitTokens || []), ...(!alreadyRegistered ? attempt.marketingVisitTokens || [] : [])])];
+    const marketingSyncPending = Boolean(lead.marketingSyncPending || (!alreadyRegistered && attempt.marketingVisitTokens?.length));
+    Object.assign(lead, details, patch, { accessTokenHash: "", accessTokenHashes: [...new Set(tokens)].slice(-20),
+      marketingVisitTokens, marketingSyncPending, updatedAt: now() });
+    const saved = lead.verificationAttempts?.find((item) => item.id === attempt.id);
+    if (saved) Object.assign(saved, { ...patch, completedAt: now(), alreadyRegistered });
+    await this.persist();
+    return structuredClone(lead);
   }
 
   findLoyaltyLeadByVerificationId(verificationId: string) {

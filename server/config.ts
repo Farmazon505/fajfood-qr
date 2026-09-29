@@ -38,7 +38,6 @@ const envSchema = z.object({
   CRM_BASE_URL: z.string().url().optional().or(z.literal("")).default(""),
   CRM_LOYALTY_SERVICE_SECRET: z.string().optional().default(""),
   CRM_STAFF_SERVICE_SECRET: z.string().optional().default(""),
-  LOYALTY_REGISTRATION_ALLOWLIST: z.string().optional().default(""),
   MARKETING_ATTRIBUTION_ENABLED: z.enum(["true", "false"]).default("false"),
   LOYALTY_POPUP_ENABLED: z.enum(["true", "false"]).default("false"),
   AI_BASE_URL: z.string().url().default("https://openrouter.ai/api/v1"),

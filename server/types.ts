@@ -368,6 +368,10 @@ export type ServiceCall = {
 };
 
 export type LoyaltyLead = {
+  // Verified device tokens and independent login attempts keep a new phone
+  // entry from overwriting an existing guest's card or signing them out.
+  accessTokenHashes?: string[];
+  verificationAttempts?: LoyaltyVerificationAttempt[];
   marketingVisitTokens?: string[];
   marketingSyncPending?: boolean;
   marketingSyncError?: string;
@@ -398,6 +402,15 @@ export type LoyaltyLead = {
   syncError: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type LoyaltyVerificationAttempt = Omit<LoyaltyLead,
+  "id" | "createdAt" | "updatedAt" | "accessTokenHashes" | "verificationAttempts"
+> & {
+  id: string;
+  createdAt: string;
+  completedAt: string | null;
+  alreadyRegistered: boolean;
 };
 
 export type GuestFeedback = {
