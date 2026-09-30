@@ -133,6 +133,7 @@ type LoyaltyProfile = {
   iikoCustomerId: string | null;
   cardNumber: string | null;
   bonusBalance: number;
+  expiringBonuses?: Array<{ id: string; kind: string; amount: number; expiresAt: string; noticePending: boolean }>;
   balanceUpdatedAt: string | null;
   alreadyRegistered?: boolean;
   balanceIsFresh?: boolean;
@@ -850,6 +851,15 @@ function GuestPage() {
                 <span>Бонусный баланс</span>
                 <strong>{loyaltyProfile.bonusBalance.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} бонусов</strong>
               </div>
+              {Boolean(loyaltyProfile.expiringBonuses?.length) && <div className="loyalty-expiry">
+                <strong>Сроки действия бонусов</strong>
+                {loyaltyProfile.expiringBonuses!.map(lot => <p key={lot.id}>
+                  {lot.amount.toLocaleString("ru-RU")} {lot.kind === "BIRTHDAY" ? "подарочных бонусов" : "бонусов"}: {lot.noticePending
+                    ? "срок продлён до доставки напоминаний"
+                    : `до ${new Date(Date.parse(lot.expiresAt) - 1).toLocaleDateString("ru-RU", { timeZone: "Europe/Astrakhan" })} включительно`}.
+                </p>)}
+                <p>Сначала расходуются бонусы с ближайшим сроком сгорания.</p>
+              </div>}
               {loyaltyProfile.cardNumber ? (
                 <div className="loyalty-qr">
                   <QRCodeSVG

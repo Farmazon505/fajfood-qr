@@ -4644,3 +4644,13 @@ button:disabled {
     transform: translateY(0) scale(1);
   }
 }
+.loyalty-expiry {
+  border: 1px solid rgba(243, 201, 105, .3);
+  background: rgba(243, 201, 105, .07);
+  color: #f5ddaa;
+  border-radius: 12px;
+  padding: 14px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.loyalty-expiry p { margin: 8px 0 0; }

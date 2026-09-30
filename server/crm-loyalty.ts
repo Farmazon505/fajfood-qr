@@ -8,6 +8,7 @@ export type LoyaltyProfile = {
   iikoCustomerId: string | null;
   cardNumber: string | null;
   bonusBalance: number;
+  expiringBonuses?: Array<{ id: string; kind: string; amount: number; expiresAt: string; noticePending: boolean }>;
   balanceUpdatedAt: string | null;
   alreadyRegistered?: boolean;
   balanceIsFresh?: boolean;
