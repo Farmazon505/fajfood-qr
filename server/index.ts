@@ -31,6 +31,7 @@ import type { CallStatus, ChecklistItem } from "./types";
 import { crmLoyalty } from "./crm-loyalty";
 import { createLoyaltyRouter } from "./loyalty-routes";
 import { createLoyaltyRateLimits } from "./loyalty-rate-limits";
+import { createLoyaltyTermsLoader } from "./loyalty-terms";
 import { installMarketingRoutes, marketingEnabled, marketingTokens, retryMarketingRegistrations } from "./marketing";
 import {
   CrmReservationsClient,
@@ -439,6 +440,13 @@ app.patch("/api/staff/reservations/:id", staffReservationsLimiter, async (reques
   }
 });
 
+const loadGuestTerms = createLoyaltyTermsLoader(() => crmLoyalty.getGuestTerms());
+app.get("/api/public/loyalty/terms", async (_request, response) => {
+  const terms = await loadGuestTerms();
+  response.setHeader("Cache-Control", "no-store");
+  response.status(terms ? 200 : 503).json(terms ? { terms } : { error: "Не удалось загрузить условия. Попробуйте ещё раз." });
+});
+
 app.get("/api/public/bootstrap", (request, response) => {
   const tableSlug = String(request.query.table || "");
   const table = tableSlug ? store.findTableBySlug(tableSlug) : null;
@@ -450,6 +458,7 @@ app.get("/api/public/bootstrap", (request, response) => {
     actions: snapshot.actions,
     popups: snapshot.popups.filter(p => !(p.purpose === "loyalty" || /(^|\/)loyalty\/?(?:\?|$)/.test(p.buttonUrl)) || config.LOYALTY_POPUP_ENABLED === "true"),
     marketingEnabled: marketingEnabled(),
+    loyaltyPopupEnabled: config.LOYALTY_POPUP_ENABLED === "true",
     table,
     publicBaseUrl: publicBaseUrl(),
     legal: {

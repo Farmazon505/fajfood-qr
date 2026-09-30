@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, FormEvent, ReactNode } from "react";
 import { TableTentDesigner } from "./TableTentDesigner";
+import { LoyaltyInfo } from "./LoyaltyInfo";
+import { guestPopups } from "./loyalty-promotion";
+import type { GuestLoyaltyTerms } from "../shared/loyalty-terms";
 import { isLoyaltyPopup, popupEligible, startMarketing, trackMarketing } from "./marketing";
 import { parseStoredVerification, VERIFICATION_STORAGE_KEY } from "./loyalty-verification-storage";
 import {
@@ -112,6 +115,7 @@ import {
 
 type Bootstrap = {
   marketingEnabled?: boolean;
+  loyaltyPopupEnabled?: boolean;
   settings: VenueSettings;
   offers: Offer[];
   actions: CallAction[];
@@ -316,14 +320,29 @@ function GuestPage() {
   const [loyaltyBusy, setLoyaltyBusy] = useState(false);
   const [loyaltyError, setLoyaltyError] = useState("");
   const [loyaltyStale, setLoyaltyStale] = useState(false);
-  const eligiblePopups = useMemo(() => (data?.popups || []).filter(popup => {
+  const [loyaltyTerms, setLoyaltyTerms] = useState<GuestLoyaltyTerms | null>(null);
+  const loadLoyaltyTerms = useCallback(async () => {
+    try {
+      const result = await api<{ terms: GuestLoyaltyTerms }>("/api/public/loyalty/terms");
+      setLoyaltyTerms(result.terms);
+    } catch { setLoyaltyTerms(null); }
+  }, []);
+  useEffect(() => {
+    void loadLoyaltyTerms();
+    const refresh = () => { if (document.visibilityState === "visible") void loadLoyaltyTerms(); };
+    document.addEventListener("visibilitychange", refresh);
+    return () => document.removeEventListener("visibilitychange", refresh);
+  }, [loadLoyaltyTerms]);
+  const availablePopups = useMemo(() => guestPopups(data?.popups || [], loyaltyTerms, Boolean(data?.loyaltyPopupEnabled), Boolean(data?.table)),
+    [data?.popups, data?.loyaltyPopupEnabled, data?.table, loyaltyTerms]);
+  const eligiblePopups = useMemo(() => availablePopups.filter(popup => {
     let lastSeen = 0;
     try { lastSeen = Number(localStorage.getItem(`qrnastol.popupSeen:${popup.id}`) || 0); } catch { /* storage can be disabled */ }
     let hasSavedCard = Boolean(loyaltyProfile);
     try { hasSavedCard ||= Boolean(localStorage.getItem(LOYALTY_TOKEN_KEY)); } catch { /* storage can be disabled */ }
     return popupEligible({ hasCard: hasSavedCard, isRegistering: view !== "call" || Boolean(loyaltyVerification) || loyaltyBusy || Boolean(busyAction || sentAction || orderModalAction),
       isLoyalty: isLoyaltyPopup(popup), lastSeen, now: Date.now() });
-  }), [data?.popups, loyaltyProfile, loyaltyVerification, loyaltyBusy, view, busyAction, sentAction, orderModalAction]);
+  }), [availablePopups, loyaltyProfile, loyaltyVerification, loyaltyBusy, view, busyAction, sentAction, orderModalAction]);
 
   useEffect(() => {
     try {
@@ -909,10 +928,10 @@ function GuestPage() {
           ) : (
             <>
               <p>Откройте свою карту или зарегистрируйтесь по номеру телефона. Одна карта действует в зале, на доставку и самовывоз.</p>
-              <div className="welcome-bonus-note">
+              {loyaltyTerms && <div className="welcome-bonus-note">
                 <Gift size={20} />
-                <span><strong>500 бонусов</strong> новым участникам — один раз. Если карта уже есть, откроем её с вашим балансом.</span>
-              </div>
+                <span><strong>{loyaltyTerms.welcomeAmount.toLocaleString("ru-RU")} бонусных рублей</strong> новым участникам — один раз. Если карта уже есть, откроем её с вашим балансом.</span>
+              </div>}
               {loyaltyVerification ? (
                 <div className="phone-verification">
                   <div className="phone-verification__heading">
@@ -965,8 +984,15 @@ function GuestPage() {
                 />
                 <label className="date-field">
                   <span>День рождения, необязательно</span>
+                  {loyaltyTerms?.birthday && <span className="birthday-gift-note" id="birthday-gift-note">
+                    <Gift size={22} aria-hidden="true" />
+                    <span><strong>Укажите день рождения — подарим {loyaltyTerms.birthday.amount.toLocaleString("ru-RU")} бонусных рублей</strong>
+                    <small>Ко дню рождения, один раз в год. Действуют {loyaltyTerms.birthday.daysBefore} дн. до, в день рождения и {loyaltyTerms.birthday.daysAfter} дн. после. Затем остаток подарка сгорает.</small></span>
+                  </span>}
                   <input
                     type="date"
+                    autoComplete="bday"
+                    aria-describedby={loyaltyTerms?.birthday ? "birthday-gift-note" : undefined}
                     value={loyalty.birthday}
                     onChange={(event) => setLoyalty({ ...loyalty, birthday: event.target.value })}
                   />
@@ -1000,6 +1026,7 @@ function GuestPage() {
               )}
             </>
           )}
+          <LoyaltyInfo terms={loyaltyTerms} reload={() => void loadLoyaltyTerms()} />
           {loyaltyError && <div className="error-line">{loyaltyError}</div>}
         </section>
       )}
@@ -4787,7 +4814,7 @@ function GuestPopupGallery({
   return (
     <div className="popup-overlay" onClick={onClose}>
       <div
-        className="popup-card"
+        className={`popup-card${isLoyaltyPopup(popup) ? " popup-card--loyalty" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="guest-popup-title"
@@ -4827,6 +4854,8 @@ function GuestPopupGallery({
               {popup.buttonText}
             </button>
           )}
+
+          {isLoyaltyPopup(popup) && <button type="button" className="popup-later" onClick={onClose}>Позже</button>}
 
           {popups.length > 1 && (
             <div className="popup-gallery-controls" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '16px', marginTop: '20px' }}>

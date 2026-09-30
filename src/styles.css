@@ -552,6 +552,36 @@ select:focus {
   font-size: 18px;
 }
 
+.welcome-bonus-note > svg, .birthday-gift-note > svg { flex-shrink: 0; }
+.birthday-gift-note {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 14px; border: 1px solid rgba(200, 154, 88, .4); border-radius: 12px;
+  background: rgba(200, 154, 88, .09); color: #f3c969;
+}
+.birthday-gift-note strong { display: block; font-size: 16px; line-height: 1.4; }
+.birthday-gift-note small { display: block; margin-top: 8px; color: rgba(255,253,250,.76); font-size: 13px; line-height: 1.5; }
+.loyalty-info-button {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 48px; width: 100%; margin-top: 16px; padding: 12px;
+  border: 1px solid rgba(200,154,88,.4); border-radius: 10px; background: transparent;
+  color: #f3c969; font: inherit; font-weight: 700; cursor: pointer;
+}
+.loyalty-info-dialog {
+  position: fixed; inset: 0; margin: auto; width: calc(100% - 32px); max-width: 520px;
+  max-height: 88dvh; overflow-y: auto; padding: 0; border: 1px solid rgba(200,154,88,.4);
+  border-radius: 18px; background: #18131c; color: #fffdfa;
+  box-shadow: 0 20px 80px rgba(0,0,0,.5); overscroll-behavior: contain;
+}
+.loyalty-info-dialog::backdrop { background: rgba(0,0,0,.75); }
+.loyalty-info-content { padding: 22px; }
+.loyalty-info-heading { position: sticky; top: 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding-bottom: 12px; background: #18131c; }
+.loyalty-info-heading h2 { margin: 6px 0 0; color: #f3c969; font-size: 23px; }
+.loyalty-info-heading .icon-button { flex-shrink: 0; width: 44px; height: 44px; color: #fffdfa; background: rgba(255,255,255,.09); }
+.loyalty-info-content section { border-top: 1px solid rgba(255,255,255,.1); margin-top: 20px; padding-top: 16px; }
+.loyalty-info-content h3 { color: #f3c969; font-size: 16px; margin: 0; }
+.loyalty-info-content p { color: rgba(255,253,250,.8); font-size: 14px; line-height: 1.65; margin: 8px 0 0; }
+.loyalty-info-button:focus-visible, .popup-later:focus-visible { outline: 2px solid #f3c969; outline-offset: 3px; }
+
 .phone-verification {
   display: grid;
   gap: 14px;
@@ -4539,7 +4569,18 @@ button:disabled {
   display: flex;
   flex-direction: column;
   touch-action: pan-y;
+  max-height: 90dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
+
+.popup-card--loyalty { border: 1px solid rgba(200,154,88,.5); border-radius: 22px; background: #18131c; }
+.popup-card--loyalty .popup-no-image { min-height: 108px; height: 108px; background: linear-gradient(135deg, #902347, #4b192d); }
+.popup-card--loyalty .popup-body { background: #18131c; padding: 24px; }
+.popup-card--loyalty .popup-title { color: #f3c969; font-size: 27px; }
+.popup-card--loyalty .popup-text { color: rgba(255,253,250,.78); font-size: 14px; }
+.popup-card--loyalty .popup-close { width: 44px; height: 44px; top: 12px; right: 12px; }
+.popup-later { display: block; margin: 10px auto 0; min-height: 44px; padding: 8px 30px; border: 0; background: transparent; color: rgba(255,253,250,.75); font: inherit; cursor: pointer; }
 
 .popup-image {
   width: 100%;

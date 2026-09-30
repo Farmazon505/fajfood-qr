@@ -110,6 +110,11 @@ export class CrmLoyaltyService {
     return data.offers;
   }
 
+  async getGuestTerms() {
+    const data = await this.request<{ terms: unknown }>("/api/integrations/loyalty/terms", { method: "GET" }, 4000);
+    return data.terms;
+  }
+
   async replaceOffers(offers: Offer[]) {
     const data = await this.request<{ offers: Offer[] }>("/api/integrations/qrnastol/promotions", {
       method: "PUT",
