@@ -454,6 +454,7 @@ function GuestPage() {
       setLoyaltyStale(Boolean(result.stale));
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : "Не удалось загрузить карту гостя";
+      setLoyaltyProfile(null);
       setLoyaltyError(message);
       if (/не найдена на этом устройстве/i.test(message)) localStorage.removeItem(LOYALTY_TOKEN_KEY);
     } finally {
@@ -938,7 +939,7 @@ function GuestPage() {
                     <ShieldCheck size={22} />
                     <div>
                       <strong>Подтвердите номер{loyaltyVerification.phoneMasked ? ` ${loyaltyVerification.phoneMasked}` : " телефона"}</strong>
-                      <span>Выберите мессенджер с этим номером. Поделитесь своим контактом в боте и вернитесь сюда — карта появится автоматически.</span>
+                      <span>Выберите мессенджер с этим номером. Поделитесь своим контактом и подтвердите отдельные условия программы в боте. После оформления карта появится здесь.</span>
                     </div>
                   </div>
                   <div className="verification-channel-grid">
@@ -983,7 +984,7 @@ function GuestPage() {
                   placeholder="Телефон: +7 999 000-00-00"
                 />
                 <label className="date-field">
-                  <span>День рождения, необязательно</span>
+                  <span>День рождения для новой карты — здесь или в боте</span>
                   {loyaltyTerms?.birthday && <span className="birthday-gift-note" id="birthday-gift-note">
                     <Gift size={22} aria-hidden="true" />
                     <span><strong>Укажите день рождения — подарим {loyaltyTerms.birthday.amount.toLocaleString("ru-RU")} бонусных рублей</strong>

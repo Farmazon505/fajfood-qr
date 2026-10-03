@@ -113,9 +113,10 @@ test("returning member opens the same card with current balance; an unverified a
       assert.equal(reloaded.findLoyaltyLeadByTokenHash(createHash("sha256").update(token).digest("hex"))?.cardNumber, "001234567");
     }
     f.failProfile();
-    const cached = await f.request("/profile", second.accessToken);
-    assert.equal(cached.body.stale, true);
-    assert.equal(cached.body.profile.bonusBalance, 861.3);
+    const blocked = await f.request("/profile", second.accessToken);
+    assert.equal(blocked.status, 502);
+    assert.equal(blocked.body.profile, undefined);
+    assert.match(blocked.body.error, /согласия/);
   });
 });
 

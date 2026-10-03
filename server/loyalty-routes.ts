@@ -5,7 +5,7 @@ import { publicBaseUrl } from "./config";
 import { crmLoyalty, type CrmLoyaltyService, type LoyaltyProfile } from "./crm-loyalty";
 import { PERSONAL_DATA_CONSENT_HASH, PERSONAL_DATA_CONSENT_PATH, PERSONAL_DATA_CONSENT_VERSION } from "./legal";
 import type { Store } from "./store";
-import type { LoyaltyLead, LoyaltyVerificationAttempt } from "./types";
+import type { LoyaltyVerificationAttempt } from "./types";
 
 const schema = z.object({
   tableSlug: z.string().max(100).optional().default(""),
@@ -33,12 +33,6 @@ const profilePatch = (profile: LoyaltyProfile) => ({
   crmUserId: profile.userId, name: profile.name, iikoCustomerId: profile.iikoCustomerId, cardNumber: profile.cardNumber,
   bonusBalance: profile.bonusBalance, balanceUpdatedAt: profile.balanceUpdatedAt,
   welcomeBonusAmount: profile.welcomeBonus.amount, welcomeBonusStatus: profile.welcomeBonus.status, syncError: "",
-});
-const cachedProfile = (lead: LoyaltyLead): LoyaltyProfile => ({
-  userId: lead.crmUserId || "", name: lead.name, phoneMasked: `••• ${lead.phone.slice(-4)}`,
-  iikoCustomerId: lead.iikoCustomerId, cardNumber: lead.cardNumber, bonusBalance: lead.bonusBalance,
-  balanceUpdatedAt: lead.balanceUpdatedAt, alreadyRegistered: true, balanceIsFresh: false,
-  welcomeBonus: { amount: lead.welcomeBonusAmount, status: lead.welcomeBonusStatus, granted: lead.welcomeBonusStatus === "GRANTED" },
 });
 
 export function createLoyaltyRouter(options: {
@@ -134,7 +128,9 @@ export function createLoyaltyRouter(options: {
       await store.updateLoyaltyLead(lead.id, profilePatch(profile));
       response.json({ ok: true, profile: { ...profile, alreadyRegistered: true }, stale: profile.balanceIsFresh === false });
     } catch {
-      response.json({ ok: true, profile: cachedProfile(lead), stale: true });
+      // An unavailable CRM can mean withdrawn/unconfirmed consent. Stored card
+      // details must not bypass the current CRM/iiko access decision.
+      response.status(502).json({ error: "Карта временно недоступна. Проверьте согласия в разделе «Карта» бота FAJ и повторите открытие." });
     }
   });
   return router;
