@@ -81,10 +81,19 @@ export async function retryMarketingRegistrations(store: Store) {
     const leads = store.snapshot().loyaltyLeads.filter(l => l.marketingSyncPending && l.crmUserId && l.phoneVerifiedAt && l.verificationId).slice(0, 20);
     for (const lead of leads) {
       try {
+        // Phone verification and registration use the independent attempt ID.
+        // findLoyaltyVerification also preserves legacy registrations keyed by lead ID.
+        const registration = store.findLoyaltyVerification(lead.verificationId!);
+        if (!registration || registration.leadId !== lead.id || !registration.attempt.completedAt ||
+          !registration.attempt.phoneVerifiedAt || registration.attempt.crmUserId !== lead.crmUserId ||
+          registration.attempt.phone !== lead.phone) {
+          await store.updateLoyaltyLead(lead.id, { marketingSyncError: "Ожидается подтверждение регистрации" });
+          continue;
+        }
         let retry = false, ignored = false;
         for (const token of lead.marketingVisitTokens || []) {
           const result = await crmLoyalty.marketing<{ recorded: boolean; retryable: boolean }>({
-            action: "registration", token, sourceRegistrationId: lead.id, verificationId: lead.verificationId,
+            action: "registration", token, sourceRegistrationId: registration.attempt.id, verificationId: lead.verificationId,
           });
           retry ||= result.retryable;
           ignored ||= !result.recorded && !result.retryable;
