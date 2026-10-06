@@ -374,6 +374,7 @@ export class MaxService {
     table: DiningTable;
     waiters: Waiter[];
     settings: VenueSettings;
+    retryMissingOnly?: boolean;
   }) {
     const previous = this.callQueues.get(options.call.id) ?? Promise.resolve([]);
     const task = previous
@@ -381,7 +382,7 @@ export class MaxService {
       .then(async () => {
         const call = this.store.findCallById(options.call.id) ?? options.call;
         const table = this.store.findTableById(call.tableId) ?? options.table;
-        return this.syncCallMessages(call, table, this.recipientsForCall(call, table), options.settings);
+        return this.syncCallMessages(call, table, this.recipientsForCall(call, table), options.settings, options.retryMissingOnly);
       });
 
     this.callQueues.set(options.call.id, task);
@@ -1182,18 +1183,7 @@ export class MaxService {
   }
 
   private recipientsForCall(call: ServiceCall, table: DiningTable) {
-    const recipients: Array<{ member: Waiter; recipientRole: "waiter" | "admin" | "owner" }> = [];
-    if (call.routingStage === "waiter") {
-      recipients.push(...this.store.waitersForTable(table).map((member) => ({ member, recipientRole: "waiter" as const })));
-    } else if (call.routingStage === "admin") {
-      recipients.push(
-        ...this.store.activeAdminsForTable(table).map((member) => ({ member, recipientRole: "admin" as const }))
-      );
-    } else {
-      recipients.push(
-        ...this.store.ownersForEscalation().map((member) => ({ member, recipientRole: "owner" as const }))
-      );
-    }
+    const recipients = this.store.callNotificationRecipients(call, table);
     const unique = new Map(recipients.map((recipient) => [recipient.member.maxUserId.trim(), recipient]));
     return Array.from(unique.values()).filter((recipient) => recipient.member.maxUserId.trim());
   }
@@ -1241,14 +1231,14 @@ export class MaxService {
     ].filter(Boolean).join("\n");
   }
 
-  private callButtons(call: ServiceCall): MaxButton[][] {
+  private callButtons(call: ServiceCall, recipientRole = call.routingStage): MaxButton[][] {
     if (call.status === "new") {
       return [[this.callbackButton("Принято", `call:accepted:${call.id}`, "positive")]];
     }
     if (call.status === "accepted") {
       const needsEscalationAcknowledgement =
         (call.routingStage === "admin" && !call.adminAcknowledgedAt) ||
-        (call.routingStage === "owner" && !call.ownerAcknowledgedAt);
+        (call.routingStage === "owner" && recipientRole === "owner" && !call.ownerAcknowledgedAt);
       if (needsEscalationAcknowledgement) {
         return [
           [this.callbackButton("Подтвердить контроль", `call:ack:${call.id}`, "positive")],
@@ -1264,7 +1254,8 @@ export class MaxService {
     call: ServiceCall,
     table: DiningTable,
     recipients: Array<{ member: Waiter; recipientRole: "waiter" | "admin" | "owner" }>,
-    settings: VenueSettings
+    settings: VenueSettings,
+    retryMissingOnly = false
   ) {
     if (["done", "cancelled"].includes(call.status) || (call.workManaged && call.status === "accepted" && call.routingStage === "waiter")) {
       return this.deleteCallRefs(call.id);
@@ -1292,10 +1283,14 @@ export class MaxService {
       if (!userId) continue;
       const body: MaxMessageBody = {
         text,
-        attachments: this.keyboard(this.callButtons(call)),
+        attachments: this.keyboard(this.callButtons(call, recipient.recipientRole)),
         notify: true
       };
       const existing = existingByTarget.get(`${userId}:${recipient.recipientRole}`);
+      if (existing && retryMissingOnly) {
+        refs.push(existing);
+        continue;
+      }
       if (existing) {
         const edited = await this.request<{ success: boolean }>("PUT", "messages", {
           query: { message_id: existing.messageId },

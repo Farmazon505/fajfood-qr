@@ -12,6 +12,7 @@ type CallNotification = {
   table: DiningTable;
   waiters: Waiter[];
   settings: VenueSettings;
+  retryMissingOnly?: boolean;
 };
 
 export class MessagingService {
@@ -72,7 +73,7 @@ export class MessagingService {
     return results.reduce((total, result) => total + (result.status === "fulfilled" ? result.value.length : 0), 0);
   }
 
-  async syncCall(call: ServiceCall) {
+  async syncCall(call: ServiceCall, retryMissingOnly = false) {
     const current = this.store.findCallById(call.id) ?? call;
     const table = this.store.findTableById(current.tableId);
     if (!table) return;
@@ -80,7 +81,8 @@ export class MessagingService {
       call: current,
       table,
       waiters: this.store.waitersForTable(table),
-      settings: this.store.snapshot().settings
+      settings: this.store.snapshot().settings,
+      retryMissingOnly
     });
   }
 
@@ -399,7 +401,7 @@ export class MessagingService {
       }
       await this.processDailyMaintenance(at);
       for (const call of this.store.callsNeedingNotificationRetry(at)) {
-        await this.syncCall(call);
+        await this.syncCall(call, true);
       }
       for (const dueCall of this.store.callsDueForAdminEscalation(at)) {
         const table = this.store.findTableById(dueCall.tableId);

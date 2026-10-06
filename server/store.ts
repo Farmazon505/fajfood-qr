@@ -839,6 +839,26 @@ export class Store {
     });
   }
 
+  callNotificationRecipients(call: ServiceCall, table: DiningTable) {
+    if (call.routingStage === "waiter") {
+      return this.waitersForTable(table).map((member) => ({ member, recipientRole: "waiter" as const }));
+    }
+    if (call.routingStage === "admin") {
+      return this.activeAdminsForTable(table).map((member) => ({ member, recipientRole: "admin" as const }));
+    }
+    // Escalation adds the owner to the conversation; the administrator's
+    // existing card remains actionable until the guest's request is closed.
+    const admins = this.data.waiters.filter((member) => member.active
+      && this.roleForWaiter(member)?.kind === "admin"
+      && (call.adminRecipientIds.includes(member.id)
+        || call.telegramMessages.some((ref) => ref.recipientRole === "admin" && ref.chatId === member.telegramChatId.trim())
+        || call.maxMessages.some((ref) => ref.recipientRole === "admin" && ref.userId === member.maxUserId.trim())));
+    return [
+      ...admins.map((member) => ({ member, recipientRole: "admin" as const })),
+      ...this.ownersForEscalation().map((member) => ({ member, recipientRole: "owner" as const })),
+    ];
+  }
+
   activeShiftPackers() {
     return this.data.waiters.filter((member) => {
       if (!member.active || !this.hasMessengerConnection(member) || member.roleId !== "packer") return false;
@@ -876,6 +896,30 @@ export class Store {
       .filter((call) => call.status === "new" || call.status === "accepted")
       .filter((call) => {
         const role = call.routingStage;
+        // A delivered Telegram card must not suppress a failed MAX send,
+        // nor may delivery to one administrator suppress another recipient.
+        const relevantRoles = role === "owner" ? ["owner", "admin"] : [role];
+        const stageStartedAt = role === "admin"
+          ? call.adminEscalationStartedAt
+          : role === "owner" ? call.ownerEscalatedAt : call.lastRequestedAt;
+        const attempts = this.data.notificationDeliveries.filter((delivery) =>
+          delivery.callId === call.id && relevantRoles.includes(delivery.recipientRole)
+          && new Date(delivery.createdAt).getTime() >= new Date(call.cycleStartedAt).getTime());
+        const latestSends = new Map<string, NotificationDelivery>();
+        for (const attempt of attempts.filter((delivery) => delivery.operation === "send")) {
+          latestSends.set(`${attempt.channel}:${attempt.recipientId}:${attempt.recipientRole}`, attempt);
+        }
+        const table = this.findTableById(call.tableId);
+        const recipients = table ? this.callNotificationRecipients(call, table) : [];
+        if ([...latestSends.values()].some((attempt) => {
+          if (attempt.status !== "failed" || at - new Date(attempt.createdAt).getTime() < retryIntervalMs) return false;
+          const isRecipient = recipients.some(({ member, recipientRole }) => recipientRole === attempt.recipientRole
+            && (attempt.channel === "max" ? member.maxUserId : member.telegramChatId).trim() === attempt.recipientId);
+          if (!isRecipient) return false;
+          return attempt.channel === "max"
+            ? !call.maxMessages.some((ref) => ref.kind === "call" && !ref.deletePending && ref.userId === attempt.recipientId && ref.recipientRole === attempt.recipientRole)
+            : !call.telegramMessages.some((ref) => ref.kind === "call" && ref.chatId === attempt.recipientId && ref.recipientRole === attempt.recipientRole);
+        })) return true;
         const hasReference = call.telegramMessages.some(
           (message) => message.kind === "call" && message.recipientRole === role
         ) || call.maxMessages.some(
@@ -883,19 +927,12 @@ export class Store {
         );
         if (hasReference) return false;
 
-        const attempts = this.data.notificationDeliveries.filter(
-          (delivery) => delivery.callId === call.id && delivery.recipientRole === role
-        );
-        if (attempts.some((delivery) => delivery.status === "delivered")) return false;
-        const latestAttemptAt = attempts.reduce(
+        const roleAttempts = attempts.filter((delivery) => delivery.recipientRole === role);
+        if (roleAttempts.some((delivery) => delivery.status === "delivered" && delivery.externalMessageId)) return false;
+        const latestAttemptAt = roleAttempts.reduce(
           (latest, delivery) => Math.max(latest, new Date(delivery.createdAt).getTime() || 0),
           0
         );
-        const stageStartedAt = role === "admin"
-          ? call.adminEscalationStartedAt
-          : role === "owner"
-            ? call.ownerEscalatedAt
-            : call.lastRequestedAt;
         const referenceTime = Math.max(latestAttemptAt, new Date(stageStartedAt || call.createdAt).getTime() || 0);
         return referenceTime > 0 && at - referenceTime >= retryIntervalMs;
       })
@@ -2245,8 +2282,10 @@ export class Store {
       existing.actionId = input.action.id;
       existing.actionLabel = input.action.label;
       existing.assignedWaiterId = input.assignedWaiterId;
-      existing.waiterRecipientIds = [...new Set(input.waiterRecipientIds ?? [])];
-      existing.adminRecipientIds = [...new Set(input.adminRecipientIds ?? [])];
+      if (startsNewCycle || existing.routingStage === input.routingStage) {
+        existing.waiterRecipientIds = [...new Set(input.waiterRecipientIds ?? [])];
+        existing.adminRecipientIds = [...new Set(input.adminRecipientIds ?? [])];
+      }
       existing.lastRequestedAt = timestamp;
       existing.doneAt = null;
       if (input.comment.trim()) existing.comment = input.comment.trim();
@@ -2387,7 +2426,13 @@ export class Store {
         ) {
           return false;
         }
-        return at - new Date(call.adminEscalationStartedAt).getTime() >= ADMIN_ACK_TIMEOUT_MS;
+        const startedAt = new Date(call.adminEscalationStartedAt).getTime();
+        const deliveredAt = this.data.notificationDeliveries
+          .filter((delivery) => delivery.callId === call.id && delivery.recipientRole === "admin"
+            && delivery.operation === "send" && delivery.status === "delivered" && delivery.externalMessageId
+            && new Date(delivery.createdAt).getTime() >= startedAt)
+          .reduce((first, delivery) => Math.min(first, new Date(delivery.createdAt).getTime()), Infinity);
+        return at - (Number.isFinite(deliveredAt) ? deliveredAt : startedAt) >= ADMIN_ACK_TIMEOUT_MS;
       })
       .map((call) => structuredClone(call));
   }

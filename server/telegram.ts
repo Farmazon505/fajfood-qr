@@ -153,6 +153,7 @@ export class TelegramService {
     table: DiningTable;
     waiters: Waiter[];
     settings: VenueSettings;
+    retryMissingOnly?: boolean;
   }) {
     const notificationEvent = options.call;
     const previous = this.callQueues.get(options.call.id) ?? Promise.resolve([]);
@@ -166,7 +167,8 @@ export class TelegramService {
           table,
           this.recipientsForCall(call, table),
           options.settings,
-          notificationEvent
+          notificationEvent,
+          options.retryMissingOnly
         );
       });
 
@@ -1244,18 +1246,7 @@ export class TelegramService {
   }
 
   private recipientsForCall(call: ServiceCall, table: DiningTable) {
-    const recipients: Array<{ member: Waiter; recipientRole: "waiter" | "admin" | "owner" }> = [];
-    if (call.routingStage === "waiter") {
-      recipients.push(...this.store.waitersForTable(table).map((member) => ({ member, recipientRole: "waiter" as const })));
-    } else if (call.routingStage === "admin") {
-      recipients.push(
-        ...this.store.activeAdminsForTable(table).map((member) => ({ member, recipientRole: "admin" as const }))
-      );
-    } else {
-      recipients.push(
-        ...this.store.ownersForEscalation().map((member) => ({ member, recipientRole: "owner" as const }))
-      );
-    }
+    const recipients = this.store.callNotificationRecipients(call, table);
     const unique = new Map(recipients.map((recipient) => [recipient.member.telegramChatId.trim(), recipient]));
     return Array.from(unique.values()).filter((recipient) => recipient.member.telegramChatId.trim());
   }
@@ -1311,14 +1302,14 @@ export class TelegramService {
       .join("\n");
   }
 
-  private callKeyboard(call: ServiceCall) {
+  private callKeyboard(call: ServiceCall, recipientRole = call.routingStage) {
     if (call.status === "new") {
       return { inline_keyboard: [[{ text: "Принято", callback_data: `call:accepted:${call.id}` }]] };
     }
     if (call.status === "accepted") {
       const needsEscalationAcknowledgement =
         (call.routingStage === "admin" && !call.adminAcknowledgedAt) ||
-        (call.routingStage === "owner" && !call.ownerAcknowledgedAt);
+        (call.routingStage === "owner" && recipientRole === "owner" && !call.ownerAcknowledgedAt);
       if (needsEscalationAcknowledgement) {
         return {
           inline_keyboard: [
@@ -1337,7 +1328,8 @@ export class TelegramService {
     table: DiningTable,
     recipients: Array<{ member: Waiter; recipientRole: "waiter" | "admin" | "owner" }>,
     settings: VenueSettings,
-    notificationEvent: ServiceCall
+    notificationEvent: ServiceCall,
+    retryMissingOnly = false
   ) {
     const text = this.callText(call, table, settings);
     if (!this.enabled()) {
@@ -1371,12 +1363,16 @@ export class TelegramService {
       const chatId = recipient.member.telegramChatId.trim();
       if (!chatId) continue;
       const existing = existingByTarget.get(`${chatId}:${recipient.recipientRole}`);
+      if (existing && retryMissingOnly) {
+        refs.push(existing);
+        continue;
+      }
       if (existing) {
         const edited = await this.request<TelegramMessage | true>("editMessageText", {
           chat_id: chatId,
           message_id: existing.messageId,
           text,
-          reply_markup: this.callKeyboard(call)
+          reply_markup: this.callKeyboard(call, recipient.recipientRole)
         });
         await this.store.recordNotificationDelivery({
           callId: call.id,
@@ -1400,7 +1396,7 @@ export class TelegramService {
         chat_id: chatId,
         text,
         disable_notification: false,
-        reply_markup: this.callKeyboard(call)
+        reply_markup: this.callKeyboard(call, recipient.recipientRole)
       });
       await this.store.recordNotificationDelivery({
         callId: call.id,
