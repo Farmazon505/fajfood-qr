@@ -6,6 +6,7 @@ import { config } from "./config";
 import type { OwnerWebPushService } from "./web-push";
 import { nextDateKey } from "../shared/shift-tasks";
 import { crmWork } from "./crm-work";
+import { FajWorkCallPushQueue } from "./faj-work-call-push";
 
 type CallNotification = {
   call: ServiceCall;
@@ -16,6 +17,7 @@ type CallNotification = {
 };
 
 export class MessagingService {
+  private readonly workCallPush: FajWorkCallPushQueue;
   private escalationTimer: ReturnType<typeof setInterval> | null = null;
   private escalationRunning = false;
   private dailyMaintenanceTimer: ReturnType<typeof setInterval> | null = null;
@@ -28,6 +30,7 @@ export class MessagingService {
     private max: MaxService,
     private webPush: OwnerWebPushService | null = null
   ) {
+    this.workCallPush = new FajWorkCallPushQueue(store);
     const coordinator = {
       syncCall: async (call: ServiceCall) => {
         await this.syncCall(call);
@@ -63,6 +66,7 @@ export class MessagingService {
   }
 
   async notifyCall(options: CallNotification) {
+    void this.workCallPush.enqueue(options.call).then(() => this.workCallPush.flush()).catch(() => console.error("[FAJ Work] Call push will be retried"));
     const results = await Promise.allSettled([
       this.telegram.notifyCall(options),
       this.max.notifyCall(options)
@@ -396,7 +400,7 @@ export class MessagingService {
     try {
       if (!this.workMaintenanceRunning) {
         this.workMaintenanceRunning = true;
-        void Promise.allSettled([this.max.retryPendingDeletes?.(), crmWork.flush()])
+        void Promise.allSettled([this.max.retryPendingDeletes?.(), crmWork.flush(), this.workCallPush.reconcile()])
           .finally(() => { this.workMaintenanceRunning = false; });
       }
       await this.processDailyMaintenance(at);
