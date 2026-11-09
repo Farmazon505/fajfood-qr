@@ -14,6 +14,8 @@ The optional FAJ Work call-push pilot is disabled by default (`FAJ_WORK_CALL_PUS
 
 `/var/lib/qrnastol/faj-work-call-push-outbox.json` retains pending call pushes over a process restart. Before each retry Qr rechecks the call, cycle, routing stage and recipient; accepted, completed, reassigned and stale notices are discarded. CRM deduplicates successful provider submissions and assigns a short push lifetime. Never delete the outbox during release or rollback. Keep the existing waiter bot enabled while testing on actual locked iPhone/Android devices and throughout the pilot.
 
+The Qr request allows the matching CRM release enough time to reach a slow push provider. CRM bounds both the provider wait and the push lifetime by the call's remaining one-minute validity. Deploy the matching CRM release first; the Qr push pilot remains disabled until device testing is complete.
+
 Deployment: first activate the matching CRM change using its protected publisher; then run `deploy/release-work.sh <commit> <git-archive-path> <previous-commit>` on the verified host. The script checks a clean production source, the release lock, commit ancestry, current markers, tests/build in staging, a data/source recovery point, readiness and the unchanged table identity fingerprint. Rollback restores code/build only, preserving live calls and the durable notification queue. No database migration is required.
 
 Scope: shift-control admin notices and direct responses to legacy bot commands remain available there. Automatic staff meal pricing and iiko staff-discount rules are not altered by this change.

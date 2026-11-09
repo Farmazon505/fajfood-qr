@@ -59,6 +59,34 @@ test("call push survives CRM outage, targets the assigned zone and omits guest d
   } finally { await cleanup(f.directory); }
 });
 
+test("the queue waits for CRM when a push provider needs more than five seconds", async () => {
+  const f = await fixture();
+  const output = path.join(f.directory, "push");
+  const deliveries: string[] = [];
+  let first = true;
+  const fetcher: typeof fetch = async (_url, init) => {
+    if (first) {
+      first = false;
+      await new Promise<void>((resolve, reject) => {
+        const signal = init?.signal;
+        const timer = setTimeout(() => { signal?.removeEventListener("abort", aborted); resolve(); }, 5_500);
+        const aborted = () => { clearTimeout(timer); reject(new Error("CRM request aborted too early")); };
+        signal?.addEventListener("abort", aborted, { once: true });
+      });
+    }
+    deliveries.push(new Headers(init?.headers).get("x-faj-work-max-user") || "");
+    return Response.json({ delivered: true });
+  };
+  const options = { enabled: true, baseUrl: "https://crm.example.test", secret: "s".repeat(32), directory: output, fetcher };
+  try {
+    const queue = new FajWorkCallPushQueue(f.store, options);
+    await queue.enqueue(f.call);
+    await queue.flush();
+    assert.deepEqual(deliveries.sort(), ["101", "102"]);
+    assert.deepEqual(JSON.parse(await readFile(path.join(output, "faj-work-call-push-outbox.json"), "utf8")), []);
+  } finally { await cleanup(f.directory); }
+});
+
 test("acceptance or expiry cancels queued call alerts before recovery", async () => {
   const f = await fixture();
   const output = path.join(f.directory, "push");

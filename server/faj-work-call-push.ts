@@ -108,7 +108,7 @@ export class FajWorkCallPushQueue {
         try {
           const { maxUserId, cycleStartedAt: _cycle, ...payload } = notice;
           const response = await this.fetcher(`${this.baseUrl}/api/integrations/qrnastol/call-push`, {
-            method: "POST", signal: AbortSignal.timeout(5_000),
+            method: "POST", signal: AbortSignal.timeout(15_000),
             headers: { "Content-Type": "application/json", "x-qrnastol-staff-secret": this.secret, "x-faj-work-max-user": maxUserId },
             body: JSON.stringify(payload),
           });
