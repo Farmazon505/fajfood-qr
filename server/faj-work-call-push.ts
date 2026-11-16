@@ -98,28 +98,31 @@ export class FajWorkCallPushQueue {
     });
   }
 
+  private async deliver(notice: Notice) {
+    if (!this.valid(notice)) { await this.remove(notice.eventKey); return; }
+    try {
+      const { maxUserId, cycleStartedAt: _cycle, ...payload } = notice;
+      const response = await this.fetcher(`${this.baseUrl}/api/integrations/qrnastol/call-push`, {
+        method: "POST", signal: AbortSignal.timeout(15_000),
+        headers: { "Content-Type": "application/json", "x-qrnastol-staff-secret": this.secret, "x-faj-work-max-user": maxUserId },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json().catch(() => ({})) as { delivered?: boolean; expired?: boolean };
+      if (response.ok && (result.delivered || result.expired)) {
+        this.sent.add(notice.eventKey);
+        if (this.sent.size > 500) this.sent.clear();
+        await this.remove(notice.eventKey);
+      }
+    } catch { /* Keep the notice until the next retry or until it becomes stale. */ }
+  }
+
   async flush() {
     if (!this.configured() || this.flushing) return;
     this.flushing = true;
     try {
       const notices = await this.serial(() => this.read());
-      for (const notice of notices.slice(0, 25)) {
-        if (!this.valid(notice)) { await this.remove(notice.eventKey); continue; }
-        try {
-          const { maxUserId, cycleStartedAt: _cycle, ...payload } = notice;
-          const response = await this.fetcher(`${this.baseUrl}/api/integrations/qrnastol/call-push`, {
-            method: "POST", signal: AbortSignal.timeout(15_000),
-            headers: { "Content-Type": "application/json", "x-qrnastol-staff-secret": this.secret, "x-faj-work-max-user": maxUserId },
-            body: JSON.stringify(payload),
-          });
-          const result = await response.json().catch(() => ({})) as { delivered?: boolean; expired?: boolean };
-          if (response.ok && (result.delivered || result.expired)) {
-            this.sent.add(notice.eventKey);
-            if (this.sent.size > 500) this.sent.clear();
-            await this.remove(notice.eventKey);
-          }
-        } catch { /* Keep the notice until the next retry or until it becomes stale. */ }
-      }
+      // A slow push for one waiter must not consume another recipient's delivery window.
+      await Promise.allSettled(notices.slice(0, 25).map(notice => this.deliver(notice)));
     } finally { this.flushing = false; }
   }
 
