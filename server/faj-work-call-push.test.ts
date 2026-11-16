@@ -59,14 +59,13 @@ test("call push survives CRM outage, targets the assigned zone and omits guest d
   } finally { await cleanup(f.directory); }
 });
 
-test("the queue waits for CRM when a push provider needs more than five seconds", async () => {
+test("a slow push provider does not delay another recipient or abort an in-flight send", async () => {
   const f = await fixture();
   const output = path.join(f.directory, "push");
   const deliveries: string[] = [];
-  let first = true;
   const fetcher: typeof fetch = async (_url, init) => {
-    if (first) {
-      first = false;
+    const user = new Headers(init?.headers).get("x-faj-work-max-user") || "";
+    if (user === "101") {
       await new Promise<void>((resolve, reject) => {
         const signal = init?.signal;
         const timer = setTimeout(() => { signal?.removeEventListener("abort", aborted); resolve(); }, 5_500);
@@ -74,7 +73,7 @@ test("the queue waits for CRM when a push provider needs more than five seconds"
         signal?.addEventListener("abort", aborted, { once: true });
       });
     }
-    deliveries.push(new Headers(init?.headers).get("x-faj-work-max-user") || "");
+    deliveries.push(user);
     return Response.json({ delivered: true });
   };
   const options = { enabled: true, baseUrl: "https://crm.example.test", secret: "s".repeat(32), directory: output, fetcher };
@@ -82,7 +81,7 @@ test("the queue waits for CRM when a push provider needs more than five seconds"
     const queue = new FajWorkCallPushQueue(f.store, options);
     await queue.enqueue(f.call);
     await queue.flush();
-    assert.deepEqual(deliveries.sort(), ["101", "102"]);
+    assert.deepEqual(deliveries, ["102", "101"]);
     assert.deepEqual(JSON.parse(await readFile(path.join(output, "faj-work-call-push-outbox.json"), "utf8")), []);
   } finally { await cleanup(f.directory); }
 });
